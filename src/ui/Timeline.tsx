@@ -34,7 +34,7 @@ import {
   IconVideo,
   IconVolume,
 } from './Icons';
-import { counterpartTrackId, orderedTrackIds, useStudio } from './store';
+import { appendPointFor, counterpartTrackId, orderedTrackIds, useStudio } from './store';
 
 const TRACK_HEIGHT = 56;
 const MIN_TAIL_SECONDS = 10;
@@ -130,44 +130,48 @@ export function Timeline(): React.JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null);
   const lanesRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
-  const [dropTarget, setDropTarget] = useState<{ trackId: TrackId; at: Time } | null>(null);
+  const [dropTrackId, setDropTrackId] = useState<TrackId | null>(null);
 
   /**
    * Where a dropped asset would land, as a pixel rect, keyed by track.
+   *
+   * The pointer picks the track; the track picks the time. Media is appended after
+   * whatever is already on it, so a drop never lands mid-clip or opens a gap — the
+   * horizontal position of the pointer is deliberately ignored.
    *
    * Both the hovered track and its paired one get a ghost, because a clip with
    * video and audio is placed on both — showing only the hovered lane implies the
    * partner stream is being dropped somewhere unknown.
    */
   const dropGhosts = useMemo(() => {
-    if (!dropTarget || !draggingAssetId) return null;
+    if (!dropTrackId || !draggingAssetId) return null;
     const asset = project.assets[draggingAssetId];
-    if (!asset) return null;
+    const hovered = project.tracks[dropTrackId];
+    if (!asset || !hovered) return null;
 
     const duration = asset.video?.duration ?? asset.audio?.duration;
     if (!duration || !T.isPositive(duration)) return null;
 
-    const hovered = project.tracks[dropTarget.trackId];
-    if (!hovered) return null;
-
-    const partnerId = counterpartTrackId(project, sequenceId, dropTarget.trackId);
+    const partnerId = counterpartTrackId(project, sequenceId, dropTrackId);
     const partner = partnerId ? project.tracks[partnerId] : null;
     // Only show the partner ghost when the asset actually has that stream.
-    const partnerCarries =
-      partner && (partner.kind === 'video' ? Boolean(asset.video) : Boolean(asset.audio));
-    const hoveredCarries = hovered.kind === 'video' ? Boolean(asset.video) : Boolean(asset.audio);
+    const partnerCarries = Boolean(
+      partner && (partner.kind === 'video' ? asset.video : asset.audio),
+    );
+    const hoveredCarries = Boolean(hovered.kind === 'video' ? asset.video : asset.audio);
+    if (!hoveredCarries) return null;
 
-    const trackIdsWithGhost: TrackId[] = [];
-    if (hoveredCarries) trackIdsWithGhost.push(dropTarget.trackId);
+    const trackIdsWithGhost: TrackId[] = [dropTrackId];
     if (partnerCarries && partnerId) trackIdsWithGhost.push(partnerId);
 
+    const start = appendPointFor(project, sequenceId, dropTrackId, partnerCarries);
     return {
       trackIds: trackIdsWithGhost,
-      left: T.toSeconds(dropTarget.at) * pxPerSecond,
+      left: T.toSeconds(start) * pxPerSecond,
       width: Math.max(2, T.toSeconds(duration) * pxPerSecond),
       label: asset.name,
     };
-  }, [dropTarget, draggingAssetId, project, sequenceId, pxPerSecond]);
+  }, [dropTrackId, draggingAssetId, project, sequenceId, pxPerSecond]);
 
   /** Which track lane sits under a viewport Y coordinate. */
   const trackAtClientY = useCallback((clientY: number): TrackId | null => {
@@ -565,20 +569,20 @@ export function Timeline(): React.JSX.Element {
                   if (!event.dataTransfer.types.includes(ASSET_DRAG_TYPE)) return;
                   event.preventDefault();
                   event.dataTransfer.dropEffect = 'copy';
-                  setDropTarget({ trackId, at: timeAtClientX(event.clientX) });
+                  setDropTrackId(trackId);
                 }}
                 onDragLeave={(event) => {
                   if (event.currentTarget.contains(event.relatedTarget as Node)) return;
-                  setDropTarget((current) => (current?.trackId === trackId ? null : current));
+                  setDropTrackId((current) => (current === trackId ? null : current));
                 }}
                 onDrop={(event) => {
                   const assetId = event.dataTransfer.getData(ASSET_DRAG_TYPE);
-                  setDropTarget(null);
+                  setDropTrackId(null);
                   if (!assetId) return;
                   event.preventDefault();
-                  dropAssetOnTrack(assetId as never, trackId, timeAtClientX(event.clientX));
+                  dropAssetOnTrack(assetId as never, trackId);
                 }}
-                onDragEnd={() => setDropTarget(null)}
+                onDragEnd={() => setDropTrackId(null)}
                 onPointerDown={(event) => {
                   if (event.target === event.currentTarget) select([]);
                 }}
