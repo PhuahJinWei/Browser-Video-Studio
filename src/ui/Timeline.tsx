@@ -6,7 +6,7 @@
  * gesture collapses into one undo step (see `endGesture`).
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Command } from '../model/commands';
 import type { PreviewCache } from '../engine/previews';
 import {
@@ -38,6 +38,7 @@ import {
   IconRipple,
   IconSolo,
   IconSplit,
+  IconText,
   IconTrash,
   IconUnlink,
   IconUnlocked,
@@ -46,7 +47,9 @@ import {
 } from './Icons';
 import { appendPointFor, counterpartTrackId, orderedTrackIds, useStudio } from './store';
 
-const TRACK_HEIGHT = 56;
+/** Width of the sticky track-header column. */
+const HEADER_WIDTH = 168;
+const MIN_TRACK_HEIGHT = 36;
 const MIN_TAIL_SECONDS = 10;
 const SNAP_PIXELS = 8;
 
@@ -142,6 +145,8 @@ export function Timeline(): React.JSX.Element {
   const lanesRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [dropTrackId, setDropTrackId] = useState<TrackId | null>(null);
+  /** Time+offset to restore after a zoom, so the pointer stays over the same frame. */
+  const pendingAnchor = useRef<{ seconds: number; offset: number } | null>(null);
 
   /**
    * Where a dropped asset would land, as a pixel rect, keyed by track.
@@ -204,7 +209,8 @@ export function Timeline(): React.JSX.Element {
       const el = scrollRef.current;
       if (!el) return T.TIME_ZERO;
       const rect = el.getBoundingClientRect();
-      const x = clientX - rect.left + el.scrollLeft;
+      // The header column scrolls with the lanes now, so subtract its width.
+      const x = clientX - rect.left + el.scrollLeft - HEADER_WIDTH;
       return T.max(T.TIME_ZERO, T.fromSeconds(x / pxPerSecond, 100_000));
     },
     [pxPerSecond],
@@ -525,45 +531,67 @@ export function Timeline(): React.JSX.Element {
     if (event.buttons === 1) scrubFromEvent(event);
   };
 
+  /**
+   * Ctrl/Cmd+wheel zooms; a plain wheel is left alone so the container scrolls
+   * through the tracks, and Shift+wheel pans sideways. Zoom keeps whatever is under
+   * the pointer under the pointer — rescaling around the left edge makes the clip
+   * you are aiming at slide away.
+   */
   const onWheel = (event: React.WheelEvent): void => {
     if (!event.ctrlKey && !event.metaKey) return;
+    const el = scrollRef.current;
+    if (!el) return;
     event.preventDefault();
+
+    const rect = el.getBoundingClientRect();
+    const offset = event.clientX - rect.left - HEADER_WIDTH;
+    pendingAnchor.current = { seconds: (offset + el.scrollLeft) / pxPerSecond, offset };
     setZoom(pxPerSecond * (event.deltaY < 0 ? 1.15 : 1 / 1.15));
   };
+
+  /**
+   * Re-anchor after a zoom, once the DOM carries the new width.
+   *
+   * This has to be a layout effect: a `requestAnimationFrame` callback can run
+   * before React commits the re-render, so the correction lands against the old
+   * width and the content drifts anyway.
+   */
+  useLayoutEffect(() => {
+    const anchor = pendingAnchor.current;
+    const el = scrollRef.current;
+    if (!anchor || !el) return;
+    pendingAnchor.current = null;
+    el.scrollLeft = Math.max(0, anchor.seconds * pxPerSecond - anchor.offset);
+  }, [pxPerSecond]);
 
   const ticks = useMemo(() => buildTicks(totalSeconds, pxPerSecond), [totalSeconds, pxPerSecond]);
 
   return (
-    <div className="timeline" onWheel={onWheel}>
-      <div className="track-headers">
-        <div className="ruler-spacer" style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '0 6px' }}>
-          <button
-            className="icon"
-            title="Add a video track"
-            onClick={() => run({ type: 'addTrack', sequenceId, kind: 'video' }, 'Add video track')}
-          >
-            <IconPlus /> <IconVideo size={11} />
-          </button>
-          <button
-            className="icon"
-            title="Add an audio track"
-            onClick={() => run({ type: 'addTrack', sequenceId, kind: 'audio' }, 'Add audio track')}
-          >
-            <IconPlus /> <IconAudio size={11} />
-          </button>
-        </div>
-        {trackIds.map((trackId) => (
-          <TrackHeader
-            key={trackId}
-            track={getTrack(project, trackId)}
-            onCommand={run}
-            removable={trackIds.length > 1}
-          />
-        ))}
-      </div>
-
-      <div className="timeline-scroll" ref={scrollRef}>
-        <div className="timeline-inner" style={{ width: contentWidth }}>
+    <div className="timeline" ref={scrollRef} onWheel={onWheel}>
+      {/*
+        One scroll container for the headers, the ruler and the lanes. The header
+        column is sticky-left and the ruler sticky-top, so both stay put while the
+        whole thing scrolls in either direction. Two separately-scrolling panes
+        (the previous arrangement) clipped vertically and left tracks unreachable.
+      */}
+      <div className="timeline-grid" style={{ width: HEADER_WIDTH + contentWidth }}>
+        <div className="timeline-topbar">
+          <div className="timeline-corner" style={{ width: HEADER_WIDTH }}>
+            <button
+              className="icon"
+              title="Add a video track"
+              onClick={() => run({ type: 'addTrack', sequenceId, kind: 'video' }, 'Add video track')}
+            >
+              <IconPlus /> <IconVideo size={11} />
+            </button>
+            <button
+              className="icon"
+              title="Add an audio track"
+              onClick={() => run({ type: 'addTrack', sequenceId, kind: 'audio' }, 'Add audio track')}
+            >
+              <IconPlus /> <IconAudio size={11} />
+            </button>
+          </div>
           <div
             className="ruler"
             style={{ width: contentWidth }}
@@ -577,78 +605,86 @@ export function Timeline(): React.JSX.Element {
               </div>
             ))}
           </div>
+        </div>
 
-          <div ref={lanesRef}>
+        <div className="timeline-body" ref={lanesRef}>
           {trackIds.map((trackId) => {
             const track = getTrack(project, trackId);
+            const height = Math.max(MIN_TRACK_HEIGHT, track.height);
             return (
-              <div
-                key={trackId}
-                data-track-id={trackId}
-                className={`track-lane${track.locked ? ' locked' : ''}${
-                  dropGhosts?.trackIds.includes(trackId) ? ' drop-active' : ''
-                }`}
-                style={{ height: TRACK_HEIGHT }}
-                onDragOver={(event) => {
-                  if (!event.dataTransfer.types.includes(ASSET_DRAG_TYPE)) return;
-                  event.preventDefault();
-                  event.dataTransfer.dropEffect = 'copy';
-                  setDropTrackId(trackId);
-                }}
-                onDragLeave={(event) => {
-                  if (event.currentTarget.contains(event.relatedTarget as Node)) return;
-                  setDropTrackId((current) => (current === trackId ? null : current));
-                }}
-                onDrop={(event) => {
-                  const assetId = event.dataTransfer.getData(ASSET_DRAG_TYPE);
-                  setDropTrackId(null);
-                  if (!assetId) return;
-                  event.preventDefault();
-                  dropAssetOnTrack(assetId as never, trackId);
-                }}
-                onDragEnd={() => setDropTrackId(null)}
-                onPointerDown={(event) => {
-                  if (event.target === event.currentTarget) select([]);
-                }}
-                onContextMenu={(event) => {
-                  if (event.target === event.currentTarget) openLaneMenu(event, trackId);
-                }}
-              >
-                {dropGhosts?.trackIds.includes(trackId) && (
-                  <div
-                    className="drop-ghost"
-                    style={{ left: dropGhosts.left, width: dropGhosts.width }}
-                  >
-                    <span>{dropGhosts.label}</span>
-                    {dropGhosts.newTrackNote && trackId === dropTrackId && (
-                      <span className="ghost-note">{dropGhosts.newTrackNote}</span>
-                    )}
-                  </div>
-                )}
-                {trackClips(project, trackId).map((clip) => (
-                  <ClipView
-                    key={clip.id}
-                    clip={clip}
-                    pxPerSecond={pxPerSecond}
-                    selected={selection.includes(clip.id)}
-                    preview={previewStyle(clip, pxPerSecond, previews)}
-                    onSelect={(additive, isolate) => {
-                      if (isolate) selectExact([clip.id]);
-                      else if (additive) toggleSelect(clip.id);
-                      else select([clip.id]);
-                    }}
-                    onDragStart={(event, kind) => startDrag(event, clip, kind)}
-                    onContextMenu={(event) => openClipMenu(event, clip)}
-                  />
-                ))}
+              <div className="timeline-row" key={trackId} style={{ height }}>
+                <TrackHeader
+                  track={track}
+                  onCommand={run}
+                  removable={trackIds.length > 1}
+                  width={HEADER_WIDTH}
+                />
+                <div
+                  data-track-id={trackId}
+                  className={`track-lane${track.locked ? ' locked' : ''}${
+                    dropGhosts?.trackIds.includes(trackId) ? ' drop-active' : ''
+                  }`}
+                  style={{ width: contentWidth }}
+                  onDragOver={(event) => {
+                    if (!event.dataTransfer.types.includes(ASSET_DRAG_TYPE)) return;
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = 'copy';
+                    setDropTrackId(trackId);
+                  }}
+                  onDragLeave={(event) => {
+                    if (event.currentTarget.contains(event.relatedTarget as Node)) return;
+                    setDropTrackId((current) => (current === trackId ? null : current));
+                  }}
+                  onDrop={(event) => {
+                    const assetId = event.dataTransfer.getData(ASSET_DRAG_TYPE);
+                    setDropTrackId(null);
+                    if (!assetId) return;
+                    event.preventDefault();
+                    dropAssetOnTrack(assetId as never, trackId);
+                  }}
+                  onDragEnd={() => setDropTrackId(null)}
+                  onPointerDown={(event) => {
+                    if (event.target === event.currentTarget) select([]);
+                  }}
+                  onContextMenu={(event) => {
+                    if (event.target === event.currentTarget) openLaneMenu(event, trackId);
+                  }}
+                >
+                  {dropGhosts?.trackIds.includes(trackId) && (
+                    <div
+                      className="drop-ghost"
+                      style={{ left: dropGhosts.left, width: dropGhosts.width }}
+                    >
+                      <span>{dropGhosts.label}</span>
+                      {dropGhosts.newTrackNote && trackId === dropTrackId && (
+                        <span className="ghost-note">{dropGhosts.newTrackNote}</span>
+                      )}
+                    </div>
+                  )}
+                  {trackClips(project, trackId).map((clip) => (
+                    <ClipView
+                      key={clip.id}
+                      clip={clip}
+                      pxPerSecond={pxPerSecond}
+                      selected={selection.includes(clip.id)}
+                      preview={previewStyle(clip, pxPerSecond, previews)}
+                      onSelect={(additive, isolate) => {
+                        if (isolate) selectExact([clip.id]);
+                        else if (additive) toggleSelect(clip.id);
+                        else select([clip.id]);
+                      }}
+                      onDragStart={(event, kind) => startDrag(event, clip, kind)}
+                      onContextMenu={(event) => openClipMenu(event, clip)}
+                    />
+                  ))}
+                </div>
               </div>
             );
           })}
-          </div>
 
           <div
             className="playhead"
-            style={{ left: T.toSeconds(playhead) * pxPerSecond, height: '100%' }}
+            style={{ left: HEADER_WIDTH + T.toSeconds(playhead) * pxPerSecond }}
           />
         </div>
       </div>
@@ -662,19 +698,40 @@ function TrackHeader({
   track,
   onCommand,
   removable,
+  width,
 }: {
   track: Track;
   onCommand: (command: Command, label: string) => void;
   removable: boolean;
+  width: number;
 }): React.JSX.Element {
   const menu = useContextMenu();
+  const [renaming, setRenaming] = useState(false);
+  const [draft, setDraft] = useState(track.name);
+
   const toggle = (props: Record<string, boolean>, label: string): void =>
     onCommand({ type: 'setTrackProps', trackId: track.id, props }, label);
 
   const remove = (): void =>
     onCommand({ type: 'removeTrack', trackId: track.id }, 'Remove track');
 
+  const startRename = (): void => {
+    setDraft(track.name);
+    setRenaming(true);
+  };
+
+  const commitRename = (): void => {
+    setRenaming(false);
+    const name = draft.trim();
+    // An empty name would leave the header blank with no way back to it.
+    if (name && name !== track.name) {
+      onCommand({ type: 'setTrackProps', trackId: track.id, props: { name } }, 'Rename track');
+    }
+  };
+
   const entries: MenuEntry[] = [
+    { label: 'Rename track…', icon: <IconText />, onSelect: startRename },
+    'separator',
     ...(track.kind === 'audio'
       ? [
           {
@@ -713,15 +770,36 @@ function TrackHeader({
   return (
     <div
       className="track-header"
-      style={{ height: TRACK_HEIGHT }}
+      style={{ width }}
       onContextMenu={(event) => menu.open(event, entries)}
     >
       <span className="track-kind">
         {track.kind === 'audio' ? <IconAudio size={12} /> : <IconVideo size={12} />}
       </span>
-      <span className="label" title={track.name}>
-        {track.name}
-      </span>
+      {renaming ? (
+        <input
+          className="rename-input"
+          value={draft}
+          autoFocus
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commitRename}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') commitRename();
+            if (event.key === 'Escape') setRenaming(false);
+            event.stopPropagation();
+          }}
+          // The lane below would otherwise start a selection under the field.
+          onPointerDown={(event) => event.stopPropagation()}
+        />
+      ) : (
+        <span
+          className="label"
+          title={`${track.name} — double-click to rename`}
+          onDoubleClick={startRename}
+        >
+          {track.name}
+        </span>
+      )}
       {track.kind === 'audio' ? (
         <>
           <button

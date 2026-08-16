@@ -499,63 +499,65 @@ input[type='range'] {
 
 /* --------------------------------------------------------------- timeline */
 
+/*
+  A single scroll container holding the header column, the ruler and the lanes.
+  The header column is sticky-left and the ruler sticky-top, so both stay in place
+  while everything scrolls together. The previous arrangement — two panes, each
+  `overflow-y: hidden` — clipped vertically and made tracks past the fold
+  completely unreachable.
+*/
 .timeline {
   min-width: 0;
-  display: grid;
-  grid-template-columns: 160px minmax(0, 1fr);
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
   background: var(--panel);
+  position: relative;
 }
 
-.track-headers {
-  border-right: 1px solid var(--line);
-  overflow: hidden;
-  background: var(--panel);
+.timeline-grid {
+  position: relative;
+  min-width: 100%;
 }
-.track-headers .ruler-spacer {
-  height: var(--ruler-h);
+
+.timeline-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: flex;
+  background: var(--panel-2);
   border-bottom: 1px solid var(--line);
 }
-.track-header {
+
+.timeline-corner {
+  position: sticky;
+  left: 0;
+  z-index: 7;
+  flex: none;
+  height: var(--ruler-h);
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 0 8px;
-  border-bottom: 1px solid var(--line);
-  font-size: 12px;
-}
-.track-header .track-kind {
-  color: var(--muted);
-  display: flex;
-  flex: none;
-}
-.track-header .label {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  padding: 0 6px;
+  background: var(--panel-2);
+  border-right: 1px solid var(--line);
 }
 
-.timeline-scroll {
-  overflow-x: auto;
-  overflow-y: hidden;
+.timeline-body {
   position: relative;
-  min-width: 0;
 }
-.timeline-inner {
-  position: relative;
+
+.timeline-row {
+  display: flex;
+  border-bottom: 1px solid var(--line);
 }
 
 .ruler {
   height: var(--ruler-h);
-  position: sticky;
-  top: 0;
-  border-bottom: 1px solid var(--line);
+  position: relative;
+  flex: none;
   background: var(--panel-2);
   cursor: pointer;
   user-select: none;
-  z-index: 3;
 }
 .ruler .tick {
   position: absolute;
@@ -570,9 +572,44 @@ input[type='range'] {
   pointer-events: none;
 }
 
+.track-header {
+  position: sticky;
+  left: 0;
+  z-index: 5;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  font-size: 12px;
+}
+.track-header .track-kind {
+  color: var(--muted);
+  display: flex;
+  flex: none;
+}
+.track-header .label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: text;
+}
+.track-header .label:hover {
+  color: var(--accent);
+}
+.track-header .rename-input {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 4px;
+  font-size: 12px;
+}
+
 .track-lane {
   position: relative;
-  border-bottom: 1px solid var(--line);
+  flex: none;
   background: repeating-linear-gradient(
     90deg,
     transparent,
@@ -583,6 +620,62 @@ input[type='range'] {
 }
 .track-lane.locked {
   background-color: rgba(255, 255, 255, 0.02);
+}
+.track-lane.drop-active {
+  /* Outline only. Flooding the lane read as "it will drop across the whole
+     track"; the ghost below is what shows where it actually lands. */
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.drop-ghost {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  border-radius: 4px;
+  border: 1px dashed var(--accent);
+  background: rgba(76, 141, 255, 0.22);
+  pointer-events: none;
+  z-index: 3;
+  display: flex;
+  align-items: flex-start;
+  overflow: hidden;
+}
+.drop-ghost .ghost-note {
+  margin-left: auto;
+  padding: 2px 6px;
+  font-size: 10px;
+  color: var(--accent);
+  background: rgba(10, 12, 16, 0.75);
+  border-radius: 0 0 0 4px;
+  white-space: nowrap;
+}
+.drop-ghost span {
+  padding: 2px 6px;
+  font-size: 11px;
+  color: var(--text);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+.playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--danger);
+  pointer-events: none;
+  z-index: 4;
+}
+.playhead::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -5px;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 8px solid var(--danger);
 }
 
 .clip {
