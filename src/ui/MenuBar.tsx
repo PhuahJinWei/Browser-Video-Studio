@@ -18,6 +18,7 @@ import {
   IconFile,
   IconFullscreen,
   IconGauge,
+  IconGroup,
   IconLink,
   IconLock,
   IconMarker,
@@ -30,6 +31,7 @@ import {
   IconText,
   IconTrash,
   IconUndo,
+  IconUngroup,
   IconUnlink,
   IconUnlocked,
   IconVideo,
@@ -134,6 +136,7 @@ export function MenuBar({ onExport }: { onExport: () => void }): React.JSX.Eleme
 
   // The first selected clip drives the Clip menu's toggles.
   const clip = selection.length > 0 ? project.clips[selection[0]!] : undefined;
+  const selectionHasGroup = selection.some((id) => project.clips[id]?.groupId);
   const linkedCount = clip?.linkGroupId
     ? Object.values(project.clips).filter((c) => c.linkGroupId === clip.linkGroupId).length
     : 0;
@@ -220,6 +223,21 @@ export function MenuBar({ onExport }: { onExport: () => void }): React.JSX.Eleme
           icon: <IconLink />,
           disabled: selection.length < 2,
           onSelect: () => run({ type: 'linkClips', clipIds: selection }, 'Link clips'),
+        },
+        'separator',
+        {
+          label: 'Group',
+          icon: <IconGroup />,
+          hint: 'Ctrl+G',
+          disabled: selection.length < 2,
+          onSelect: () => run({ type: 'groupClips', clipIds: selection }, 'Group clips'),
+        },
+        {
+          label: 'Ungroup',
+          icon: <IconUngroup />,
+          hint: 'Ctrl+Shift+G',
+          disabled: !selectionHasGroup,
+          onSelect: () => run({ type: 'ungroupClips', clipIds: selection }, 'Ungroup clips'),
         },
         'separator',
         {

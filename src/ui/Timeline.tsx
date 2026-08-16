@@ -9,7 +9,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Command } from '../model/commands';
 import type { PreviewCache } from '../engine/previews';
-import { clipEnd, clipFitsTrack, getTrack, isMediaClip, trackClips } from '../model/selectors';
+import {
+  clipEnd,
+  clipFitsTrack,
+  getTrack,
+  isGrouped,
+  isMediaClip,
+  selectionUnit,
+  trackClips,
+} from '../model/selectors';
 import * as T from '../model/time';
 import type { Clip, ClipId, Project, Time, Track, TrackId } from '../model/types';
 import { useContextMenu, type MenuEntry } from './ContextMenu';
@@ -22,6 +30,8 @@ import {
   IconSkipStart,
   IconClose,
   IconEye,
+  IconGroup,
+  IconUngroup,
   IconEyeOff,
   IconLock,
   IconMuted,
@@ -109,6 +119,7 @@ export function Timeline(): React.JSX.Element {
   const runMany = useStudio((s) => s.runMany);
   const endGesture = useStudio((s) => s.endGesture);
   const select = useStudio((s) => s.select);
+  const selectExact = useStudio((s) => s.selectExact);
   const toggleSelect = useStudio((s) => s.toggleSelect);
   const setPlayhead = useStudio((s) => s.setPlayhead);
   const setZoom = useStudio((s) => s.setZoom);
@@ -282,27 +293,25 @@ export function Timeline(): React.JSX.Element {
         return;
       }
 
-      if (drag.kind === 'trim-in') {
-        const to = snap(T.add(drag.originStart, delta), excluded);
-        const commands: Command[] = drag.groupIds.map((id) => ({
-          type: 'trimClip',
-          clipId: id,
-          edge: 'in',
-          to,
-        }));
-        runMany(commands, 'Trim clip', `trim-in:${drag.clipId}`);
-        return;
-      }
+      // Trimming applies the same *delta* to every member, not the same absolute
+      // edge. For a linked A/V pair the two are identical, since the clips are
+      // coincident; for a group of unrelated clips at different positions, a shared
+      // absolute edge would land before another clip's start and be rejected.
+      const edge: 'in' | 'out' = drag.kind === 'trim-in' ? 'in' : 'out';
+      const anchor = edge === 'in' ? drag.originStart : T.add(drag.originStart, drag.originDuration);
+      const snapped = snap(T.add(anchor, delta), excluded);
+      const shift = T.sub(snapped, anchor);
 
-      const originalEnd = T.add(drag.originStart, drag.originDuration);
-      const to = snap(T.add(originalEnd, delta), excluded);
-      const commands: Command[] = drag.groupIds.map((id) => ({
-        type: 'trimClip',
-        clipId: id,
-        edge: 'out',
-        to,
-      }));
-      runMany(commands, 'Trim clip', `trim-out:${drag.clipId}`);
+      const commands: Command[] = drag.groupIds
+        .map((id) => project.clips[id])
+        .filter((c): c is Clip => c !== undefined)
+        .map((c) => ({
+          type: 'trimClip' as const,
+          clipId: c.id,
+          edge,
+          to: T.add(edge === 'in' ? c.start : clipEnd(c), shift),
+        }));
+      runMany(commands, 'Trim clip', `trim-${edge}:${drag.clipId}`);
     };
 
     const up = (): void => {
@@ -324,14 +333,12 @@ export function Timeline(): React.JSX.Element {
     const track = getTrack(project, clip.trackId);
     if (track.locked || clip.locked) return;
 
-    if (!selection.includes(clip.id)) select([clip.id]);
-
-    // Linked clips (a video and its own audio) move and trim together.
-    const groupIds = clip.linkGroupId
-      ? Object.values(project.clips)
-          .filter((c) => c.linkGroupId === clip.linkGroupId)
-          .map((c) => c.id)
-      : [clip.id];
+    // Alt isolates a single clip out of its unit, for the times you need to nudge
+    // just the audio without detaching it permanently.
+    const isolate = event.altKey;
+    const groupIds = isolate ? [clip.id] : selectionUnit(project, clip.id);
+    if (isolate) selectExact([clip.id]);
+    else if (!selection.includes(clip.id)) select([clip.id]);
 
     setDrag({
       kind,
@@ -384,6 +391,21 @@ export function Timeline(): React.JSX.Element {
         icon: <IconLink />,
         disabled: selection.length < 2,
         onSelect: () => run({ type: 'linkClips', clipIds: selection }, 'Link clips'),
+      },
+      'separator',
+      {
+        label: 'Group',
+        icon: <IconGroup />,
+        hint: 'Ctrl+G',
+        disabled: selection.length < 2,
+        onSelect: () => run({ type: 'groupClips', clipIds: selection }, 'Group clips'),
+      },
+      {
+        label: 'Ungroup',
+        icon: <IconUngroup />,
+        hint: 'Ctrl+Shift+G',
+        disabled: !selection.some((id) => project.clips[id]?.groupId),
+        onSelect: () => run({ type: 'ungroupClips', clipIds: selection }, 'Ungroup clips'),
       },
       'separator',
       {
@@ -610,9 +632,11 @@ export function Timeline(): React.JSX.Element {
                     pxPerSecond={pxPerSecond}
                     selected={selection.includes(clip.id)}
                     preview={previewStyle(clip, pxPerSecond, previews)}
-                    onSelect={(additive) =>
-                      additive ? toggleSelect(clip.id) : select([clip.id])
-                    }
+                    onSelect={(additive, isolate) => {
+                      if (isolate) selectExact([clip.id]);
+                      else if (additive) toggleSelect(clip.id);
+                      else select([clip.id]);
+                    }}
                     onDragStart={(event, kind) => startDrag(event, clip, kind)}
                     onContextMenu={(event) => openClipMenu(event, clip)}
                   />
@@ -784,7 +808,7 @@ function ClipView({
   pxPerSecond: number;
   selected: boolean;
   preview: React.CSSProperties | undefined;
-  onSelect: (additive: boolean) => void;
+  onSelect: (additive: boolean, isolate: boolean) => void;
   onDragStart: (event: React.PointerEvent, kind: DragKind) => void;
   onContextMenu: (event: React.MouseEvent) => void;
 }): React.JSX.Element {
@@ -794,19 +818,19 @@ function ClipView({
 
   return (
     <div
-      className={`clip ${kindClass}${selected ? ' selected' : ''}${clip.enabled ? '' : ' disabled'}${preview ? ' has-preview' : ''}`}
+      className={`clip ${kindClass}${selected ? ' selected' : ''}${clip.enabled ? '' : ' disabled'}${preview ? ' has-preview' : ''}${isGrouped(clip) ? ' grouped' : ''}`}
       style={{ left, width, ...preview }}
       title={`${clip.name} · ${T.formatDuration(clip.duration, { decimals: 2 })}`}
       onContextMenu={onContextMenu}
       onPointerDown={(event) => {
-        onSelect(event.shiftKey || event.metaKey || event.ctrlKey);
+        onSelect(event.shiftKey || event.metaKey || event.ctrlKey, event.altKey);
         onDragStart(event, 'move');
       }}
     >
       <div
         className="handle left"
         onPointerDown={(event) => {
-          onSelect(false);
+          onSelect(false, event.altKey);
           onDragStart(event, 'trim-in');
         }}
       />
@@ -814,7 +838,7 @@ function ClipView({
       <div
         className="handle right"
         onPointerDown={(event) => {
-          onSelect(false);
+          onSelect(false, event.altKey);
           onDragStart(event, 'trim-out');
         }}
       />

@@ -607,6 +607,10 @@ input[type='range'] {
 .clip.title {
   background: linear-gradient(var(--title), #8c5722);
 }
+/* Grouped clips carry a dotted top edge, so it is visible why they move as one. */
+.clip.grouped {
+  border-top: 2px dotted var(--warn);
+}
 .clip.selected {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
@@ -684,6 +688,24 @@ input[type='range'] {
   text-align: right;
 }
 
+.unit-badge {
+  margin: 0 0 10px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-strong);
+  color: var(--muted);
+  font-size: 11px;
+}
+.section-label {
+  margin: 14px 0 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
 .effect-card {
   border: 1px solid var(--line);
   border-radius: 6px;

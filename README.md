@@ -18,6 +18,7 @@ Import → edit → play → export, end to end, entirely on your machine.
 - **Playback** with A/V sync driven by the audio clock. Seeking mid-playback re-bases the transport and keeps rolling.
 - **Fullscreen preview**, falling back to an in-page focus mode where the browser disallows fullscreen.
 - **Export** to MP4 (H.264 + AAC) or WebM (VP9 + Opus) at any resolution and bitrate.
+- **Group and link.** Clicking a clip selects everything linked or grouped with it, so delete and the inspector act on the whole unit; Alt-click isolates one member. Ctrl+G / Ctrl+Shift+G group and ungroup.
 - **Undo/redo** where a whole drag collapses into one step.
 - **Autosave** to OPFS — reload the page and your project comes back, media included.
 - **A live pipeline panel** showing decode, composite and encode timings as they happen.

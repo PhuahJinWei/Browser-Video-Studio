@@ -180,6 +180,10 @@ export type Command =
   | { readonly type: 'unlinkClips'; readonly clipIds: readonly ClipId[] }
   /** Put these clips into one link group so they move and trim together. */
   | { readonly type: 'linkClips'; readonly clipIds: readonly ClipId[] }
+  /** Put these clips into one group. Groups select, move and trim as a unit. */
+  | { readonly type: 'groupClips'; readonly clipIds: readonly ClipId[] }
+  /** Dissolve the groups these clips belong to. */
+  | { readonly type: 'ungroupClips'; readonly clipIds: readonly ClipId[] }
 
   // -- effects --------------------------------------------------------------
   | {

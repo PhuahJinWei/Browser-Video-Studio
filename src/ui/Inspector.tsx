@@ -9,14 +9,16 @@
 import { defaultParams, EFFECT_REGISTRY, effectDefinition, listEffects } from '../engine/effects';
 import type { ClipParamKey } from '../model/commands';
 import { staticParam } from '../model/params';
-import { isAudioClip, isMediaClip, isVisualClip } from '../model/selectors';
+import { isAudioClip, isMediaClip, isVisualClip, selectionUnit } from '../model/selectors';
 import * as T from '../model/time';
 import type {
   AudioClip,
   BlendMode,
   Clip,
+  ClipId,
   EffectInstance,
   Param,
+  Project,
   TitleClip,
   VideoClip,
 } from '../model/types';
@@ -36,23 +38,63 @@ const BLEND_MODES: readonly BlendMode[] = [
 export function Inspector(): React.JSX.Element {
   const history = useStudio((s) => s.history);
   const selection = useStudio((s) => s.selection);
-  const clip = selection.length === 1 ? history.present.project.clips[selection[0]!] : undefined;
+  const project = history.present.project;
+
+  const selected = selection.map((id) => project.clips[id]).filter((c): c is Clip => Boolean(c));
+
+  /**
+   * A linked or grouped selection is one thing to the user, so the inspector treats
+   * it as one subject: the visual half supplies the picture controls and the audio
+   * half the sound controls. Without this, selection expanding to a unit would leave
+   * the inspector permanently showing "2 clips selected" and nothing editable.
+   */
+  const unit = asSingleUnit(project, selection);
 
   return (
     <div className="panel">
       <div className="panel-head">Inspector</div>
       <div className="panel-body">
-        {!clip && (
+        {!unit && (
           <p className="hint">
-            {selection.length > 1
-              ? `${selection.length} clips selected.`
+            {selected.length > 1
+              ? `${selected.length} clips selected.`
               : 'Select a clip to edit its properties.'}
           </p>
         )}
-        {clip && <ClipInspector clip={clip} />}
+        {unit && <UnitInspector unit={unit} />}
       </div>
     </div>
   );
+}
+
+/** The clips of one link/group unit, split by the role each plays. */
+interface SelectedUnit {
+  readonly clips: readonly Clip[];
+  readonly visual: VideoClip | TitleClip | null;
+  readonly audio: AudioClip | null;
+  /** The clip that names the unit and owns its timing. */
+  readonly primary: Clip;
+  readonly isUnit: boolean;
+}
+
+function asSingleUnit(project: Project, selection: readonly ClipId[]): SelectedUnit | null {
+  if (selection.length === 0) return null;
+  const clips = selection.map((id) => project.clips[id]).filter((c): c is Clip => Boolean(c));
+  if (clips.length === 0) return null;
+
+  // Every selected clip must belong to the same unit for this to be one subject.
+  const expected = new Set(selectionUnit(project, clips[0]!.id));
+  if (clips.length !== expected.size || !clips.every((c) => expected.has(c.id))) return null;
+
+  const visual = clips.find(isVisualClip) ?? null;
+  const audio = clips.find(isAudioClip) ?? null;
+  return {
+    clips,
+    visual,
+    audio,
+    primary: visual ?? audio ?? clips[0]!,
+    isUnit: clips.length > 1,
+  };
 }
 
 /** Static numeric value of a parameter, or a fallback when it is keyframed. */
@@ -60,22 +102,29 @@ function staticValue(param: Param<number>, fallback: number): number {
   return param.kind === 'static' ? param.value : fallback;
 }
 
-function ClipInspector({ clip }: { clip: Clip }): React.JSX.Element {
+function UnitInspector({ unit }: { unit: SelectedUnit }): React.JSX.Element {
   const run = useStudio((s) => s.run);
+  const runMany = useStudio((s) => s.runMany);
   const endGesture = useStudio((s) => s.endGesture);
   const history = useStudio((s) => s.history);
   const project = history.present.project;
 
-  const effects = clip.effects
+  const clip = unit.primary;
+  // Effects from every member, so a linked pair shows its video and audio
+  // effects in one list rather than hiding half of them.
+  const effects = unit.clips
+    .flatMap((c) => c.effects)
     .map((id) => project.effects[id])
     .filter((e): e is EffectInstance => e !== undefined);
 
-  const setParam = (key: ClipParamKey, value: number, label: string): void =>
-    run(
-      { type: 'setClipParam', clipId: clip.id, key, param: staticParam(value) },
-      label,
-      `${key}:${clip.id}`,
-    );
+  const paramSetter =
+    (targetId: ClipId) =>
+    (key: ClipParamKey, value: number, label: string): void =>
+      run(
+        { type: 'setClipParam', clipId: targetId, key, param: staticParam(value) },
+        label,
+        `${key}:${targetId}`,
+      );
 
   return (
     <>
@@ -85,8 +134,12 @@ function ClipInspector({ clip }: { clip: Clip }): React.JSX.Element {
           type="text"
           value={clip.name}
           onChange={(event) =>
-            run(
-              { type: 'setClipProps', clipId: clip.id, props: { name: event.target.value } },
+            runMany(
+              unit.clips.map((c) => ({
+                type: 'setClipProps' as const,
+                clipId: c.id,
+                props: { name: event.target.value },
+              })),
               'Rename clip',
               `rename:${clip.id}`,
             )
@@ -94,6 +147,13 @@ function ClipInspector({ clip }: { clip: Clip }): React.JSX.Element {
           onBlur={endGesture}
         />
       </div>
+
+      {unit.isUnit && (
+        <p className="unit-badge">
+          {unit.clips.some((c) => c.groupId) ? 'Grouped' : 'Linked'} · {unit.clips.length}{' '}
+          clips edited together
+        </p>
+      )}
 
       <div className="field">
         <label>Timing</label>
@@ -114,8 +174,12 @@ function ClipInspector({ clip }: { clip: Clip }): React.JSX.Element {
         <div className="value-row">
           <button
             onClick={() =>
-              run(
-                { type: 'setClipProps', clipId: clip.id, props: { enabled: !clip.enabled } },
+              runMany(
+                unit.clips.map((c) => ({
+                  type: 'setClipProps' as const,
+                  clipId: c.id,
+                  props: { enabled: !clip.enabled },
+                })),
                 clip.enabled ? 'Disable clip' : 'Enable clip',
               )
             }
@@ -124,24 +188,45 @@ function ClipInspector({ clip }: { clip: Clip }): React.JSX.Element {
           </button>
           <button
             onClick={() =>
-              run(
-                { type: 'setClipProps', clipId: clip.id, props: { locked: !clip.locked } },
+              runMany(
+                unit.clips.map((c) => ({
+                  type: 'setClipProps' as const,
+                  clipId: c.id,
+                  props: { locked: !clip.locked },
+                })),
                 clip.locked ? 'Unlock clip' : 'Lock clip',
               )
             }
           >
             {clip.locked ? 'Unlock' : 'Lock'}
           </button>
-          <button onClick={() => run({ type: 'removeClips', clipIds: [clip.id] }, 'Delete clip')}>
+          <button
+            onClick={() =>
+              run({ type: 'removeClips', clipIds: unit.clips.map((c) => c.id) }, 'Delete clip')
+            }
+          >
             Delete
           </button>
         </div>
       </div>
 
-      {isVisualClip(clip) && (
-        <VisualControls clip={clip} setParam={setParam} onCommit={endGesture} />
+      {unit.visual && (
+        <VisualControls
+          clip={unit.visual}
+          setParam={paramSetter(unit.visual.id)}
+          onCommit={endGesture}
+        />
       )}
-      {isAudioClip(clip) && <AudioControls clip={clip} setParam={setParam} onCommit={endGesture} />}
+      {unit.audio && (
+        <>
+          {unit.visual && <p className="section-label">Audio</p>}
+          <AudioControls
+            clip={unit.audio}
+            setParam={paramSetter(unit.audio.id)}
+            onCommit={endGesture}
+          />
+        </>
+      )}
 
       <hr style={{ border: 0, borderTop: '1px solid var(--line)', margin: '14px 0' }} />
 
@@ -156,10 +241,15 @@ function ClipInspector({ clip }: { clip: Clip }): React.JSX.Element {
           onChange={(event) => {
             const type = event.target.value;
             if (!type) return;
+            // Audio effects belong on the audio half of a linked pair.
+            const target =
+              EFFECT_REGISTRY[type]?.category === 'audio'
+                ? (unit.audio ?? clip)
+                : (unit.visual ?? clip);
             run(
               {
                 type: 'addEffect',
-                owner: { kind: 'clip', clipId: clip.id },
+                owner: { kind: 'clip', clipId: target.id },
                 effectType: type,
                 params: defaultParams(type),
               },
@@ -170,9 +260,7 @@ function ClipInspector({ clip }: { clip: Clip }): React.JSX.Element {
           <option value="">Add effect…</option>
           {listEffects()
             .filter((definition) =>
-              clip.kind === 'audio'
-                ? definition.category === 'audio'
-                : definition.category !== 'audio',
+              definition.category === 'audio' ? Boolean(unit.audio) : Boolean(unit.visual),
             )
             .map((definition) => (
               <option key={definition.type} value={definition.type}>

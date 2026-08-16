@@ -11,6 +11,7 @@
  * in which case reopening asks for the file again.
  */
 
+import { migrateProject } from '../model/migrations';
 import type { AssetId, Project, ProjectId } from '../model/types';
 import { validateProject } from '../model/validate';
 import * as opfs from './opfs';
@@ -102,8 +103,12 @@ export interface LoadedProject {
 
 /** Read a project and whatever media is still cached beside it. */
 export async function loadProject(id: ProjectId): Promise<LoadedProject | null> {
-  const project = await opfs.readJson<Project>(`${projectDir(id)}/project.json`);
-  if (!project) return null;
+  const stored = await opfs.readJson<unknown>(`${projectDir(id)}/project.json`);
+  if (!stored) return null;
+
+  // Bring an older file forward before validating, since validation rejects any
+  // schema version that is not the current one.
+  const project = migrateProject(stored);
 
   // A corrupt or partially written file must not take the whole app down.
   const violations = validateProject(project);

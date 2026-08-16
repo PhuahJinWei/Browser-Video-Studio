@@ -323,6 +323,16 @@ export function trimClipIn(clip: Clip, delta: Time): Clip {
  */
 export type LinkRemap = Map<string, string>;
 
+/** Same idea for user groups, kept apart so the two memberships stay independent. */
+export interface MembershipRemap {
+  readonly links: LinkRemap;
+  readonly groups: LinkRemap;
+}
+
+export function newMembershipRemap(): MembershipRemap {
+  return { links: new Map(), groups: new Map() };
+}
+
 function remapLinkGroup(
   linkGroupId: string | null,
   ids: IdSource,
@@ -343,7 +353,7 @@ export function splitClipAt(
   clip: Clip,
   at: Time,
   ids: IdSource,
-  linkRemap?: LinkRemap,
+  linkRemap?: MembershipRemap,
 ): [Clip, Clip] {
   const delta = T.sub(at, clip.start);
   const left: Clip = { ...clip, duration: delta };
@@ -354,7 +364,10 @@ export function splitClipAt(
     ...rightBase,
     id: rightId,
     effects: cloneEffects(d, clip.effects, T.neg(delta), ids),
-    linkGroupId: remapLinkGroup(clip.linkGroupId, ids, linkRemap),
+    // Both memberships split the same way: the right-hand halves form their own
+    // link and their own group, so the two sides of a cut are independent.
+    linkGroupId: remapLinkGroup(clip.linkGroupId, ids, linkRemap?.links),
+    groupId: remapLinkGroup(clip.groupId, ids, linkRemap?.groups),
   };
   return [left, right];
 }
@@ -374,7 +387,7 @@ export function clearRangeOnTrack(
   range: TimeRange,
   ids: IdSource,
   exclude: ReadonlySet<ClipId> = new Set(),
-  linkRemap?: LinkRemap,
+  linkRemap?: MembershipRemap,
 ): void {
   if (T.isZero(range.duration)) return;
   const rangeStart = range.start;

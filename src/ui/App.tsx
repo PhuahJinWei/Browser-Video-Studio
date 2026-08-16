@@ -101,6 +101,12 @@ function Studio(): React.JSX.Element {
         redoEdit();
         return;
       }
+      if (mod && event.key.toLowerCase() === 'g') {
+        event.preventDefault();
+        if (event.shiftKey) run({ type: 'ungroupClips', clipIds: selection }, 'Ungroup clips');
+        else if (selection.length >= 2) run({ type: 'groupClips', clipIds: selection }, 'Group clips');
+        return;
+      }
       if (mod && event.key.toLowerCase() === 'a') {
         event.preventDefault();
         selectClips(Object.keys(project.clips) as never);

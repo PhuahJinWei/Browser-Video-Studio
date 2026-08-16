@@ -18,7 +18,8 @@ import {
   draftSequence,
   draftTrack,
   type Draft,
-  type LinkRemap,
+  type MembershipRemap,
+  newMembershipRemap,
   ownerOfEffect,
   pruneBrokenTransitions,
   putClip,
@@ -115,7 +116,7 @@ function splitAcross(
   trackId: TrackId,
   at: Time,
   ids: IdSource,
-  linkRemap: LinkRemap,
+  linkRemap: MembershipRemap,
 ): void {
   for (const clipId of [...draftTrack(d, trackId).clipIds]) {
     const clip = draftClip(d, clipId);
@@ -194,7 +195,7 @@ function handleInsertClip(d: Draft, cmd: Extract<Command, { type: 'insertClip' }
   assertClipFits(clip, track);
   if (d.clips[clip.id]) throw new ModelError(`Clip "${clip.id}" already exists`);
 
-  const linkRemap: LinkRemap = new Map();
+  const linkRemap = newMembershipRemap();
   if ((cmd.mode ?? 'overwrite') === 'insert') {
     splitAcross(d, cmd.trackId, clip.start, ids, linkRemap);
     rippleTrack(d, cmd.trackId, clip.start, clip.duration);
@@ -261,7 +262,7 @@ function handleMoveClips(d: Draft, cmd: Extract<Command, { type: 'moveClips' }>,
   }
 
   const movedIds = new Set<ClipId>(moving.map(({ clip }) => clip.id));
-  const linkRemap: LinkRemap = new Map();
+  const linkRemap = newMembershipRemap();
   const overwrite = (cmd.mode ?? 'block') === 'overwrite';
 
   for (const { move, clip } of moving) {
@@ -346,7 +347,7 @@ function handleSlipClip(d: Draft, cmd: Extract<Command, { type: 'slipClip' }>): 
 }
 
 function handleSplitClips(d: Draft, cmd: Extract<Command, { type: 'splitClips' }>, ids: IdSource): void {
-  const linkRemap: LinkRemap = new Map();
+  const linkRemap = newMembershipRemap();
   for (const trackId of cmd.trackIds) {
     assertUnlocked(draftTrack(d, trackId));
     splitAcross(d, trackId, cmd.at, ids, linkRemap);
@@ -422,6 +423,47 @@ function handleUnlinkClips(d: Draft, cmd: Extract<Command, { type: 'unlinkClips'
   for (const clip of Object.values(d.clips)) {
     if (clip.linkGroupId && groups.has(clip.linkGroupId)) {
       d.clips[clip.id] = { ...clip, linkGroupId: null };
+    }
+  }
+}
+
+/**
+ * Put clips into one group.
+ *
+ * Grouping something already grouped merges the groups, so selecting any member
+ * still reaches everything the user expects — groups stay flat rather than nesting.
+ */
+function handleGroupClips(d: Draft, cmd: Extract<Command, { type: 'groupClips' }>, ids: IdSource): void {
+  if (cmd.clipIds.length < 2) return;
+
+  const existing = new Set<string>();
+  for (const clipId of cmd.clipIds) {
+    const clip = draftClip(d, clipId);
+    if (clip.groupId) existing.add(clip.groupId);
+  }
+
+  const groupId = `gr_${ids.clip()}`;
+  const members = new Set<ClipId>(cmd.clipIds);
+  for (const clip of Object.values(d.clips)) {
+    if (clip.groupId && existing.has(clip.groupId)) members.add(clip.id);
+  }
+  for (const clipId of members) {
+    d.clips[clipId] = { ...draftClip(d, clipId), groupId };
+  }
+}
+
+/** Dissolve whole groups, not just the clips passed in. */
+function handleUngroupClips(d: Draft, cmd: Extract<Command, { type: 'ungroupClips' }>): void {
+  const groups = new Set<string>();
+  for (const clipId of cmd.clipIds) {
+    const clip = d.clips[clipId];
+    if (clip?.groupId) groups.add(clip.groupId);
+  }
+  if (groups.size === 0) return;
+
+  for (const clip of Object.values(d.clips)) {
+    if (clip.groupId && groups.has(clip.groupId)) {
+      d.clips[clip.id] = { ...clip, groupId: null };
     }
   }
 }
@@ -595,6 +637,10 @@ export function runCommand(d: Draft, command: Command, ids: IdSource): void {
       return handleUnlinkClips(d, command);
     case 'linkClips':
       return handleLinkClips(d, command, ids);
+    case 'groupClips':
+      return handleGroupClips(d, command, ids);
+    case 'ungroupClips':
+      return handleUngroupClips(d, command);
     case 'addEffect':
       return handleAddEffect(d, command, ids);
     case 'removeEffect':

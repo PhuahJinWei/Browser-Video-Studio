@@ -9,7 +9,7 @@
  *  - Additive evolution: bump SCHEMA_VERSION and add a migration; never repurpose a field.
  */
 
-export const SCHEMA_VERSION = 1 as const;
+export const SCHEMA_VERSION = 2 as const;
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -249,8 +249,19 @@ export interface ClipBase {
   readonly locked: boolean;
   readonly color: string | null;  // label colour
   readonly effects: readonly EffectInstanceId[]; // ordered stack, applied bottom→top
-  /** Linked clips move/trim together (e.g. a video clip and its own audio). */
+  /**
+   * A/V link: a video clip and its own audio from the same source. Members move and
+   * trim together, and splitting re-pairs the halves.
+   */
   readonly linkGroupId: string | null;
+  /**
+   * User grouping of arbitrary clips. Members select, move and trim together, but
+   * unlike a link they are unrelated media — so trims apply as a shared *delta*
+   * rather than a shared absolute edge.
+   *
+   * Separate from `linkGroupId` so a group can contain linked pairs.
+   */
+  readonly groupId: string | null;
 }
 
 export interface MediaClipFields {

@@ -27,7 +27,7 @@ import {
   undo,
   type History,
 } from '../model/history';
-import { getSequence, sequenceDuration, trackDuration } from '../model/selectors';
+import { expandSelection, getSequence, sequenceDuration, trackDuration } from '../model/selectors';
 import * as T from '../model/time';
 import type {
   Asset,
@@ -95,6 +95,9 @@ export interface StudioState {
   canUndoEdit: () => boolean;
   canRedoEdit: () => boolean;
 
+  /** Selects exactly these clips, without expanding to their units. */
+  selectExact: (clipIds: readonly ClipId[]) => void;
+  /** Selects these clips and everything linked or grouped with them. */
   select: (clipIds: readonly ClipId[]) => void;
   toggleSelect: (clipId: ClipId) => void;
 
@@ -221,13 +224,26 @@ export const useStudio = create<StudioState>((set, get) => ({
   canUndoEdit: () => canUndo(get().history),
   canRedoEdit: () => canRedo(get().history),
 
-  select: (clipIds) => set({ selection: clipIds }),
+  selectExact: (clipIds) => set({ selection: clipIds }),
+
+  /**
+   * Selecting one member of a link or group selects the whole unit.
+   *
+   * Delete, ripple delete and the inspector all read `selection`, so without this
+   * they disagree with dragging — which already moves a unit together. That gap is
+   * what let deleting a video clip leave its audio orphaned on the track.
+   */
+  select: (clipIds) => set({ selection: expandSelection(get().project(), clipIds) }),
+
   toggleSelect: (clipId) => {
+    const project = get().project();
+    const unit = expandSelection(project, [clipId]);
     const selection = get().selection;
+    const alreadyIn = unit.every((id) => selection.includes(id));
     set({
-      selection: selection.includes(clipId)
-        ? selection.filter((id) => id !== clipId)
-        : [...selection, clipId],
+      selection: alreadyIn
+        ? selection.filter((id) => !unit.includes(id))
+        : [...selection, ...unit.filter((id) => !selection.includes(id))],
     });
   },
 

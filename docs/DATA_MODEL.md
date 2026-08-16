@@ -59,6 +59,7 @@ applyAll(project, commands, ids?) => Project   // all-or-nothing batch
 |---|---|
 | Tracks | `addTrack`, `removeTrack`, `setTrackProps`, `moveTrack` |
 | Clips | `insertClip` (overwrite \| insert), `removeClips` (lift \| ripple), `moveClips`, `trimClip` (in/out, ripple), `slipClip`, `splitClips`, `setClipProps` |
+| Grouping | `groupClips`, `ungroupClips`, `linkClips`, `unlinkClips` |
 | Clip properties | `setClipParam` (opacity, gain, pan, `transform.*`, `crop.*` — static or keyframed), `setClipFade`, `setClipBlendMode`, `setClipSpeed` |
 | Effects | `addEffect`, `removeEffect`, `moveEffect`, `setEffectParam`, `setEffectEnabled` |
 | Assets | `addAsset`, `removeAsset`, `setAssetStatus` |

@@ -96,6 +96,65 @@ export function clipFitsTrack(clipKind: Clip['kind'], trackKind: Track['kind']):
 }
 
 // ---------------------------------------------------------------------------
+// Selection units
+// ---------------------------------------------------------------------------
+
+/**
+ * Every clip that behaves as one with `clipId`.
+ *
+ * A clip can belong to an A/V link *and* to a user group, and the two can overlap
+ * (grouping a title with a linked pair), so this is the transitive closure over both
+ * relations rather than a lookup of either. Selection, dragging, trimming, deleting
+ * and the inspector all go through it, which is what stops them disagreeing about
+ * what "this clip" means — the bug where deleting a video left its audio behind.
+ *
+ * Returns `[clipId]` for a clip that is on its own.
+ */
+export function selectionUnit(p: Project, clipId: ClipId): readonly ClipId[] {
+  const first = p.clips[clipId];
+  if (!first) return [];
+  if (!first.linkGroupId && !first.groupId) return [clipId];
+
+  const unit = new Set<ClipId>([clipId]);
+  const seenLinks = new Set<string>();
+  const seenGroups = new Set<string>();
+  const queue: Clip[] = [first];
+
+  while (queue.length > 0) {
+    const clip = queue.pop()!;
+    for (const [id, seen] of [
+      [clip.linkGroupId, seenLinks],
+      [clip.groupId, seenGroups],
+    ] as const) {
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      for (const candidate of Object.values(p.clips)) {
+        const matches = seen === seenLinks ? candidate.linkGroupId === id : candidate.groupId === id;
+        if (matches && !unit.has(candidate.id)) {
+          unit.add(candidate.id);
+          queue.push(candidate);
+        }
+      }
+    }
+  }
+  return [...unit];
+}
+
+/** Expand a selection so every member brings its whole unit along. */
+export function expandSelection(p: Project, clipIds: readonly ClipId[]): readonly ClipId[] {
+  const expanded = new Set<ClipId>();
+  for (const clipId of clipIds) {
+    for (const id of selectionUnit(p, clipId)) expanded.add(id);
+  }
+  return [...expanded];
+}
+
+/** True when the clip is in a user group (as opposed to only an A/V link). */
+export function isGrouped(clip: Clip): boolean {
+  return clip.groupId !== null && clip.groupId !== undefined;
+}
+
+// ---------------------------------------------------------------------------
 // Clip geometry
 // ---------------------------------------------------------------------------
 

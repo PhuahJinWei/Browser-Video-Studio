@@ -140,6 +140,7 @@ export function createVideoClip(
     color: null,
     effects: [],
     linkGroupId: opts.linkGroupId ?? null,
+    groupId: null,
     assetId: opts.assetId,
     sourceIn: opts.sourceIn ?? T.TIME_ZERO,
     speed: opts.speed ?? 1,
@@ -164,6 +165,7 @@ export function createAudioClip(opts: CreateMediaClipOptions): AudioClip {
     color: null,
     effects: [],
     linkGroupId: opts.linkGroupId ?? null,
+    groupId: null,
     assetId: opts.assetId,
     sourceIn: opts.sourceIn ?? T.TIME_ZERO,
     speed: opts.speed ?? 1,
@@ -198,6 +200,7 @@ export function createTitleClip(opts: CreateTitleClipOptions): TitleClip {
     color: null,
     effects: [],
     linkGroupId: null,
+    groupId: null,
     text: opts.text,
     style: {
       fontFamily: 'Inter, system-ui, sans-serif',

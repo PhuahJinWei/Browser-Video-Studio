@@ -263,6 +263,22 @@ export const IconExitFullscreen = (p: IconProps): React.JSX.Element => (
   </Svg>
 );
 
+export const IconGroup = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <rect x="3" y="3" width="8" height="8" rx="1.5" />
+    <rect x="13" y="13" width="8" height="8" rx="1.5" />
+    <path d="M13 7h4a2 2 0 012 2v2M11 17H7a2 2 0 01-2-2v-2" />
+  </Svg>
+);
+
+export const IconUngroup = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <rect x="3" y="3" width="8" height="8" rx="1.5" />
+    <rect x="13" y="13" width="8" height="8" rx="1.5" />
+    <path d="M3 3l18 18" />
+  </Svg>
+);
+
 export const IconMarker = (p: IconProps): React.JSX.Element => (
   <Svg {...p}>
     <path d="M6 3v18M6 4h13l-3 4 3 4H6" />
