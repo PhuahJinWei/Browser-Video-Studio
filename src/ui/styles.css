@@ -202,11 +202,21 @@ input[type='range'] {
   text-align: right;
 }
 
+/*
+ * The centre column had no floor, so in a narrow window the side panels kept their
+ * full width and the preview -- and the transport under it -- were squeezed to
+ * nothing. Each column now has a minimum, and below the point where all three fit
+ * the row scrolls rather than clipping whatever falls off the end.
+ */
 .middle {
   min-width: 0;
   display: grid;
-  grid-template-columns: var(--bin-w) minmax(0, 1fr) var(--inspector-w);
+  grid-template-columns:
+    minmax(190px, var(--bin-w))
+    minmax(300px, 1fr)
+    minmax(220px, var(--inspector-w));
   min-height: 0;
+  overflow-x: auto;
   border-bottom: 1px solid var(--line);
 }
 
@@ -458,16 +468,20 @@ input[type='range'] {
   background: var(--accent);
 }
 
+/*
+ * Wraps rather than scrolls. It used to be a hidden-scrollbar strip like the app
+ * header, which is right for a row of buttons -- you can push it sideways to reach
+ * them -- but wrong here: the timecode sits at the far end, so under a narrow
+ * preview it went off-screen entirely with nothing to say so. Wrapping puts it on
+ * its own line instead, and nothing is ever out of reach.
+ */
 .transport-buttons {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 3px;
+  row-gap: 5px;
   min-width: 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.transport-buttons::-webkit-scrollbar {
-  display: none;
 }
 .transport-buttons button {
   flex: none;
