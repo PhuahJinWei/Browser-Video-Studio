@@ -8,6 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Command } from '../model/commands';
+import type { PreviewCache } from '../engine/previews';
 import { clipEnd, getTrack, isMediaClip, trackClips } from '../model/selectors';
 import * as T from '../model/time';
 import type { Clip, ClipId, Time, Track, TrackId } from '../model/types';
@@ -45,6 +46,9 @@ export function Timeline(): React.JSX.Element {
   const setPlayhead = useStudio((s) => s.setPlayhead);
   const setZoom = useStudio((s) => s.setZoom);
   const duration = useStudio((s) => s.duration);
+  const previews = useStudio((s) => s.previews);
+  // Previews arrive asynchronously; this re-renders the lanes when one lands.
+  useStudio((s) => s.previewVersion);
 
   const pxPerSecond = sequence.view.zoom;
   const playhead = sequence.view.playhead;
@@ -275,6 +279,7 @@ export function Timeline(): React.JSX.Element {
                     clip={clip}
                     pxPerSecond={pxPerSecond}
                     selected={selection.includes(clip.id)}
+                    preview={previewStyle(clip, pxPerSecond, previews)}
                     onSelect={(additive) =>
                       additive ? toggleSelect(clip.id) : select([clip.id])
                     }
@@ -360,16 +365,49 @@ function TrackHeader({
   );
 }
 
+/**
+ * Position the asset-wide filmstrip or waveform behind a clip.
+ *
+ * The image covers the whole source, so trimming and moving only shift a CSS
+ * background — no re-rasterisation, and clips cut from one asset share one image.
+ */
+function previewStyle(
+  clip: Clip,
+  pxPerSecond: number,
+  previews: PreviewCache | null,
+): React.CSSProperties | undefined {
+  if (!previews || !isMediaClip(clip)) return undefined;
+
+  const preview =
+    clip.kind === 'audio' ? previews.getWaveform(clip.assetId) : previews.getFilmstrip(clip.assetId);
+  if (!preview) return undefined;
+
+  const speed = Math.abs(clip.speed) || 1;
+  // Pixels the whole source would occupy at this zoom and speed.
+  const sourceWidth = (preview.sourceSeconds / speed) * pxPerSecond;
+  if (!Number.isFinite(sourceWidth) || sourceWidth <= 0) return undefined;
+
+  const offset = (T.toSeconds(clip.sourceIn) / speed) * pxPerSecond;
+  return {
+    backgroundImage: `url(${preview.url})`,
+    backgroundSize: `${sourceWidth}px 100%`,
+    backgroundPosition: `${-offset}px center`,
+    backgroundRepeat: 'no-repeat',
+  };
+}
+
 function ClipView({
   clip,
   pxPerSecond,
   selected,
+  preview,
   onSelect,
   onDragStart,
 }: {
   clip: Clip;
   pxPerSecond: number;
   selected: boolean;
+  preview: React.CSSProperties | undefined;
   onSelect: (additive: boolean) => void;
   onDragStart: (event: React.PointerEvent, kind: DragKind) => void;
 }): React.JSX.Element {
@@ -379,8 +417,8 @@ function ClipView({
 
   return (
     <div
-      className={`clip ${kindClass}${selected ? ' selected' : ''}${clip.enabled ? '' : ' disabled'}`}
-      style={{ left, width }}
+      className={`clip ${kindClass}${selected ? ' selected' : ''}${clip.enabled ? '' : ' disabled'}${preview ? ' has-preview' : ''}`}
+      style={{ left, width, ...preview }}
       title={`${clip.name} · ${T.formatDuration(clip.duration, { decimals: 2 })}`}
       onPointerDown={(event) => {
         onSelect(event.shiftKey || event.metaKey || event.ctrlKey);
@@ -435,4 +473,3 @@ function formatTick(seconds: number, step: number): string {
   return `${minutes}:${remainder.toFixed(decimals).padStart(decimals > 0 ? 4 : 2, '0')}`;
 }
 
-export { isMediaClip };

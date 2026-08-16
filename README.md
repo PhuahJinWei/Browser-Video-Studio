@@ -12,6 +12,7 @@ Import → edit → play → export, end to end, entirely on your machine.
 
 - **Import** MP4, MOV, MKV, WebM, MP3, WAV, FLAC, OGG. Probed for codec, resolution, frame rate and audio layout.
 - **Timeline** with any number of video and audio tracks. Drag, trim, split, ripple delete, snapping to clip edges and the playhead. Linked video/audio move together. Per-track mute, solo, lock, hide.
+- **Filmstrips and waveforms** on clips, rasterised once per asset and positioned by CSS, so trimming and moving cost nothing.
 - **Preview** composited on the GPU — transform, opacity, crop, eight blend modes, colour adjustment and gaussian blur.
 - **Titles** rendered to a canvas and composited like any other layer.
 - **Playback** with A/V sync driven by the audio clock.
@@ -22,7 +23,7 @@ Import → edit → play → export, end to end, entirely on your machine.
 
 ### Not yet built
 
-Thumbnail and waveform overlays on clips, transitions, keyframe editing UI (the model supports keyframes; nothing exposes them yet), proxies for 4K, nested sequences, speed ramps, and everything in L4–L5 below.
+Transitions, keyframe editing UI (the model supports keyframes; nothing exposes them yet), proxies for 4K, nested sequences, speed ramps, and everything in L4–L5 below.
 
 ## Develop
 
@@ -68,7 +69,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design, where th
 | | |
 |---|---|
 | **L1** | ✅ Built — import, timeline, playback, effects, export, autosave |
-| **L2** | Transitions, keyframe editor, clip thumbnails and waveforms, text styling |
+| **L2** | Transitions, keyframe editor, text styling, multi-select marquee |
 | **L3** | Proxies for 4K, nested sequences, speed ramps, audio DSP, WASM codec fallback |
 | **L4** | On-device AI: background segmentation, Whisper captions, scene detection, silence removal |
 | **L5** | Node-graph effects, GPU scopes, colour management |

@@ -148,7 +148,7 @@ both:                               → Muxer (mp4-muxer / webm-muxer) → OPFS 
 
 | Layer | Scope |
 |---|---|
-| **L1 — built** | Import (mp4/mov/webm/mkv/mp3/wav/flac/ogg), timeline with N video + N audio tracks, trim/split/move/ripple, snapping, playback with A/V sync, transform/opacity/crop/blend, titles, GPU colour + blur effects, export H.264+AAC / VP9+Opus, undo/redo with gesture coalescing, OPFS autosave, live pipeline telemetry. **Not yet:** thumbnails and waveform overlays on clips. |
+| **L1 — built** | Import (mp4/mov/webm/mkv/mp3/wav/flac/ogg), timeline with N video + N audio tracks, trim/split/move/ripple, snapping, playback with A/V sync, transform/opacity/crop/blend, titles, GPU colour + blur effects, export H.264+AAC / VP9+Opus, undo/redo with gesture coalescing, OPFS autosave, live pipeline telemetry. clip filmstrips and waveforms. |
 | L2 | Effect registry + GPU effects (color, blur, sharpen, LUT, crop, transform), transitions (cross-dissolve, wipes), keyframes + curves, audio gain/pan/fades, text/titles (canvas → texture), export presets |
 | L3 | Proxies + quality toggle, nested sequences, speed/retime, audio DSP (EQ, compressor, ducking), markers, larger-format import (WASM demux/decode fallback opt-in via coi-serviceworker) |
 | L4 | On-device AI: person segmentation (bg blur/remove), Whisper captions, scene cut detection, silence removal, auto-reframe |

@@ -11,6 +11,7 @@ import { create } from 'zustand';
 import { Engine, type EngineTelemetry } from '../engine/engine';
 import { exportSequence, suggestBitrate, type ExportProgress, type ExportSettings } from '../engine/export';
 import { MediaLibrary } from '../engine/media';
+import { PreviewCache } from '../engine/previews';
 import { apply, type Command } from '../model/commands';
 import { randomIdSource } from '../model/ids';
 import { createProject } from '../model/factories';
@@ -57,6 +58,9 @@ export interface StudioState {
   /** Source blobs, kept so the engine can reopen assets. */
   mediaFiles: ReadonlyMap<AssetId, File>;
   telemetry: EngineTelemetry | null;
+  previews: PreviewCache | null;
+  /** Bumped whenever a preview finishes, so the timeline re-renders. */
+  previewVersion: number;
   exportProgress: ExportProgress | null;
   status: string;
   error: string | null;
@@ -92,6 +96,7 @@ export interface StudioState {
   setError: (error: string | null) => void;
   toggleTelemetry: () => void;
   restoreLastProject: () => Promise<void>;
+  buildPreviews: () => Promise<void>;
 }
 
 /**
@@ -124,6 +129,8 @@ export const useStudio = create<StudioState>((set, get) => ({
   engine: null,
   mediaFiles: new Map(),
   telemetry: null,
+  previews: null,
+  previewVersion: 0,
   exportProgress: null,
   status: 'Import media to begin.',
   error: null,
@@ -266,6 +273,9 @@ export const useStudio = create<StudioState>((set, get) => ({
       status: `${commands.length} imported${failures.length ? `, ${failures.length} failed` : ''}.`,
       error: failures.length > 0 ? failures.join('\n') : null,
     });
+    // Filmstrips and waveforms are built in the background; the timeline picks them
+    // up when they land rather than blocking the import on them.
+    void get().buildPreviews();
   },
 
   /** Append an asset at the playhead, linking its video and audio parts. */
@@ -345,11 +355,15 @@ export const useStudio = create<StudioState>((set, get) => ({
 
   newProject: () => {
     const { project, sequenceId } = starterProject();
+    // Release the old previews' object URLs; nothing references them any more.
+    get().previews?.dispose();
     set({
       history: initHistory(project),
       sequenceId,
       selection: [],
       mediaFiles: new Map(),
+      previews: null,
+      previewVersion: 0,
       status: 'New project.',
       error: null,
     });
@@ -428,6 +442,30 @@ export const useStudio = create<StudioState>((set, get) => ({
   setError: (error) => set({ error }),
   toggleTelemetry: () => set({ showTelemetry: !get().showTelemetry }),
 
+  /**
+   * Build filmstrips and waveforms for every ready asset.
+   *
+   * Runs after import and after a restore, never during an edit — decoding a whole
+   * source to rasterise a strip competes with the preview for decoder time.
+   */
+  buildPreviews: async () => {
+    const engine = get().engine;
+    if (!engine) return;
+
+    let cache = get().previews;
+    if (!cache) {
+      cache = new PreviewCache(engine.media);
+      set({ previews: cache });
+    }
+
+    const assets = Object.values(get().project().assets);
+    for (const asset of assets) {
+      if (asset.status.state !== 'ready') continue;
+      await cache.ensure(asset.id, asset.video?.duration ?? null, asset.audio?.duration ?? null);
+      set({ previewVersion: get().previewVersion + 1 });
+    }
+  },
+
   /** Reopen the most recently saved project, if there is one. */
   restoreLastProject: async () => {
     try {
@@ -435,11 +473,14 @@ export const useStudio = create<StudioState>((set, get) => ({
       if (!loaded) return;
 
       const sequenceId = loaded.project.activeSequenceId;
+      get().previews?.dispose();
       set({
         history: initHistory(loaded.project),
         sequenceId,
         selection: [],
         mediaFiles: loaded.media,
+        previews: null,
+        previewVersion: 0,
         status:
           loaded.missingAssetIds.length > 0
             ? `Reopened "${loaded.project.name}" — ${loaded.missingAssetIds.length} file(s) need re-importing.`
@@ -451,6 +492,7 @@ export const useStudio = create<StudioState>((set, get) => ({
         engine.setSequence(sequenceId);
         for (const [assetId, file] of loaded.media) await engine.openAsset(assetId, file);
         engine.requestRender(get().playhead());
+        void get().buildPreviews();
       }
     } catch (err) {
       set({ error: `Could not reopen the last project: ${err instanceof Error ? err.message : err}` });

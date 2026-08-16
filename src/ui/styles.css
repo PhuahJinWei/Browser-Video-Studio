@@ -531,3 +531,23 @@ input[type='range'] {
   padding-left: 20px;
   color: var(--muted);
 }
+
+/* Clip previews: the filmstrip / waveform sits behind the label. */
+.clip.has-preview {
+  background-color: transparent;
+}
+.clip.has-preview::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.clip.video.has-preview::before {
+  background: linear-gradient(rgba(61, 111, 212, 0.42), rgba(47, 86, 166, 0.42));
+}
+.clip.audio.has-preview::before {
+  background: linear-gradient(rgba(47, 158, 111, 0.55), rgba(33, 122, 85, 0.55));
+}
+.clip.has-preview .clip-name {
+  position: relative;
+}
