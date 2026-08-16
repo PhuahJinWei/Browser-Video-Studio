@@ -1,0 +1,22 @@
+{
+  "name": "browser-video-studio",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "description": "A client-side non-linear video editor built on WebCodecs, WebGPU and OPFS. No backend, no uploads.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1",
+    "vitest": "^4.1.10"
+  }
+}

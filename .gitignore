@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+.vite/
+*.tsbuildinfo
+*.local
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json

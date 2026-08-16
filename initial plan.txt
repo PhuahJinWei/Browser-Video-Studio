@@ -1,0 +1,176 @@
+# 5. Browser Video Studio
+
+This one showcases how absurdly powerful browsers have become.
+
+Build something resembling:
+
+```text
+Premiere / CapCut / DaVinci Resolve
+
+                 ↓
+
+             WEBSITE
+```
+
+Not a full competitor, obviously.
+
+A focused experimental video editor.
+
+WebCodecs exposes JavaScript interfaces for encoding and decoding audio, video and images, giving applications lower-level access to browser codec implementations than ordinary `<video>` playback. ([W3C][6])
+
+---
+
+## Basic UI
+
+```text
+┌─────────────────────────────────────────────────────┐
+│ BrowserCut                                          │
+├────────────┬────────────────────────────┬───────────┤
+│            │                            │           │
+│ Media      │                            │ Effects   │
+│            │       VIDEO PREVIEW        │           │
+│ beach.mp4  │                            │ Blur      │
+│ music.mp3  │                            │ Color     │
+│ title.png  │                            │ Sharpen   │
+│            │                            │ AI        │
+├────────────┴────────────────────────────┴───────────┤
+│                                                     │
+│ Video  ███████████████████│████████████             │
+│ Audio  ███████████████████│██████████████████       │
+│ Text        ██████         │                         │
+│                            ▲                        │
+│                           00:31                      │
+└─────────────────────────────────────────────────────┘
+```
+
+The user imports a video.
+
+Nothing gets uploaded.
+
+```text
+video.mp4
+    │
+    ▼
+WebCodecs
+    │
+    ▼
+decoded frames
+    │
+    ▼
+WebGPU
+    │
+    ▼
+effects
+    │
+    ▼
+WebCodecs
+    │
+    ▼
+output video
+```
+
+WebCodecs provides the codec-level encode/decode interfaces, while WebGPU can handle image-processing work on the GPU. ([W3C][7])
+
+---
+
+# Features you could implement
+
+Start very small:
+
+### V1
+
+```text
+Import video
+
+Trim
+
+Split
+
+Rearrange
+
+Export
+```
+
+Then:
+
+### V2
+
+```text
+Brightness
+Contrast
+Saturation
+Blur
+Crop
+Rotate
+```
+
+GPU shaders make those effects interesting technically.
+
+Then:
+
+### V3
+
+Add live effects.
+
+```text
+Original                  Modified
+
+┌────────────┐            ┌────────────┐
+│            │            │            │
+│   person   │    →       │   person   │
+│ background │            │   blurred  │
+│            │            │ background │
+└────────────┘            └────────────┘
+```
+
+Then combine your first idea:
+
+### V4 — local AI
+
+```text
+video
+  ↓
+AI object detection
+  ↓
+person detected
+  ↓
+GPU background removal
+  ↓
+WebCodecs
+  ↓
+final video
+```
+
+Everything could happen client-side.
+
+ONNX Runtime Web already demonstrates browser inference using WebGPU, so this combination of local AI inference and a browser-side media pipeline is practical territory to experiment with. ([ONNX Runtime][8])
+
+---
+
+# One particularly fun feature
+
+**“Show me what the browser is doing.”**
+
+While exporting:
+
+```text
+EXPORTING
+
+Decode
+████████████████████████ 100%
+
+AI segmentation
+███████████████░░░░░░░░  67%
+
+GPU effects
+██████████████░░░░░░░░░  61%
+
+Encode
+████████░░░░░░░░░░░░░░░  35%
+
+GPU usage: 82%
+Memory: 1.7GB
+FPS processing: 114
+```
+
+For a portfolio this is fantastic because the visitor can literally watch your engineering pipeline work.
