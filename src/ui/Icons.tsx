@@ -334,6 +334,65 @@ export const IconToggleOn = (p: IconProps): React.JSX.Element => (
   </Svg>
 );
 
+export const IconCamera = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <path d="M3 8a2 2 0 012-2h2.5l1.5-2h6l1.5 2H21a0 0 0 010 0 2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V8z" />
+    <circle cx="12" cy="13" r="3.6" />
+  </Svg>
+);
+
+/** The selection tool: an arrow pointer. */
+export const IconCursor = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <path d="M5 3l14 8-6 1.5L10 19 5 3z" />
+  </Svg>
+);
+
+/** The razor: a blade that cuts a clip where you click. */
+export const IconRazor = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <path d="M4 4l8 8-3 3-5-5V4z" />
+    <path d="M12 12l8 8" />
+    <path d="M9 15l-4 4" />
+  </Svg>
+);
+
+export const IconFolder = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <path d="M3 7a2 2 0 012-2h4l2 2.5h8a2 2 0 012 2V18a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
+  </Svg>
+);
+
+export const IconFolderPlus = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <path d="M3 7a2 2 0 012-2h4l2 2.5h8a2 2 0 012 2V18a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
+    <path d="M12 11.5v5M9.5 14h5" />
+  </Svg>
+);
+
+/** Up one folder. */
+export const IconFolderUp = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <path d="M3 7a2 2 0 012-2h4l2 2.5h8a2 2 0 012 2V18a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
+    <path d="M12 17v-5M9.5 14.5L12 12l2.5 2.5" />
+  </Svg>
+);
+
+export const IconSearch = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <circle cx="10.5" cy="10.5" r="6.5" />
+    <path d="M15.5 15.5L21 21" />
+  </Svg>
+);
+
+/** Something is wrong with an asset — missing bytes, or a failed probe. */
+export const IconAlert = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <path d="M12 4l9 16H3l9-16z" />
+    <path d="M12 10v4M12 17h.01" />
+  </Svg>
+);
+
 export const IconToggleOff = (p: IconProps): React.JSX.Element => (
   <Svg {...p}>
     <rect x="2" y="7" width="20" height="10" rx="5" />

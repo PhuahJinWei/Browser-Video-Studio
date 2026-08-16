@@ -19,6 +19,11 @@ export default defineConfig({
   worker: {
     format: 'es',
   },
+  server: {
+    // Honour PORT when something upstream assigns one, so a second dev server can
+    // run alongside a first instead of colliding on 5173.
+    port: Number(process.env.PORT) || 5173,
+  },
   test: {
     globals: true,
     // Model layer is pure and runs in Node. Engine tests will opt into a

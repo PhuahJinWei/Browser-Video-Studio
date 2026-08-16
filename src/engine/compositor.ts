@@ -552,8 +552,12 @@ export class Compositor {
   /**
    * Read the last composite back as RGBA bytes.
    * Rows are unpadded, i.e. exactly `width * 4` bytes each.
+   *
+   * The buffer is stated to be a plain `ArrayBuffer` rather than the default
+   * `ArrayBufferLike`, so the result can go straight into an `ImageData` without a
+   * second copy of a whole frame.
    */
-  async readPixels(): Promise<Uint8ClampedArray> {
+  async readPixels(): Promise<Uint8ClampedArray<ArrayBuffer>> {
     const { width, height } = this.size;
     const bytesPerRow = align(width * 4, 256);
 

@@ -7,9 +7,12 @@ import * as T from '../model/time';
 import { ContextMenuProvider } from './ContextMenu';
 import { ExportDialog } from './ExportDialog';
 import {
+  IconCamera,
+  IconCursor,
   IconExport,
   IconGauge,
   IconInspector,
+  IconRazor,
   IconRedo,
   IconSplit,
   IconTrash,
@@ -91,6 +94,9 @@ function Studio(): React.JSX.Element {
   const importViaPicker = useStudio((s) => s.importViaPicker);
   const playhead = useStudio((s) => s.playhead);
   const duration = useStudio((s) => s.duration);
+  const tool = useStudio((s) => s.tool);
+  const setTool = useStudio((s) => s.setTool);
+  const grabScreenshot = useStudio((s) => s.grabScreenshot);
 
   const project = history.present.project;
   const sequence = project.sequences[sequenceId]!;
@@ -161,6 +167,36 @@ function Studio(): React.JSX.Element {
         return;
       }
 
+      /*
+       * Bare-letter shortcuts, checked separately because they must not fire with a
+       * modifier held. Ctrl+C and Ctrl+V belong to the clipboard and Ctrl+S to the
+       * browser; falling through to the switch below would have Ctrl+C pick up the
+       * razor and Ctrl+S cut the timeline.
+       */
+      if (!mod) {
+        switch (event.key) {
+          // Premiere's tool keys, and neither letter is claimed by anything else.
+          case 'v':
+          case 'V':
+            setTool('select');
+            return;
+          case 'c':
+          case 'C':
+            setTool('razor');
+            return;
+          case 's':
+            splitAtPlayhead();
+            return;
+          case 'S':
+            // Shift+S grabs the frame, next to the key that cuts it.
+            event.preventDefault();
+            void grabScreenshot();
+            return;
+          default:
+            break;
+        }
+      }
+
       const frame = T.frameDuration(sequence.frameRate);
       switch (event.key) {
         case ' ':
@@ -183,9 +219,9 @@ function Studio(): React.JSX.Element {
           event.preventDefault();
           setPlayhead(duration());
           break;
-        case 's':
-        case 'S':
-          splitAtPlayhead();
+        // Escape puts the razor away, matching what it does everywhere else.
+        case 'Escape':
+          setTool('select');
           break;
         case 'Delete':
         case 'Backspace':
@@ -215,6 +251,8 @@ function Studio(): React.JSX.Element {
     sequence.frameRate,
     sequenceId,
     setPlayhead,
+    setTool,
+    grabScreenshot,
     togglePlay,
     undoEdit,
   ]);
@@ -230,6 +268,29 @@ function Studio(): React.JSX.Element {
 
         <span className="header-divider" />
 
+        {/*
+          The tool the timeline is in. A mode needs somewhere permanent to show it,
+          or the razor becomes a cursor that changed for no visible reason.
+        */}
+        <span className="toolgroup">
+          <button
+            className={`icon${tool === 'select' ? ' on' : ''}`}
+            title="Selection tool (V)"
+            onClick={() => setTool('select')}
+          >
+            <IconCursor />
+          </button>
+          <button
+            className={`icon${tool === 'razor' ? ' on' : ''}`}
+            title="Razor — click a clip to cut it there (C)"
+            onClick={() => setTool('razor')}
+          >
+            <IconRazor />
+          </button>
+        </span>
+
+        <span className="header-divider" />
+
         {/* The few actions worth reaching without opening a menu. */}
         <button className="icon" disabled={!canUndoEdit()} onClick={undoEdit} title="Undo (Ctrl+Z)">
           <IconUndo />
@@ -239,6 +300,13 @@ function Studio(): React.JSX.Element {
         </button>
         <button className="icon" title="Split at the playhead (S)" onClick={splitAtPlayhead}>
           <IconSplit />
+        </button>
+        <button
+          className="icon"
+          title="Save the current frame as a PNG (Shift+S)"
+          onClick={() => void grabScreenshot()}
+        >
+          <IconCamera />
         </button>
         <button
           className="icon"

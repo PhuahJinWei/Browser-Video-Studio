@@ -48,6 +48,8 @@ export class Engine {
   private playOriginWall = 0;
   private playUntil: Time = T.TIME_ZERO;
   private rendering = false;
+  /** The render loop currently draining, so a still can wait for it rather than race it. */
+  private draining: Promise<void> | null = null;
   private pendingSeek: Time | null = null;
   private lastRenderedAt: Time | null = null;
   /** Most recent time asked for, whether or not that render has finished yet. */
@@ -266,7 +268,60 @@ export class Engine {
       this.telemetry.droppedFrames++;
       return;
     }
-    void this.drainRenderQueue();
+    this.draining = this.drainRenderQueue();
+  }
+
+  /**
+   * A still of the composited frame at `at`, at full sequence resolution.
+   *
+   * Read back from the compositor's own render target, never from the canvas. A
+   * WebGPU canvas gives no guarantee that its drawing buffer survives presentation,
+   * so `canvas.toBlob` on it returns a blank or a stale frame often enough to be
+   * useless — while the render target is exactly what export already reads.
+   *
+   * The target holds straight (non-premultiplied) RGBA and is cleared transparent,
+   * whereas the canvas is presented over black. The readback is therefore composited
+   * onto black here, so a screenshot matches what the preview shows rather than
+   * coming out see-through wherever nothing was stacked.
+   */
+  async grabStill(at: Time, type = 'image/png', quality?: number): Promise<Blob> {
+    const compositor = this.compositor;
+    if (!compositor) throw new Error('No canvas is attached, so there is nothing to grab');
+
+    const sequence = this.getProject().sequences[this.sequenceId];
+    if (!sequence) throw new Error('No active sequence to grab a frame from');
+    const { width, height } = sequence.size;
+
+    // Let any preview frame already in flight finish, then hold the render queue:
+    // a playback frame landing mid-grab would swap the ping-pong targets and the
+    // readback would return someone else's composite.
+    await this.draining?.catch(() => undefined);
+    this.rendering = true;
+    let pixels: Uint8ClampedArray<ArrayBuffer>;
+    try {
+      await this.renderAt(at);
+      pixels = await compositor.readPixels();
+    } finally {
+      this.rendering = false;
+    }
+    // Anything that asked for a frame while we held the queue still wants one.
+    if (this.pendingSeek !== null) this.draining = this.drainRenderQueue();
+
+    const source = new OffscreenCanvas(width, height);
+    const sourceCtx = source.getContext('2d');
+    if (!sourceCtx) throw new Error('Could not get a 2D context to read the frame into');
+    sourceCtx.putImageData(new ImageData(pixels, width, height), 0, 0);
+
+    // `putImageData` replaces the destination alpha rather than blending into it,
+    // so the black has to go underneath a *drawn* copy, not behind a put one.
+    const out = new OffscreenCanvas(width, height);
+    const ctx = out.getContext('2d');
+    if (!ctx) throw new Error('Could not get a 2D context to compose the still');
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(source, 0, 0);
+
+    return out.convertToBlob({ type, ...(quality !== undefined ? { quality } : {}) });
   }
 
   private async drainRenderQueue(): Promise<void> {

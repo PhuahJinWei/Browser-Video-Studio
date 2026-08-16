@@ -7,6 +7,7 @@ import { useEffect, useState } from 'react';
 import { snapPoints } from '../model/selectors';
 import * as T from '../model/time';
 import {
+  IconCamera,
   IconExitFullscreen,
   IconFullscreen,
   IconNextEdit,
@@ -29,6 +30,7 @@ export function Transport(): React.JSX.Element {
   const setPlayhead = useStudio((s) => s.setPlayhead);
   const duration = useStudio((s) => s.duration);
   const splitAtPlayhead = useStudio((s) => s.splitAtPlayhead);
+  const grabScreenshot = useStudio((s) => s.grabScreenshot);
   const [expanded, setExpanded] = useState(false);
 
   // The browser owns native fullscreen state (Escape, F11, the window chrome), so
@@ -172,6 +174,13 @@ export function Transport(): React.JSX.Element {
 
         <button className="icon" title="Split at the playhead (S)" onClick={splitHere}>
           <IconSplit />
+        </button>
+        <button
+          className="icon"
+          title="Save this frame as a PNG (Shift+S)"
+          onClick={() => void grabScreenshot()}
+        >
+          <IconCamera />
         </button>
         <button
           className="icon"

@@ -268,7 +268,31 @@ export function validateProject(p: Project): readonly Violation[] {
     }
   }
 
+  // -- assets ---------------------------------------------------------------
+  for (const asset of Object.values(p.assets)) {
+    const at = `assets.${asset.id}`;
+    // Folders are paths, and the whole bin groups by string equality — an
+    // unnormalised one silently becomes a second folder with the same name.
+    if (typeof asset.folder !== 'string') {
+      out.push({ path: `${at}.folder`, message: 'Folder must be a string' });
+    } else if (asset.folder !== normalisedFolder(asset.folder)) {
+      out.push({
+        path: `${at}.folder`,
+        message: `Folder path is not normalised: "${asset.folder}"`,
+      });
+    }
+  }
+
   return out;
+}
+
+/** Local copy of the folder normaliser, so validation does not depend on the commands layer. */
+function normalisedFolder(folder: string): string {
+  return folder
+    .split('/')
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0)
+    .join('/');
 }
 
 function findNestingCycle(p: Project, sequenceId: SequenceId, visiting: Set<string>): boolean {

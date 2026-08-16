@@ -12,6 +12,7 @@ import { createPortal } from 'react-dom';
 import { renderMenuEntries, type MenuEntry } from './ContextMenu';
 import {
   IconAudio,
+  IconCamera,
   IconExport,
   IconEye,
   IconEyeOff,
@@ -24,6 +25,7 @@ import {
   IconLock,
   IconMarker,
   IconPlus,
+  IconRazor,
   IconRedo,
   IconRipple,
   IconSkipEnd,
@@ -126,6 +128,9 @@ export function MenuBar({ onExport }: { onExport: () => void }): React.JSX.Eleme
   const addTitle = useStudio((s) => s.addTitle);
   const addSolid = useStudio((s) => s.addSolid);
   const splitAtPlayhead = useStudio((s) => s.splitAtPlayhead);
+  const grabScreenshot = useStudio((s) => s.grabScreenshot);
+  const tool = useStudio((s) => s.tool);
+  const setTool = useStudio((s) => s.setTool);
   const inspectorOpen = useLayout((s) => s.inspectorOpen);
   const toggleInspector = useLayout((s) => s.toggleInspector);
   const importViaPicker = useStudio((s) => s.importViaPicker);
@@ -177,6 +182,12 @@ export function MenuBar({ onExport }: { onExport: () => void }): React.JSX.Eleme
           } },
         { label: 'Import media…', icon: <IconPlus />, hint: 'Ctrl+I', onSelect: () => void importViaPicker() },
         'separator',
+        {
+          label: 'Save this frame…',
+          icon: <IconCamera />,
+          hint: 'Shift+S',
+          onSelect: () => void grabScreenshot(),
+        },
         { label: 'Export…', icon: <IconExport />, hint: 'Ctrl+E', onSelect: onExport },
       ],
     },
@@ -214,6 +225,13 @@ export function MenuBar({ onExport }: { onExport: () => void }): React.JSX.Eleme
       title: 'Clip',
       entries: [
         { label: 'Split at playhead', icon: <IconSplit />, hint: 'S', onSelect: splitAtPlayhead },
+        {
+          label: tool === 'razor' ? 'Put the razor away' : 'Razor — cut where you click',
+          icon: <IconRazor />,
+          hint: tool === 'razor' ? 'V' : 'C',
+          checked: tool === 'razor',
+          onSelect: () => setTool(tool === 'razor' ? 'select' : 'razor'),
+        },
         'separator',
         {
           label: 'Detach audio from video',

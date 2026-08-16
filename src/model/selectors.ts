@@ -987,6 +987,74 @@ export function snapPoints(
   return points.filter((t, i) => i === 0 || !T.eq(t, points[i - 1]!));
 }
 
+// ---------------------------------------------------------------------------
+// Assets
+// ---------------------------------------------------------------------------
+
+/**
+ * Clips cut from each of these assets.
+ *
+ * `removeAsset` refuses to delete an asset that is still in use, so anything
+ * offering to delete several at once has to know which ones will be refused
+ * *before* it runs the batch — one rejection aborts the whole thing.
+ */
+export function clipsUsingAssets(
+  p: Project,
+  assetIds: readonly AssetId[],
+): ReadonlyMap<AssetId, readonly ClipId[]> {
+  const wanted = new Set(assetIds);
+  const found = new Map<AssetId, ClipId[]>();
+  for (const id of assetIds) found.set(id, []);
+
+  for (const clip of Object.values(p.clips)) {
+    if (!isMediaClip(clip) || !wanted.has(clip.assetId)) continue;
+    found.get(clip.assetId)!.push(clip.id);
+  }
+  return found;
+}
+
+/**
+ * Every folder path in use, plus the ancestors implied by them.
+ *
+ * `'B-roll/Day 1'` implies `'B-roll'` even when nothing sits directly in it, so
+ * navigating into an intermediate folder is possible rather than a dead end.
+ */
+export function assetFolders(p: Project): readonly string[] {
+  const paths = new Set<string>();
+  for (const asset of Object.values(p.assets)) {
+    if (!asset.folder) continue;
+    const segments = asset.folder.split('/');
+    for (let i = 1; i <= segments.length; i++) paths.add(segments.slice(0, i).join('/'));
+  }
+  return [...paths].sort((a, b) => a.localeCompare(b));
+}
+
+/** Immediate child folder names of `parent` (`''` for the root). */
+export function childFolders(
+  p: Project,
+  parent: string,
+  extra: readonly string[] = [],
+): readonly string[] {
+  const prefix = parent ? `${parent}/` : '';
+  const names = new Set<string>();
+
+  for (const path of [...assetFolders(p), ...extra]) {
+    if (!path.startsWith(prefix)) continue;
+    const rest = path.slice(prefix.length);
+    if (!rest) continue;
+    names.add(rest.split('/')[0]!);
+  }
+  return [...names].sort((a, b) => a.localeCompare(b));
+}
+
+/** How many assets sit in `folder` or any folder beneath it. */
+export function assetsInFolderTree(p: Project, folder: string): readonly Asset[] {
+  const prefix = folder ? `${folder}/` : '';
+  return Object.values(p.assets).filter(
+    (asset) => asset.folder === folder || asset.folder.startsWith(prefix),
+  );
+}
+
 /** Nearest snap point within `tolerance`, or null. */
 export function findSnap(
   candidates: readonly Time[],

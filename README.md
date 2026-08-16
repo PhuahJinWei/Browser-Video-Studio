@@ -12,7 +12,12 @@ Import → edit → play → export, end to end, entirely on your machine.
 
 - **Import** MP4, MOV, MKV, WebM, MP3, WAV, FLAC, OGG — drop files anywhere on the media panel, or use File › Import. Probed for codec, resolution, frame rate and audio layout.
 - **Timeline** with any number of video and audio tracks. Drag media in from the bin — the pointer picks the track, and the clip appends after whatever is already on it. Move clips between tracks, trim, split, ripple delete, snap to clip edges and the playhead. Moving a clip onto another stops at its edge rather than resizing it. Linked video/audio move together. Per-track mute, solo, lock, hide.
-- **Filmstrips and waveforms** on clips, rasterised once per asset and positioned by CSS, so trimming and moving cost nothing.
+- **Filmstrips and waveforms** on clips, rasterised once per asset and positioned by CSS, so trimming and moving cost nothing. Clips shimmer while theirs is still being decoded, and the library card shows how far along it is.
+- **Drag readout.** Moving, trimming or scrubbing shows a timecode that follows the pointer, reporting the position *after* snapping and after being clamped off a neighbour — so it always agrees with where the clip actually went. A marker line shows what a drag caught.
+- **Drop into the gap to make a track.** Drag a clip (or media from the library) above the video stack or below the audio and it lands on a track created for it. The track is only made on release, and it collapses into the same undo step as the move.
+- **Razor tool** (`C`, `V` to put it away): click a clip anywhere to cut it there, without moving the playhead first. Cuts a linked A/V pair together; Alt cuts only the track under the pointer.
+- **Save the current frame** as a PNG at full sequence resolution (`Shift+S`), read back from the compositor rather than the canvas so it is never a blank or stale frame.
+- **Library** with folders, a search that looks across all of them, multi-select (click, Ctrl, Shift), and grid or list view. Deleting media that is still cut into the timeline says so and offers to take the clips too, rather than silently refusing. Media that could not be found when a project reopened is marked, on the card and on the clip.
 - **Preview** composited on the GPU — transform, opacity, crop, eight blend modes, colour adjustment and gaussian blur.
 - **Titles** rendered to a canvas and composited like any other layer.
 - **Playback** with A/V sync driven by the audio clock. Seeking mid-playback re-bases the transport and keeps rolling.

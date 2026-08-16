@@ -48,6 +48,20 @@ const WAVEFORM_HEIGHT = 44;
 const WAVEFORM_COLUMNS = 900;
 
 /**
+ * How far along a generator is, 0 to 1.
+ *
+ * Reported because this is the wait people actually see: importing only probes the
+ * container, but decoding forty frames for a strip and the whole stream for a
+ * waveform takes real time, and until now nothing said so.
+ */
+export type ProgressListener = (fraction: number) => void;
+
+export interface GenerateOptions {
+  readonly signal?: AbortSignal;
+  readonly onProgress?: ProgressListener;
+}
+
+/**
  * Decode frames across the source and lay them out side by side.
  * Returns null when the asset has no video.
  */
@@ -55,8 +69,9 @@ export async function generateFilmstrip(
   media: MediaLibrary,
   assetId: AssetId,
   duration: Time,
-  signal?: AbortSignal,
+  options: GenerateOptions = {},
 ): Promise<Filmstrip | null> {
+  const { signal, onProgress } = options;
   const sourceSeconds = T.toSeconds(duration);
   if (sourceSeconds <= 0) return null;
 
@@ -102,6 +117,9 @@ export async function generateFilmstrip(
       frame.close();
       sample.close();
     }
+    // Reported per frame rather than in chunks: forty decodes is already a coarse
+    // enough scale, and a bar that only moves in fifths reads as a stalled one.
+    onProgress?.((i + 1) / frameCount);
   }
 
   const [stripBlob, posterBlob] = await Promise.all([
@@ -129,14 +147,18 @@ export async function generateWaveform(
   media: MediaLibrary,
   assetId: AssetId,
   duration: Time,
-  signal?: AbortSignal,
+  options: GenerateOptions = {},
 ): Promise<Waveform | null> {
+  const { signal, onProgress } = options;
   const sourceSeconds = T.toSeconds(duration);
   if (sourceSeconds <= 0) return null;
 
   const columns = WAVEFORM_COLUMNS;
   const peaks = new Float32Array(columns); // absolute peak per column
   let sawAudio = false;
+  // Decoded audio arrives in buffers of no fixed size, so progress is throttled by
+  // how far it has travelled rather than reported per buffer.
+  let reported = 0;
 
   const secondsPerColumn = sourceSeconds / columns;
 
@@ -145,6 +167,11 @@ export async function generateWaveform(
     sawAudio = true;
 
     const { buffer, timestamp } = wrapped;
+    const reached = Math.min(1, timestamp / sourceSeconds);
+    if (reached >= reported + 0.02) {
+      reported = reached;
+      onProgress?.(reached);
+    }
     const channels = buffer.numberOfChannels;
     const rate = buffer.sampleRate;
 
@@ -186,8 +213,59 @@ export class PreviewCache {
   private readonly filmstrips = new Map<AssetId, Filmstrip | null>();
   private readonly waveforms = new Map<AssetId, Waveform | null>();
   private readonly pending = new Map<string, Promise<unknown>>();
+  /**
+   * How far each unfinished asset has got, per kind of preview.
+   *
+   * An entry exists from the moment an asset is queued until both of its previews
+   * are done, so a card can show a bar the whole time rather than only once the
+   * decoder has reached it.
+   */
+  private readonly progress = new Map<AssetId, { film: number | null; wave: number | null }>();
 
-  constructor(private readonly media: MediaLibrary) {}
+  /** Called whenever a fraction moves, so the UI can re-render. */
+  constructor(
+    private readonly media: MediaLibrary,
+    private readonly onProgress?: () => void,
+  ) {}
+
+  /**
+   * Overall progress for an asset, or null when there is nothing outstanding.
+   *
+   * An asset needing both a strip and a waveform averages the two, so the bar
+   * reaches the end when the card is actually finished rather than twice.
+   */
+  getProgress(assetId: AssetId): number | null {
+    const entry = this.progress.get(assetId);
+    if (!entry) return null;
+    const parts = [entry.film, entry.wave].filter((v): v is number => v !== null);
+    if (parts.length === 0) return null;
+    return parts.reduce((sum, v) => sum + v, 0) / parts.length;
+  }
+
+  /**
+   * Note that an asset is waiting its turn.
+   *
+   * Previews are built one asset at a time, so importing ten files leaves the last
+   * of them with nothing to show for several seconds. Marking the queue up front is
+   * what turns that silence into a row of bars sitting at zero.
+   */
+  markQueued(assetId: AssetId, needsFilm: boolean, needsWave: boolean): void {
+    if (!needsFilm && !needsWave) return;
+    if (this.progress.has(assetId)) return;
+    this.progress.set(assetId, {
+      film: needsFilm && !this.filmstrips.has(assetId) ? 0 : null,
+      wave: needsWave && !this.waveforms.has(assetId) ? 0 : null,
+    });
+    this.onProgress?.();
+  }
+
+  private setProgress(assetId: AssetId, kind: 'film' | 'wave', fraction: number | null): void {
+    const entry = this.progress.get(assetId) ?? { film: null, wave: null };
+    const next = { ...entry, [kind]: fraction };
+    if (next.film === null && next.wave === null) this.progress.delete(assetId);
+    else this.progress.set(assetId, next);
+    this.onProgress?.();
+  }
 
   getFilmstrip(assetId: AssetId): Filmstrip | null | undefined {
     return this.filmstrips.get(assetId);
@@ -221,19 +299,29 @@ export class PreviewCache {
   async ensure(assetId: AssetId, videoDuration: Time | null, audioDuration: Time | null): Promise<void> {
     const jobs: Promise<unknown>[] = [];
 
+    this.markQueued(assetId, Boolean(videoDuration), Boolean(audioDuration));
+
     if (videoDuration && !this.filmstrips.has(assetId)) {
       jobs.push(
         this.once(`film:${assetId}`, async () => {
-          const strip = await generateFilmstrip(this.media, assetId, videoDuration).catch(() => null);
+          const strip = await generateFilmstrip(this.media, assetId, videoDuration, {
+            onProgress: (fraction) => this.setProgress(assetId, 'film', fraction),
+          }).catch(() => null);
           this.filmstrips.set(assetId, strip);
+          // Cleared rather than pinned at 1: a finished preview is shown by the
+          // image being there, and a bar stuck full reads as still working.
+          this.setProgress(assetId, 'film', null);
         }),
       );
     }
     if (audioDuration && !this.waveforms.has(assetId)) {
       jobs.push(
         this.once(`wave:${assetId}`, async () => {
-          const wave = await generateWaveform(this.media, assetId, audioDuration).catch(() => null);
+          const wave = await generateWaveform(this.media, assetId, audioDuration, {
+            onProgress: (fraction) => this.setProgress(assetId, 'wave', fraction),
+          }).catch(() => null);
           this.waveforms.set(assetId, wave);
+          this.setProgress(assetId, 'wave', null);
         }),
       );
     }
@@ -257,5 +345,6 @@ export class PreviewCache {
     for (const wave of this.waveforms.values()) if (wave) URL.revokeObjectURL(wave.url);
     this.filmstrips.clear();
     this.waveforms.clear();
+    this.progress.clear();
   }
 }

@@ -317,6 +317,19 @@ export type Command =
       readonly assetId: AssetId;
       readonly status: AssetStatus;
     }
+  /**
+   * Move an asset into a media-bin folder, named by its path — `'B-roll/Day 1'`,
+   * or `''` for the root.
+   *
+   * Folders are paths on the asset rather than entities of their own, so renaming
+   * one is a string edit across its members and deleting one is a reassignment. The
+   * consequence is that a folder exists exactly as long as something is in it.
+   */
+  | {
+      readonly type: 'setAssetFolder';
+      readonly assetId: AssetId;
+      readonly folder: string;
+    }
 
   // -- markers --------------------------------------------------------------
   | {

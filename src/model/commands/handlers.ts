@@ -631,6 +631,25 @@ function handleSetAssetStatus(d: Draft, cmd: Extract<Command, { type: 'setAssetS
   d.assets[cmd.assetId] = { ...asset, status: cmd.status };
 }
 
+/**
+ * A folder path with its separators tidied: no leading or trailing slash, no empty
+ * segments. `'/B-roll//Day 1/'` and `'B-roll/Day 1'` name the same folder, and the
+ * bin groups by string equality — so two spellings would show up as two folders.
+ */
+export function normaliseFolder(folder: string): string {
+  return folder
+    .split('/')
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0)
+    .join('/');
+}
+
+function handleSetAssetFolder(d: Draft, cmd: Extract<Command, { type: 'setAssetFolder' }>): void {
+  const asset = d.assets[cmd.assetId];
+  if (!asset) throw new ModelError(`No asset with id "${cmd.assetId}"`);
+  d.assets[cmd.assetId] = { ...asset, folder: normaliseFolder(cmd.folder) };
+}
+
 function handleAddMarker(d: Draft, cmd: Extract<Command, { type: 'addMarker' }>, ids: IdSource): void {
   const seq = draftSequence(d, cmd.sequenceId);
   const id = cmd.markerId ?? ids.marker();
@@ -1059,6 +1078,8 @@ export function runCommand(d: Draft, command: Command, ids: IdSource): void {
       return handleRemoveAsset(d, command);
     case 'setAssetStatus':
       return handleSetAssetStatus(d, command);
+    case 'setAssetFolder':
+      return handleSetAssetFolder(d, command);
     case 'addMarker':
       return handleAddMarker(d, command, ids);
     case 'removeMarker':

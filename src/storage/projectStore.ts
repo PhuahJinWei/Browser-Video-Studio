@@ -94,6 +94,17 @@ export async function loadMedia(projectId: ProjectId, assetId: AssetId): Promise
   return opfs.readFile(mediaPath(projectId, assetId));
 }
 
+/**
+ * Drop the cached copy of an asset's bytes.
+ *
+ * Removing media from the library has to reclaim the disk too: copies run up to
+ * two gigabytes each, and leaving them behind would quietly fill the origin's quota
+ * with files no project can reach any more.
+ */
+export async function deleteMedia(projectId: ProjectId, assetId: AssetId): Promise<void> {
+  await opfs.remove(mediaPath(projectId, assetId)).catch(() => undefined);
+}
+
 export interface LoadedProject {
   readonly project: Project;
   readonly media: ReadonlyMap<AssetId, File>;
