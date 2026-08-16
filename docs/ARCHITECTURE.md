@@ -1,6 +1,18 @@
 # Browser Video Studio — Architecture
 
-Status: v0.1 (design). Target: Chromium-latest only. Hosting: GitHub Pages (static, no backend, no custom headers).
+Status: **v0.2 — L1 built and running.** Target: Chromium-latest only. Hosting: GitHub Pages (static, no backend, no custom headers).
+
+> ## Where the build diverged from this design
+>
+> This document was written before implementation. Three decisions changed once the code met the browser, and the reasons are worth keeping:
+>
+> 1. **Mediabunny replaces mp4box.js + mp4-muxer + webm-muxer.** It covers demux, seek-accurate decode, mux and encode across MP4/MOV/MKV/WebM/MP3/WAV/FLAC/OGG behind one API. `VideoSampleSink.getSample(t)` does keyframe-seek-and-decode-forward internally, which deletes the entire hand-rolled sample-index and decoder-session plan in §5.1–5.2. §11's `workers/indexer/` never needed to exist.
+> 2. **Audio mixes in an `OfflineAudioContext`, not a hand-written mixer feeding an AudioWorklet.** §6 argued for hand-rolled DSP so playback and export would be identical. Offline rendering achieves the same thing — playback and export call one function, `renderAudioRange` — while getting correct resampling and sample-accurate scheduling for free. A worklet is only needed if effects must run *in* the audio thread, which nothing in L1–L3 requires.
+> 3. **The engine runs on the main thread, not in workers.** Decode and encode are already off-thread inside WebCodecs, and GPU work is on the GPU. The worker split in §3 remains the right destination for L3+ (proxy generation and AI inference genuinely need it), but it bought nothing in L1 and would have made the first working version much slower to reach. The document/engine boundary is intact, so moving the engine behind a worker RPC later does not touch the UI.
+>
+> What survived contact unchanged: rational time, the immutable document + pure commands, snapshot undo, the effect registry, audio as a first-class citizen from day one, and the "no `SharedArrayBuffer`" rule.
+>
+> Four defects reached a running browser that types and tests could not catch — a WGSL uniform-control-flow violation that rendered black, a frame-rate snap tolerance too loose to tell 29.97 from 30, `requestAnimationFrame` starving the transport clock, and two `GPUDevice`s racing over one canvas. All four are recorded in the git history. The lesson, made permanent in the code: **the compositor now checks shader compilation info at startup and listens for `uncapturederror`**, because a GPU pipeline that fails validation reports success at every layer above it.
 
 ## 1. Goals & non-goals
 
@@ -136,7 +148,7 @@ both:                               → Muxer (mp4-muxer / webm-muxer) → OPFS 
 
 | Layer | Scope |
 |---|---|
-| L1 | Import (mp4/mov/webm/mp3/wav/aac), indexing (thumbs, waveforms), timeline with N video + N audio tracks, trim/split/move/ripple, snapping, playback with A/V sync, opacity/transform, export H.264+AAC / VP9+Opus, undo/redo, autosave, telemetry panel v1 |
+| **L1 — built** | Import (mp4/mov/webm/mkv/mp3/wav/flac/ogg), timeline with N video + N audio tracks, trim/split/move/ripple, snapping, playback with A/V sync, transform/opacity/crop/blend, titles, GPU colour + blur effects, export H.264+AAC / VP9+Opus, undo/redo with gesture coalescing, OPFS autosave, live pipeline telemetry. **Not yet:** thumbnails and waveform overlays on clips. |
 | L2 | Effect registry + GPU effects (color, blur, sharpen, LUT, crop, transform), transitions (cross-dissolve, wipes), keyframes + curves, audio gain/pan/fades, text/titles (canvas → texture), export presets |
 | L3 | Proxies + quality toggle, nested sequences, speed/retime, audio DSP (EQ, compressor, ducking), markers, larger-format import (WASM demux/decode fallback opt-in via coi-serviceworker) |
 | L4 | On-device AI: person segmentation (bg blur/remove), Whisper captions, scene cut detection, silence removal, auto-reframe |
@@ -152,25 +164,36 @@ both:                               → Muxer (mp4-muxer / webm-muxer) → OPFS 
 6. **Memory budget**: configurable (default ~1.5 GB); frame caches and proxies respect it; telemetry shows usage.
 7. **Everything observable**: engine emits `TelemetryEvent`s (stage, fps, queue depths, GPU timings via timestamp queries where available, memory estimates).
 
-## 11. Repository layout (proposed)
+## 11. Repository layout (as built)
 
 ```
-/                      Vite app root
+/                        Vite app root
   src/
-    model/             types.ts (data model), time.ts, commands/, selectors/, migrations/
-    engine/            api.ts (facade), rpc/, transport.ts, telemetry.ts
-    workers/
-      indexer/         demux, index, thumbs, waveforms, proxy
-      video/           decoder sessions, frame cache, compositor (WebGPU), effects/
-      audio/           decoders, resampler, mixer, dsp/
-      export/          exporter, muxers, encoders
-      ai/              onnx sessions (L4)
-    worklets/          playback-sink.worklet.ts
-    storage/           opfs.ts, idb.ts, project-store.ts
-    ui/                React app: timeline/, preview/, bin/, inspector/, export/, telemetry/
-  docs/                ARCHITECTURE.md, DATA_MODEL.md, ADRs
-  tests/               model (vitest, node), engine (browser tests via Playwright/Chromium)
+    model/               the document — pure, no browser APIs, runs in Node
+      types.ts           data model + invariants
+      time.ts            exact rational time + SMPTE timecode
+      params.ts          keyframe evaluation
+      selectors.ts       renderListAt, audioSegments, snapping
+      commands/          types, internal (draft + timeline surgery), handlers, index
+      history.ts         snapshot undo with gesture coalescing
+      validate.ts        invariants, executable
+      factories.ts, ids.ts, fixtures.ts
+    engine/              (document, time) -> pixels and sound
+      media.ts           Mediabunny wrapper keyed by AssetId
+      compositor.ts      WebGPU; compositor.wgsl.ts holds the shaders
+      audio.ts           OfflineAudioContext mixing + playback scheduling
+      effects.ts         registry: params, UI schema, compositor uniforms
+      titles.ts          text -> canvas, cached by visual content
+      engine.ts          facade: render coalescing, transport
+      export.ts          frame walk -> encode -> mux
+    storage/             opfs.ts, projectStore.ts (autosave + media copies)
+    ui/                  React: App, Timeline, Preview, MediaBin, Inspector, ExportDialog, store
+    dev/testMedia.ts     synthetic clips for testing; never imported by the app
+    capabilities.ts      boot-time feature detection
+  docs/                  ARCHITECTURE.md, DATA_MODEL.md
 ```
+
+Model tests run in Node under Vitest. The engine is verified in a real Chromium against clips generated by `dev/testMedia.ts` — WebGPU and WebCodecs cannot be meaningfully faked, and every engine bug found so far was invisible to types and unit tests.
 
 ## 12. Open decisions (tracked as ADRs)
 

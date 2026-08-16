@@ -59,6 +59,7 @@ applyAll(project, commands, ids?) => Project   // all-or-nothing batch
 |---|---|
 | Tracks | `addTrack`, `removeTrack`, `setTrackProps`, `moveTrack` |
 | Clips | `insertClip` (overwrite \| insert), `removeClips` (lift \| ripple), `moveClips`, `trimClip` (in/out, ripple), `slipClip`, `splitClips`, `setClipProps` |
+| Clip properties | `setClipParam` (opacity, gain, pan, `transform.*`, `crop.*` — static or keyframed), `setClipFade`, `setClipBlendMode`, `setClipSpeed` |
 | Effects | `addEffect`, `removeEffect`, `moveEffect`, `setEffectParam`, `setEffectEnabled` |
 | Assets | `addAsset`, `removeAsset`, `setAssetStatus` |
 | Markers | `addMarker`, `removeMarker` |
@@ -91,9 +92,21 @@ Memoisation is deliberately absent for now — these are cheap over an immutable
 
 ## Persistence
 
-- `projects/<projectId>/project.json` in OPFS, debounced autosave (500 ms) + rotating snapshots (`history/<ts>.json`, keep last N).
-- `IndexedDB`: project index (id, name, modifiedAt, thumbnail), `FileSystemFileHandle`s keyed by assetId, user prefs.
-- Portable export `.bvsproj` = zip { `project.json`, optional `media/` }.
+Implemented in `src/storage/projectStore.ts`:
+
+```
+projects/<projectId>/project.json     the document
+projects/<projectId>/media/<assetId>  a copy of each imported file
+projects/index.json                   project list, newest first
+```
+
+- Autosave is debounced (800 ms) and flushed on `pagehide`, so edits inside the debounce window are not lost when the tab closes. `pagehide` rather than `beforeunload`, which is skipped for discarded tabs and bfcache restores.
+- The writer never runs two saves concurrently — overlapping `createWritable` calls on one file can interleave and truncate it.
+- Media is **copied**, not referenced, so a project still opens after the user moves or renames the original. Files above a size threshold are skipped and must be re-imported.
+- `modifiedAt` is stamped here, not in the commands layer, which is pure and never reads the clock.
+- Loading validates the document and refuses a corrupt file loudly rather than rendering it wrongly.
+
+Not yet: rotating snapshots, `FileSystemFileHandle` persistence for large files, and a portable `.bvsproj` export.
 
 ## Deliberate omissions (for now) and where they'd go
 

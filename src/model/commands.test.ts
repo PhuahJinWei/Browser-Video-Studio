@@ -4,7 +4,7 @@ import { describeSources, describeTrack, insertCommand, makeFixture, run, runFro
 import { keyframe, keyframedParam, staticParam } from './params';
 import { getClip, getTrack, ModelError } from './selectors';
 import * as T from './time';
-import type { ClipId, Project, VideoClip } from './types';
+import type { AudioClip, ClipId, Project, VideoClip } from './types';
 import { assertValidProject, validateProject } from './validate';
 
 let f: Fixture;
@@ -474,6 +474,109 @@ describe('splitClips', () => {
     expect(rightEffects[0]).not.toBe(leftEffects[0]); // cloned, not shared
     expect(p3.effects[rightEffects[0]!]!.effectType).toBe('blur.gaussian');
     expect(Object.keys(p3.effects)).toHaveLength(2);
+  });
+});
+
+describe('animatable clip properties', () => {
+  it('sets opacity and transform channels on a visual clip', () => {
+    const p1 = run(f, insertCommand(f, { trackId: f.v1, start: sec(0), duration: sec(4) }));
+    const [a] = clipsOf(p1, f.v1);
+    const p2 = runFrom(
+      f,
+      p1,
+      { type: 'setClipParam', clipId: a!, key: 'opacity', param: staticParam(0.5) },
+      { type: 'setClipParam', clipId: a!, key: 'transform.x', param: staticParam(120) },
+      { type: 'setClipParam', clipId: a!, key: 'transform.rotation', param: staticParam(-15) },
+      { type: 'setClipParam', clipId: a!, key: 'crop.left', param: staticParam(0.25) },
+    );
+    const clip = getClip(p2, a!) as VideoClip;
+    expect(clip.opacity).toEqual(staticParam(0.5));
+    expect(clip.transform.x).toEqual(staticParam(120));
+    expect(clip.transform.rotation).toEqual(staticParam(-15));
+    expect(clip.crop.left).toEqual(staticParam(0.25));
+    // Untouched channels keep their defaults.
+    expect(clip.transform.scaleX).toEqual(staticParam(1));
+  });
+
+  it('accepts a keyframed parameter', () => {
+    const p1 = run(f, insertCommand(f, { trackId: f.v1, start: sec(0), duration: sec(4) }));
+    const [a] = clipsOf(p1, f.v1);
+    const ramp = keyframedParam([keyframe(T.TIME_ZERO, 0), keyframe(sec(4), 1)]);
+    const p2 = runFrom(f, p1, { type: 'setClipParam', clipId: a!, key: 'opacity', param: ramp });
+    expect((getClip(p2, a!) as VideoClip).opacity.kind).toBe('keyframed');
+  });
+
+  it('rejects parameters the clip kind does not have', () => {
+    const p1 = run(
+      f,
+      insertCommand(f, { trackId: f.v1, start: sec(0), duration: sec(2), name: 'V' }),
+      insertCommand(f, { trackId: f.a1, start: sec(0), duration: sec(2), kind: 'audio', name: 'A' }),
+    );
+    const [video] = clipsOf(p1, f.v1);
+    const [audio] = clipsOf(p1, f.a1);
+
+    expect(() =>
+      apply(p1, { type: 'setClipParam', clipId: video!, key: 'gainDb', param: staticParam(-6) }, f.ids),
+    ).toThrow(/no parameter/);
+    expect(() =>
+      apply(p1, { type: 'setClipParam', clipId: audio!, key: 'opacity', param: staticParam(0.5) }, f.ids),
+    ).toThrow(/no parameter/);
+    expect(() =>
+      apply(p1, { type: 'setClipBlendMode', clipId: audio!, blendMode: 'screen' }, f.ids),
+    ).toThrow(/no blend mode/);
+  });
+
+  it('sets audio gain, pan and fades', () => {
+    const p1 = run(
+      f,
+      insertCommand(f, { trackId: f.a1, start: sec(0), duration: sec(4), kind: 'audio', name: 'A' }),
+    );
+    const [a] = clipsOf(p1, f.a1);
+    const p2 = runFrom(
+      f,
+      p1,
+      { type: 'setClipParam', clipId: a!, key: 'gainDb', param: staticParam(-6) },
+      { type: 'setClipParam', clipId: a!, key: 'pan', param: staticParam(-0.5) },
+      { type: 'setClipFade', clipId: a!, edge: 'in', duration: sec(1, 2) },
+      { type: 'setClipFade', clipId: a!, edge: 'out', duration: sec(1) },
+    );
+    const clip = getClip(p2, a!) as AudioClip;
+    expect(clip.gainDb).toEqual(staticParam(-6));
+    expect(clip.pan).toEqual(staticParam(-0.5));
+    expect(clip.fadeIn).toEqual(sec(1, 2));
+    expect(clip.fadeOut).toEqual(sec(1));
+  });
+
+  it('clamps a fade to the clip length and rejects a negative one', () => {
+    const p1 = run(
+      f,
+      insertCommand(f, { trackId: f.a1, start: sec(0), duration: sec(2), kind: 'audio', name: 'A' }),
+    );
+    const [a] = clipsOf(p1, f.a1);
+    const p2 = runFrom(f, p1, { type: 'setClipFade', clipId: a!, edge: 'in', duration: sec(30) });
+    expect((getClip(p2, a!) as AudioClip).fadeIn).toEqual(sec(2));
+    expect(() =>
+      apply(p1, { type: 'setClipFade', clipId: a!, edge: 'in', duration: sec(-1) }, f.ids),
+    ).toThrow(/negative/);
+  });
+
+  it('sets blend mode and speed', () => {
+    const p1 = run(f, insertCommand(f, { trackId: f.v1, start: sec(0), duration: sec(4) }));
+    const [a] = clipsOf(p1, f.v1);
+    const p2 = runFrom(
+      f,
+      p1,
+      { type: 'setClipBlendMode', clipId: a!, blendMode: 'screen' },
+      { type: 'setClipSpeed', clipId: a!, speed: 2 },
+    );
+    expect((getClip(p2, a!) as VideoClip).blendMode).toBe('screen');
+    expect((getClip(p2, a!) as VideoClip).speed).toBe(2);
+
+    for (const bad of [0, Infinity, NaN]) {
+      expect(() => apply(p2, { type: 'setClipSpeed', clipId: a!, speed: bad }, f.ids)).toThrow(
+        /finite and non-zero/,
+      );
+    }
   });
 });
 
