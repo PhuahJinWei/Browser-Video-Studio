@@ -203,8 +203,10 @@ export type Command =
    */
   | {
       readonly type: 'addTransition';
-      readonly fromClipId: ClipId;
-      readonly toClipId: ClipId;
+      /** Null fades in from black at `toClipId`'s head. */
+      readonly fromClipId: ClipId | null;
+      /** Null fades out to black at `fromClipId`'s tail. */
+      readonly toClipId: ClipId | null;
       readonly duration: Time;
       readonly transitionType?: string;
       readonly alignment?: Transition['alignment'];

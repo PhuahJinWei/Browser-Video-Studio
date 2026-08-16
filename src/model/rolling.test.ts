@@ -175,7 +175,7 @@ describe('a transition sitting on the cut', () => {
     const rolled = roll(p, sec(5));
     const transition = Object.values(rolled.transitions)[0]!;
     // Anchored to the clips, so its span follows them rather than staying at 4 s.
-    expect(T.toSeconds(getClip(rolled, transition.toClipId).start)).toBe(5);
+    expect(T.toSeconds(getClip(rolled, transition.toClipId!).start)).toBe(5);
     assertValidProject(rolled);
   });
 

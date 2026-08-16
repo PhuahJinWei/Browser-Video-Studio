@@ -490,6 +490,7 @@ export class Compositor {
     u[22] = wipe ? (WIPE_MODE_IDS[wipe.direction] ?? 0) : 0;
     f[23] = wipe ? clamp01(wipe.progress) : 0;
     f[24] = wipe ? Math.min(0.5, Math.max(0, wipe.softness)) : 0;
+    u[25] = wipe?.hide ? 1 : 0;
 
     this.device.queue.writeBuffer(this.layerUniforms!, index * LAYER_UNIFORM_SIZE, data);
   }

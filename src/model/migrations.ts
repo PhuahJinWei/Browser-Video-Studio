@@ -46,6 +46,15 @@ const MIGRATIONS: Readonly<Record<number, MigrationStep>> = {
     }
     return { ...project, clips: migrated, schemaVersion: 2 };
   },
+  /**
+   * 2 → 3: a transition's `fromClipId` / `toClipId` may now be null, meaning it runs
+   * against black rather than against another clip.
+   *
+   * Nothing stored changes — every existing transition has both — but the version
+   * has to move so an older build refuses a document that might contain nulls
+   * rather than reading them as a missing clip.
+   */
+  2: (project) => ({ ...project, schemaVersion: 3 }),
 };
 
 export function readSchemaVersion(project: unknown): number | null {

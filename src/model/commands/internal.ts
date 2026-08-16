@@ -199,14 +199,23 @@ export function deleteTransition(d: Draft, transitionId: TransitionId): void {
   }
 }
 
-/** Drop transitions whose two clips are no longer adjacent (or no longer exist). */
+/**
+ * Drop transitions that no longer describe anything: a missing clip, or two
+ * clips that have stopped being adjacent.
+ *
+ * A fade against black has only one clip, so there is no adjacency to lose — it
+ * survives until that clip does.
+ */
 export function pruneBrokenTransitions(d: Draft): void {
   for (const transition of Object.values(d.transitions)) {
-    const from = d.clips[transition.fromClipId];
-    const to = d.clips[transition.toClipId];
-    if (!from || !to || !T.eq(clipEnd(from), to.start)) {
-      deleteTransition(d, transition.id);
-    }
+    const from = transition.fromClipId === null ? null : d.clips[transition.fromClipId];
+    const to = transition.toClipId === null ? null : d.clips[transition.toClipId];
+
+    const lostAClip =
+      (transition.fromClipId !== null && !from) || (transition.toClipId !== null && !to);
+    const separated = from !== undefined && to !== undefined && from && to && !T.eq(clipEnd(from), to.start);
+
+    if (lostAClip || separated) deleteTransition(d, transition.id);
   }
 }
 

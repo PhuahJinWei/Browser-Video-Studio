@@ -449,19 +449,37 @@ function trackLayersAt(p: Project, trackId: TrackId, at: Time): readonly TrackLa
   const active = activeTransitionAt(p, trackId, at);
   if (active) {
     const direction = WIPE_DIRECTIONS[active.transition.transitionType];
+    const softness = transitionSoftness(active.transition);
+    const { from, to, progress } = active;
+
+    // Against black there is only one clip, and nothing underneath to blend
+    // with: it simply arrives, or leaves.
+    if (!from || !to) {
+      const clip = to ?? from!;
+      const arriving = to !== null;
+      if (direction) {
+        // Same edge travelling the same way either side; `hide` is what turns a
+        // wipe in from black into a wipe out to it.
+        return [
+          {
+            clip,
+            opacityScale: 1,
+            wipe: { direction, progress, softness, hide: !arriving },
+          },
+        ];
+      }
+      return [{ clip, opacityScale: arriving ? progress : 1 - progress, wipe: null }];
+    }
+
     if (direction) {
       // A wipe hides the incoming clip behind an edge instead of fading it, so
       // it stays fully opaque and the mask does the work.
       return [
-        { clip: active.from, opacityScale: 1, wipe: null },
+        { clip: from, opacityScale: 1, wipe: null },
         {
-          clip: active.to,
+          clip: to,
           opacityScale: 1,
-          wipe: {
-            direction,
-            progress: active.progress,
-            softness: transitionSoftness(active.transition),
-          },
+          wipe: { direction, progress, softness, hide: false },
         },
       ];
     }
@@ -471,8 +489,8 @@ function trackLayersAt(p: Project, trackId: TrackId, at: Time): readonly TrackLa
     // dissolve is A(1-p) + Bp. Holding the outgoing clip opaque and letting the
     // incoming one fade up over it produces exactly the latter.
     return [
-      { clip: active.from, opacityScale: 1, wipe: null },
-      { clip: active.to, opacityScale: active.progress, wipe: null },
+      { clip: from, opacityScale: 1, wipe: null },
+      { clip: to, opacityScale: progress, wipe: null },
     ];
   }
   const clip = clipAt(p, trackId, at);
@@ -596,8 +614,17 @@ export function audioSegments(
  * `start` and `end` put the whole overlap on one side of it.
  */
 export function transitionSpan(p: Project, transition: Transition): TimeRange | null {
-  const to = p.clips[transition.toClipId];
-  if (!to || !p.clips[transition.fromClipId]) return null;
+  const from = transition.fromClipId === null ? null : p.clips[transition.fromClipId];
+  const to = transition.toClipId === null ? null : p.clips[transition.toClipId];
+
+  // A fade against black sits wholly inside the one clip it has: it never plays
+  // anything past an edge, so alignment has nothing to choose between.
+  if (!from) {
+    return to ? T.range(to.start, transition.duration) : null;
+  }
+  if (!to) {
+    return T.range(T.sub(clipEnd(from), transition.duration), transition.duration);
+  }
 
   const cut = to.start;
   switch (transition.alignment) {
@@ -644,8 +671,8 @@ export function adjacentClips(
 /** The transition on a given cut, if one is there. */
 export function transitionBetween(
   p: Project,
-  fromClipId: ClipId,
-  toClipId: ClipId,
+  fromClipId: ClipId | null,
+  toClipId: ClipId | null,
 ): Transition | null {
   return (
     Object.values(p.transitions).find(
@@ -662,10 +689,23 @@ export function transitionBetween(
  */
 export function pairedCuts(
   p: Project,
-  from: Clip,
-  to: Clip,
-): readonly { readonly from: Clip; readonly to: Clip }[] {
-  const cuts = [{ from, to }];
+  from: Clip | null,
+  to: Clip | null,
+): readonly { readonly from: Clip | null; readonly to: Clip | null }[] {
+  const cuts: { from: Clip | null; to: Clip | null }[] = [{ from, to }];
+
+  // A fade against black pairs on the single clip it has.
+  if (!from || !to) {
+    const anchor = from ?? to!;
+    if (!anchor.linkGroupId) return cuts;
+    for (const candidate of Object.values(p.clips)) {
+      if (candidate.id === anchor.id) continue;
+      if (candidate.linkGroupId !== anchor.linkGroupId) continue;
+      cuts.push(from ? { from: candidate, to: null } : { from: null, to: candidate });
+    }
+    return cuts;
+  }
+
   if (!from.linkGroupId || !to.linkGroupId) return cuts;
 
   for (const candidate of Object.values(p.clips)) {
@@ -735,20 +775,22 @@ export function nearestCut(
 
 /** A transition together with the ones on its paired cuts. */
 export function pairedTransitions(p: Project, transition: Transition): readonly Transition[] {
-  const from = p.clips[transition.fromClipId];
-  const to = p.clips[transition.toClipId];
-  if (!from || !to) return [transition];
+  const from = transition.fromClipId === null ? null : (p.clips[transition.fromClipId] ?? null);
+  const to = transition.toClipId === null ? null : (p.clips[transition.toClipId] ?? null);
+  if (!from && !to) return [transition];
 
   const found = pairedCuts(p, from, to)
-    .map((cut) => transitionBetween(p, cut.from.id, cut.to.id))
+    .map((cut) => transitionBetween(p, cut.from?.id ?? null, cut.to?.id ?? null))
     .filter((t): t is Transition => t !== null);
   return found.length > 0 ? found : [transition];
 }
 
 export interface ActiveTransition {
   readonly transition: Transition;
-  readonly from: Clip;
-  readonly to: Clip;
+  /** Null while fading in from black. */
+  readonly from: Clip | null;
+  /** Null while fading out to black. */
+  readonly to: Clip | null;
   /** 0 at the start of the transition, approaching 1 at its end. */
   readonly progress: number;
 }
@@ -764,9 +806,9 @@ export function activeTransitionAt(
     if (!span) continue;
     if (T.lt(at, span.start) || T.gte(at, T.rangeEnd(span))) continue;
 
-    const from = p.clips[transition.fromClipId];
-    const to = p.clips[transition.toClipId];
-    if (!from || !to) continue;
+    const from = transition.fromClipId === null ? null : (p.clips[transition.fromClipId] ?? null);
+    const to = transition.toClipId === null ? null : (p.clips[transition.toClipId] ?? null);
+    if (!from && !to) continue;
     return { transition, from, to, progress: T.ratio(T.sub(at, span.start), span.duration) };
   }
   return null;
@@ -782,10 +824,15 @@ export function activeTransitionAt(
  */
 export function maxTransitionDuration(
   p: AssetLookup,
-  from: Clip,
-  to: Clip,
+  from: Clip | null,
+  to: Clip | null,
   alignment: Transition['alignment'] = 'centered',
 ): Time {
+  // Against black there is only one clip, and no handle is spent: the fade
+  // happens inside the clip's own span, so its length is the only bound.
+  if (!from) return to ? to.duration : T.TIME_ZERO;
+  if (!to) return from.duration;
+
   // Swallowing a whole clip would erase the cut the transition belongs to.
   let limit = T.min(from.duration, to.duration);
   const cap = (value: Time): void => {

@@ -6,10 +6,20 @@
  * or the file is corrupt, and both are better caught loudly than rendered wrongly.
  */
 
-import { clipEnd, clipFitsTrack, isMediaClip } from './selectors';
+import {
+  clipEnd,
+  clipFitsTrack,
+  isMediaClip,
+  transitionSpan,
+} from './selectors';
 import * as T from './time';
 import { isTime } from './time';
-import type { Project, SequenceId } from './types';
+import type {
+  Project,
+  SequenceId,
+  TimeRange,
+  TrackId,
+} from './types';
 import { SCHEMA_VERSION } from './types';
 
 export interface Violation {
@@ -202,20 +212,48 @@ export function validateProject(p: Project): readonly Violation[] {
 
   for (const transition of Object.values(p.transitions)) {
     const at = `transitions.${transition.id}`;
-    const from = p.clips[transition.fromClipId];
-    const to = p.clips[transition.toClipId];
-    if (!from || !to) {
+    const from = transition.fromClipId === null ? null : p.clips[transition.fromClipId];
+    const to = transition.toClipId === null ? null : p.clips[transition.toClipId];
+
+    if (transition.fromClipId === null && transition.toClipId === null) {
+      out.push({ path: at, message: 'A transition needs a clip on at least one side' });
+      continue;
+    }
+    if ((transition.fromClipId !== null && !from) || (transition.toClipId !== null && !to)) {
       out.push({ path: at, message: 'References a clip that does not exist' });
       continue;
     }
-    if (from.trackId !== transition.trackId || to.trackId !== transition.trackId) {
+    if ((from && from.trackId !== transition.trackId) || (to && to.trackId !== transition.trackId)) {
       out.push({ path: at, message: 'Clips are not both on the transition’s track' });
     }
-    if (!T.eq(clipEnd(from), to.start)) {
+    // Adjacency only means anything when there are two clips to be adjacent.
+    if (from && to && !T.eq(clipEnd(from), to.start)) {
       out.push({ path: at, message: 'Clips are not adjacent' });
     }
     if (!T.isPositive(transition.duration)) {
       out.push({ path: `${at}.duration`, message: 'Duration must be greater than zero' });
+    }
+  }
+
+  // Two transitions over the same frames would leave the renderer picking one
+  // arbitrarily, and the clip on the far side of the loser would never draw.
+  const byTrack = new Map<TrackId, { id: string; range: TimeRange }[]>();
+  for (const transition of Object.values(p.transitions)) {
+    const span = transitionSpan(p, transition);
+    if (!span) continue;
+    const list = byTrack.get(transition.trackId) ?? [];
+    list.push({ id: transition.id, range: span });
+    byTrack.set(transition.trackId, list);
+  }
+  for (const spans of byTrack.values()) {
+    for (let i = 0; i < spans.length; i++) {
+      for (let j = i + 1; j < spans.length; j++) {
+        if (!T.rangesOverlap(spans[i]!.range, spans[j]!.range)) continue;
+        out.push({
+          path: `transitions.${spans[i]!.id}`,
+          message: `Overlaps transition ${spans[j]!.id}`,
+        });
+      }
     }
   }
 

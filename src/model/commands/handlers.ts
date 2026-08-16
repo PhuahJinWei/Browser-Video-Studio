@@ -14,16 +14,19 @@ import {
   maxTransitionDuration,
   ModelError,
   rollBounds,
+  transitionSpan,
 } from '../selectors';
 import { staticParam } from '../params';
 import * as T from '../time';
 import type {
   Clip,
   ClipId,
+  Project,
   Time,
   Track,
   TrackId,
   Transition,
+  TransitionId,
 } from '../types';
 import { CROSSFADE_CURVES, TRANSITION_TYPES } from '../types';
 import {
@@ -652,20 +655,76 @@ function handleSetView(d: Draft, cmd: Extract<Command, { type: 'setView' }>): vo
  * Clamp a requested transition length to what the cut can actually supply, and
  * explain the refusal when it can supply nothing.
  */
+/**
+ * Longest this transition may be without running into a neighbouring one.
+ *
+ * Two transitions over the same frames would leave the renderer picking one and
+ * the clip on the far side of the loser never drawing at all, so the room
+ * between them bounds the length just as the handles do.
+ */
+function roomBetweenNeighbours(
+  d: Draft,
+  trackId: TrackId,
+  anchor: Time,
+  alignment: Transition['alignment'],
+  excludeId: TransitionId | null,
+): Time | null {
+  let before: Time | null = null;
+  let after: Time | null = null;
+
+  for (const other of Object.values(d.transitions)) {
+    if (other.id === excludeId || other.trackId !== trackId) continue;
+    const span = transitionSpan(d as unknown as Project, other);
+    if (!span) continue;
+
+    const end = T.rangeEnd(span);
+    if (T.lte(end, anchor)) before = before === null ? end : T.max(before, end);
+    else if (T.gte(span.start, anchor)) {
+      after = after === null ? span.start : T.min(after, span.start);
+    } else {
+      // Straddles the anchor: there is no room here at all.
+      return T.TIME_ZERO;
+    }
+  }
+
+  const roomBefore = before === null ? null : T.sub(anchor, before);
+  const roomAfter = after === null ? null : T.sub(after, anchor);
+
+  // Null means nothing is in the way on the side that matters.
+  switch (alignment) {
+    case 'start':
+      return roomAfter;
+    case 'end':
+      return roomBefore;
+    default: {
+      // Centred spends half its length on each side of the anchor.
+      let half = roomBefore;
+      if (roomAfter !== null) half = half === null ? roomAfter : T.min(half, roomAfter);
+      return half === null ? null : T.mulInt(half, 2);
+    }
+  }
+}
+
 function fitTransition(
   d: Draft,
-  from: Clip,
-  to: Clip,
+  from: Clip | null,
+  to: Clip | null,
   alignment: Transition['alignment'],
   requested: Time,
+  excludeId: TransitionId | null = null,
 ): Time {
   if (!T.isPositive(requested)) throw new ModelError('A transition must be longer than zero');
+  const anchor = to ? to.start : clipEnd(from!);
+  const trackId = (from ?? to!).trackId;
 
-  const max = maxTransitionDuration(d, from, to, alignment);
+  const neighbours = roomBetweenNeighbours(d, trackId, anchor, alignment, excludeId);
+  let max = maxTransitionDuration(d, from, to, alignment);
+  if (neighbours !== null) max = T.min(max, neighbours);
   if (!T.isPositive(max)) {
+    const names = from && to ? `"${from.name}" and "${to.name}"` : `"${(from ?? to!).name}"`;
     throw new ModelError(
-      `"${from.name}" and "${to.name}" have no spare frames for a transition — ` +
-        'trim one of them back to free some up',
+      `${names} have no spare frames for a transition — trim back, or move the ` +
+        'transition next to this one out of the way',
     );
   }
   return T.min(requested, max);
@@ -676,13 +735,16 @@ function handleAddTransition(
   cmd: Extract<Command, { type: 'addTransition' }>,
   ids: IdSource,
 ): void {
-  const from = draftClip(d, cmd.fromClipId);
-  const to = draftClip(d, cmd.toClipId);
+  if (cmd.fromClipId === null && cmd.toClipId === null) {
+    throw new ModelError('A transition needs a clip on at least one side');
+  }
+  const from = cmd.fromClipId === null ? null : draftClip(d, cmd.fromClipId);
+  const to = cmd.toClipId === null ? null : draftClip(d, cmd.toClipId);
 
-  if (from.trackId !== to.trackId) {
+  if (from && to && from.trackId !== to.trackId) {
     throw new ModelError('A transition joins two clips on the same track');
   }
-  const track = draftTrack(d, from.trackId);
+  const track = draftTrack(d, (from ?? to!).trackId);
   assertUnlocked(track);
 
   const transitionType = cmd.transitionType ?? 'dissolve';
@@ -692,13 +754,13 @@ function handleAddTransition(
     throw new ModelError(`Unknown transition type "${transitionType}"`);
   }
   // Audio tracks crossfade regardless of the type; there is nothing to wipe.
-  if (!T.eq(clipEnd(from), to.start)) {
+  if (from && to && !T.eq(clipEnd(from), to.start)) {
     throw new ModelError(`"${from.name}" and "${to.name}" are not adjacent`);
   }
 
   // One transition per cut, or two overlapping mixes would fight over the same frames.
   for (const existing of Object.values(d.transitions)) {
-    if (existing.fromClipId === from.id && existing.toClipId === to.id) {
+    if (existing.fromClipId === (from?.id ?? null) && existing.toClipId === (to?.id ?? null)) {
       throw new ModelError('That cut already has a transition');
     }
   }
@@ -712,8 +774,8 @@ function handleAddTransition(
     id,
     transitionType,
     trackId: track.id,
-    fromClipId: from.id,
-    toClipId: to.id,
+    fromClipId: from?.id ?? null,
+    toClipId: to?.id ?? null,
     duration: fitTransition(d, from, to, alignment, cmd.duration),
     alignment,
     params: {},
@@ -800,14 +862,14 @@ function handleSetTransitionAlignment(
   if (!transition) throw new ModelError('That transition no longer exists');
   assertUnlocked(draftTrack(d, transition.trackId));
 
-  const from = draftClip(d, transition.fromClipId);
-  const to = draftClip(d, transition.toClipId);
+  const from = transition.fromClipId === null ? null : draftClip(d, transition.fromClipId);
+  const to = transition.toClipId === null ? null : draftClip(d, transition.toClipId);
   // Each alignment spends a different handle, so a length that fitted centred
   // may not fit once the whole overlap moves to one side of the cut.
   d.transitions[transition.id] = {
     ...transition,
     alignment: cmd.alignment,
-    duration: fitTransition(d, from, to, cmd.alignment, transition.duration),
+    duration: fitTransition(d, from, to, cmd.alignment, transition.duration, transition.id),
   };
 }
 
@@ -853,13 +915,13 @@ function handleSetTransitionDuration(
   const transition = d.transitions[cmd.transitionId];
   if (!transition) throw new ModelError('That transition no longer exists');
 
-  const from = draftClip(d, transition.fromClipId);
-  const to = draftClip(d, transition.toClipId);
+  const from = transition.fromClipId === null ? null : draftClip(d, transition.fromClipId);
+  const to = transition.toClipId === null ? null : draftClip(d, transition.toClipId);
   assertUnlocked(draftTrack(d, transition.trackId));
 
   d.transitions[transition.id] = {
     ...transition,
-    duration: fitTransition(d, from, to, transition.alignment, cmd.duration),
+    duration: fitTransition(d, from, to, transition.alignment, cmd.duration, transition.id),
   };
 }
 

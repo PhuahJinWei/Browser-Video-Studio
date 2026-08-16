@@ -69,6 +69,8 @@ describe('wipes', () => {
       direction: 'right',
       progress: 0.5,
       softness: DEFAULT_WIPE_SOFTNESS,
+      // Revealing, not hiding: that flag is for a wipe out to black.
+      hide: false,
     });
   });
 
@@ -184,7 +186,7 @@ describe('linked picture and sound', () => {
     const cuts = pairedCuts(p, va!, vb!);
 
     expect(cuts).toHaveLength(2);
-    const tracks = cuts.map((c) => c.from.trackId).sort();
+    const tracks = cuts.map((c) => c.from!.trackId).sort();
     expect(tracks).toEqual([f.a1, f.v1].sort());
   });
 
@@ -205,8 +207,8 @@ describe('linked picture and sound', () => {
       p,
       ...cuts.map((cut) => ({
         type: 'addTransition' as const,
-        fromClipId: cut.from.id,
-        toClipId: cut.to.id,
+        fromClipId: cut.from!.id,
+        toClipId: cut.to!.id,
         duration: sec(1),
       })),
     );

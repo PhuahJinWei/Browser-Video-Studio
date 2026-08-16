@@ -227,8 +227,8 @@ describe('the mix it renders', () => {
     expect(activeTransitionAt(p, f.v1, sec(2))).toBeNull();
 
     const active = activeTransitionAt(p, f.v1, sec(4))!;
-    expect(active.from.name).toBe('A');
-    expect(active.to.name).toBe('B');
+    expect(active.from!.name).toBe('A');
+    expect(active.to!.name).toBe('B');
     expect(active.progress).toBeCloseTo(0.5, 6);
   });
 });

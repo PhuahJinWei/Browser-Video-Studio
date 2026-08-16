@@ -471,12 +471,12 @@ export const useStudio = create<StudioState>((set, get) => ({
     state.runMany(
       cuts.map((cut) => ({
         type: 'addTransition' as const,
-        fromClipId: cut.from.id,
-        toClipId: cut.to.id,
+        fromClipId: cut.from?.id ?? null,
+        toClipId: cut.to?.id ?? null,
         duration: T.fromSeconds(DEFAULT_TRANSITION_SECONDS, 1000),
         // Sound has no edge to wipe; it always crossfades.
         transitionType:
-          project.tracks[cut.from.trackId]?.kind === 'audio'
+          project.tracks[(cut.from ?? cut.to!).trackId]?.kind === 'audio'
             ? 'dissolve'
             : (transitionType ?? 'dissolve'),
       })),

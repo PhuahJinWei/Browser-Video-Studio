@@ -112,8 +112,10 @@ function TransitionInspector({ transition }: { transition: Transition }): React.
 
   const paired = pairedTransitions(project, transition);
   const track = project.tracks[transition.trackId];
-  const from = project.clips[transition.fromClipId];
-  const to = project.clips[transition.toClipId];
+  const from = transition.fromClipId === null ? null : project.clips[transition.fromClipId];
+  const to = transition.toClipId === null ? null : project.clips[transition.toClipId];
+  // Against black on one side, so there is no alignment to choose and no cut.
+  const againstBlack = !from || !to;
   const span = transitionSpan(project, transition);
   const isAudio = track?.kind === 'audio';
   const isWipe = transition.transitionType.startsWith('wipe.');
@@ -133,7 +135,7 @@ function TransitionInspector({ transition }: { transition: Transition }): React.
       <div className="field">
         <label>Transition</label>
         <p className="hint" style={{ margin: 0 }}>
-          {from?.name ?? '?'} → {to?.name ?? '?'} on {track?.name ?? '?'}
+          {from ? from.name : 'black'} → {to ? to.name : 'black'} on {track?.name ?? '?'}
           {paired.length > 1 && <> · picture and sound</>}
         </p>
       </div>
@@ -192,6 +194,7 @@ function TransitionInspector({ transition }: { transition: Transition }): React.
         </p>
       )}
 
+      {!againstBlack && (
       <div className="field">
         <label>Alignment</label>
         <select
@@ -220,6 +223,7 @@ function TransitionInspector({ transition }: { transition: Transition }): React.
           </p>
         )}
       </div>
+      )}
 
       {affectsAudio && (
         <div className="field">

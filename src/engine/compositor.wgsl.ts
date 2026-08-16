@@ -53,7 +53,8 @@ struct LayerUniforms {
   wipe_mode   : u32,   // 0 none, 1 right, 2 left, 3 down, 4 up, 5 iris
   wipe_prog   : f32,   // 0 fully hidden, 1 fully revealed
   wipe_soft   : f32,   // feather width, as a fraction of the sweep
-  _pad        : vec3f,
+  wipe_hide   : u32,   // 1 inverts the mask, so the edge takes the layer away
+  _pad        : vec2f,
 };
 
 @group(0) @binding(0) var<uniform> u        : LayerUniforms;
@@ -107,9 +108,11 @@ fn wipe_mask(uv : vec2f) -> f32 {
   let soft = max(u.wipe_soft, 0.0001);
   let edge = u.wipe_prog * (1.0 + 2.0 * soft) - soft;
   let revealed = 1.0 - smoothstep(edge - soft, edge + soft, travel);
+  // Wiping out to black is the same edge going the same way, hiding instead.
+  let masked = select(revealed, 1.0 - revealed, u.wipe_hide == 1u);
 
   // Selected rather than branched, so every layer runs the same control flow.
-  return select(revealed, 1.0, u.wipe_mode == 0u);
+  return select(masked, 1.0, u.wipe_mode == 0u);
 }
 
 fn apply_colour(rgb : vec3f) -> vec3f {

@@ -9,7 +9,7 @@
  *  - Additive evolution: bump SCHEMA_VERSION and add a migration; never repurpose a field.
  */
 
-export const SCHEMA_VERSION = 2 as const;
+export const SCHEMA_VERSION = 3 as const;
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -226,6 +226,11 @@ export interface LayerWipe {
   readonly progress: number;
   /** Feather on the edge, as a fraction of the sweep. 0 is a hard line. */
   readonly softness: number;
+  /**
+   * Invert the mask, so the edge takes the layer away instead of bringing it in.
+   * A wipe out to black needs the same edge travelling the same way, hiding.
+   */
+  readonly hide: boolean;
 }
 
 /**
@@ -259,9 +264,19 @@ export interface Transition {
   readonly id: TransitionId;
   readonly transitionType: string; // one of TRANSITION_TYPES; see the note there
   readonly trackId: TrackId;
-  /** Transition sits across the cut between these two adjacent clips on the same track. */
-  readonly fromClipId: ClipId;
-  readonly toClipId: ClipId;
+  /**
+   * The two clips the transition sits between, adjacent on the same track.
+   *
+   * Either may be null, and then the transition runs against black instead of
+   * against another clip: a null `fromClipId` fades in at the head of
+   * `toClipId`, a null `toClipId` fades out at the tail of `fromClipId`. Both
+   * null is meaningless and rejected.
+   *
+   * A one-sided transition needs no handles — it never plays a clip past its
+   * own edge — so it is bounded only by that clip's length.
+   */
+  readonly fromClipId: ClipId | null;
+  readonly toClipId: ClipId | null;
   readonly duration: Time;
   readonly alignment: 'centered' | 'start' | 'end';
   readonly params: ParamMap;

@@ -455,12 +455,14 @@ export function Timeline(): React.JSX.Element {
     runMany(
       pairedCuts(project, cut.from, cut.to).map((paired) => ({
         type: 'addTransition' as const,
-        fromClipId: paired.from.id,
-        toClipId: paired.to.id,
+        fromClipId: paired.from?.id ?? null,
+        toClipId: paired.to?.id ?? null,
         duration: T.fromSeconds(DEFAULT_TRANSITION_SECONDS, 1000),
         // Sound has no edge to wipe; it always crossfades.
         transitionType:
-          getTrack(project, paired.from.trackId).kind === 'audio' ? 'dissolve' : transitionType,
+          getTrack(project, (paired.from ?? paired.to!).trackId).kind === 'audio'
+            ? 'dissolve'
+            : transitionType,
       })),
       'Add transition',
     );
@@ -475,20 +477,22 @@ export function Timeline(): React.JSX.Element {
     event.preventDefault();
     if (getTrack(project, transition.trackId).locked) return;
 
-    const from = project.clips[transition.fromClipId];
-    const to = project.clips[transition.toClipId];
-    if (!from || !to) return;
+    const from = transition.fromClipId === null ? null : (project.clips[transition.fromClipId] ?? null);
+    const to = transition.toClipId === null ? null : (project.clips[transition.toClipId] ?? null);
+    if (!from && !to) return;
+    // A fade against black has no cut to roll — only its length can change.
+    if (kind === 'roll' && (!from || !to)) return;
 
     selectTransition(transition.id);
     setTransitionDrag({
       kind,
       transitionId: transition.id,
       ids: pairedTransitions(project, transition).map((t) => t.id),
-      cuts: pairedCuts(project, from, to).map((cut) => ({
-        fromId: cut.from.id,
-        toId: cut.to.id,
-      })),
-      cut: to.start,
+      cuts: pairedCuts(project, from, to)
+        .filter((cut) => cut.from && cut.to)
+        .map((cut) => ({ fromId: cut.from!.id, toId: cut.to!.id })),
+      // Against black the anchor is the clip edge the fade sits against.
+      cut: to ? to.start : clipEnd(from!),
       alignment: transition.alignment,
     });
   };
@@ -536,25 +540,27 @@ export function Timeline(): React.JSX.Element {
       label: string,
       from: Clip | null,
       to: Clip | null,
+      againstBlack = false,
     ): MenuEntry => {
-      const existing = from && to ? transitionBetween(project, from.id, to.id) : null;
+      const existing =
+        from || to ? transitionBetween(project, from?.id ?? null, to?.id ?? null) : null;
       return {
         label: existing ? `${label} (already there)` : label,
         icon: <IconTransition />,
-        // Needs a neighbour sharing an exact cut, and nothing there already.
-        disabled: !from || !to || existing !== null,
+        // Against a neighbour both sides are needed; against black, only one.
+        disabled: (againstBlack ? !from && !to : !from || !to) || existing !== null,
         onSelect: () => {
-          if (!from || !to) return;
+          if (!from && !to) return;
           // One command per cut so a linked A/V pair crossfades its sound too,
           // batched into a single undo step.
           runMany(
             pairedCuts(project, from, to).map((cut) => ({
               type: 'addTransition' as const,
-              fromClipId: cut.from.id,
-              toClipId: cut.to.id,
+              fromClipId: cut.from?.id ?? null,
+              toClipId: cut.to?.id ?? null,
               duration: T.time(1),
             })),
-            'Add cross dissolve',
+            label,
           );
         },
       };
@@ -577,6 +583,10 @@ export function Timeline(): React.JSX.Element {
       'separator',
       dissolveEntry('Cross dissolve at start', previous, clip),
       dissolveEntry('Cross dissolve at end', clip, next),
+      // Against black instead of against a neighbour — the only option at the
+      // very start and end of a track, and the commonest transition there is.
+      dissolveEntry('Fade in from black', null, clip, true),
+      dissolveEntry('Fade out to black', clip, null, true),
       'separator',
       {
         label: linked.length > 1 ? `Detach audio from video (${linked.length} clips)` : 'Detach audio from video',
