@@ -655,12 +655,6 @@ export function Timeline(): React.JSX.Element {
       const clip = project.clips[drag.clipId];
       if (!clip) return;
 
-      // Dragging up into the ruler used to do nothing at all. The lanes are the only
-      // place a clip can land, so up there the gesture is worth more as a scrub —
-      // it lets you carry a clip to a spot and see the frame you are aiming at.
-      const lanes = lanesRef.current?.getBoundingClientRect();
-      if (lanes && event.clientY < lanes.top) setPlayhead(timeAtClientX(event.clientX));
-
       const deltaSeconds = (event.clientX - drag.originClientX) / pxPerSecond;
       const delta = T.fromSeconds(deltaSeconds, 100_000);
       const excluded = new Set(drag.groupIds);
@@ -803,8 +797,6 @@ export function Timeline(): React.JSX.Element {
     cancelHover,
     project,
     pxPerSecond,
-    setPlayhead,
-    timeAtClientX,
     runMany,
     snap,
     endGesture,
