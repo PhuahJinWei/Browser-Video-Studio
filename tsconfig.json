@@ -21,7 +21,7 @@
     "noUnusedParameters": true,
     "useUnknownInCatchVariables": true,
 
-    "types": ["node", "vitest/globals"],
+    "types": ["node", "vitest/globals", "@webgpu/types"],
 
     "paths": {
       "@/*": ["./src/*"]
