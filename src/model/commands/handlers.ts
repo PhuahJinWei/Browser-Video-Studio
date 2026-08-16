@@ -169,6 +169,11 @@ function handleSetTrackProps(d: Draft, cmd: Extract<Command, { type: 'setTrackPr
   d.tracks[cmd.trackId] = { ...draftTrack(d, cmd.trackId), ...cmd.props };
 }
 
+function handleSetTrackParam(d: Draft, cmd: Extract<Command, { type: 'setTrackParam' }>): void {
+  const track = draftTrack(d, cmd.trackId);
+  d.tracks[cmd.trackId] = { ...track, [cmd.key]: cmd.param };
+}
+
 function handleMoveTrack(d: Draft, cmd: Extract<Command, { type: 'moveTrack' }>): void {
   const track = draftTrack(d, cmd.trackId);
   const seq = sequenceOfTrack(d, cmd.trackId);
@@ -609,6 +614,8 @@ export function runCommand(d: Draft, command: Command, ids: IdSource): void {
       return handleRemoveTrack(d, command);
     case 'setTrackProps':
       return handleSetTrackProps(d, command);
+    case 'setTrackParam':
+      return handleSetTrackParam(d, command);
     case 'moveTrack':
       return handleMoveTrack(d, command);
     case 'insertClip':

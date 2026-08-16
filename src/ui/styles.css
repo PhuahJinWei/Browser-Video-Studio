@@ -585,6 +585,10 @@ input[type='range'] {
   border-right: 1px solid var(--line);
   font-size: 12px;
 }
+.track-header.selected {
+  background: var(--panel-2);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
 .track-header .track-kind {
   color: var(--muted);
   display: flex;

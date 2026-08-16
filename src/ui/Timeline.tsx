@@ -123,6 +123,8 @@ export function Timeline(): React.JSX.Element {
   const endGesture = useStudio((s) => s.endGesture);
   const select = useStudio((s) => s.select);
   const selectExact = useStudio((s) => s.selectExact);
+  const selectTrack = useStudio((s) => s.selectTrack);
+  const selectedTrackId = useStudio((s) => s.selectedTrackId);
   const toggleSelect = useStudio((s) => s.toggleSelect);
   const setPlayhead = useStudio((s) => s.setPlayhead);
   const setZoom = useStudio((s) => s.setZoom);
@@ -618,6 +620,8 @@ export function Timeline(): React.JSX.Element {
                   onCommand={run}
                   removable={trackIds.length > 1}
                   width={HEADER_WIDTH}
+                  selected={selectedTrackId === trackId}
+                  onSelect={() => selectTrack(trackId)}
                 />
                 <div
                   data-track-id={trackId}
@@ -699,11 +703,15 @@ function TrackHeader({
   onCommand,
   removable,
   width,
+  selected,
+  onSelect,
 }: {
   track: Track;
   onCommand: (command: Command, label: string) => void;
   removable: boolean;
   width: number;
+  selected: boolean;
+  onSelect: () => void;
 }): React.JSX.Element {
   const menu = useContextMenu();
   const [renaming, setRenaming] = useState(false);
@@ -769,9 +777,17 @@ function TrackHeader({
 
   return (
     <div
-      className="track-header"
+      className={`track-header${selected ? ' selected' : ''}`}
       style={{ width }}
-      onContextMenu={(event) => menu.open(event, entries)}
+      onPointerDown={(event) => {
+        // Buttons and the rename field handle their own clicks.
+        if ((event.target as HTMLElement).closest('button, input')) return;
+        onSelect();
+      }}
+      onContextMenu={(event) => {
+        onSelect();
+        menu.open(event, entries);
+      }}
     >
       <span className="track-kind">
         {track.kind === 'audio' ? <IconAudio size={12} /> : <IconVideo size={12} />}

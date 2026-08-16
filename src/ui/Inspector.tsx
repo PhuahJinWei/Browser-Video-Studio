@@ -20,6 +20,7 @@ import type {
   Param,
   Project,
   TitleClip,
+  Track,
   VideoClip,
 } from '../model/types';
 import { useStudio } from './store';
@@ -38,7 +39,9 @@ const BLEND_MODES: readonly BlendMode[] = [
 export function Inspector(): React.JSX.Element {
   const history = useStudio((s) => s.history);
   const selection = useStudio((s) => s.selection);
+  const selectedTrackId = useStudio((s) => s.selectedTrackId);
   const project = history.present.project;
+  const track = selectedTrackId ? project.tracks[selectedTrackId] : undefined;
 
   const selected = selection.map((id) => project.clips[id]).filter((c): c is Clip => Boolean(c));
 
@@ -54,16 +57,179 @@ export function Inspector(): React.JSX.Element {
     <div className="panel">
       <div className="panel-head">Inspector</div>
       <div className="panel-body">
-        {!unit && (
+        {track && <TrackInspector track={track} />}
+        {!track && !unit && (
           <p className="hint">
             {selected.length > 1
               ? `${selected.length} clips selected.`
-              : 'Select a clip to edit its properties.'}
+              : 'Select a clip, or a track header, to edit its properties.'}
           </p>
         )}
-        {unit && <UnitInspector unit={unit} />}
+        {!track && unit && <UnitInspector unit={unit} />}
       </div>
     </div>
+  );
+}
+
+/**
+ * Track properties: volume and pan, which the mixer already applies, plus the
+ * track's own effect stack — both were reachable in the model but had no UI.
+ */
+function TrackInspector({ track }: { track: Track }): React.JSX.Element {
+  const run = useStudio((s) => s.run);
+  const endGesture = useStudio((s) => s.endGesture);
+  const history = useStudio((s) => s.history);
+  const project = history.present.project;
+
+  const effects = track.effects
+    .map((id) => project.effects[id])
+    .filter((e): e is EffectInstance => e !== undefined);
+
+  const setTrackParam = (key: 'gainDb' | 'pan', value: number, label: string): void =>
+    run(
+      { type: 'setTrackParam', trackId: track.id, key, param: staticParam(value) },
+      label,
+      `${key}:${track.id}`,
+    );
+  const setProps = (props: Record<string, boolean>, label: string): void =>
+    run({ type: 'setTrackProps', trackId: track.id, props }, label);
+
+  return (
+    <>
+      <div className="field">
+        <label>Track name</label>
+        <input
+          type="text"
+          value={track.name}
+          onChange={(event) =>
+            run(
+              { type: 'setTrackProps', trackId: track.id, props: { name: event.target.value } },
+              'Rename track',
+              `rename:${track.id}`,
+            )
+          }
+          onBlur={endGesture}
+        />
+      </div>
+
+      <p className="unit-badge">
+        {track.kind === 'video' ? 'Video track' : 'Audio track'} · {track.clipIds.length}{' '}
+        clip{track.clipIds.length === 1 ? '' : 's'}
+      </p>
+
+      {track.kind === 'audio' ? (
+        <>
+          <Slider
+            label="Volume"
+            value={staticValue(track.gainDb, 0)}
+            min={-60}
+            max={12}
+            step={0.5}
+            unit=" dB"
+            onChange={(value) => setTrackParam('gainDb', value, 'Set track volume')}
+            onCommit={endGesture}
+          />
+          <Slider
+            label="Pan"
+            value={staticValue(track.pan, 0)}
+            min={-1}
+            max={1}
+            step={0.01}
+            onChange={(value) => setTrackParam('pan', value, 'Set track pan')}
+            onCommit={endGesture}
+          />
+        </>
+      ) : (
+        <p className="hint">Volume and pan apply to audio tracks.</p>
+      )}
+
+      <div className="field">
+        <div className="value-row">
+          {track.kind === 'audio' ? (
+            <>
+              <button onClick={() => setProps({ muted: !track.muted }, 'Mute track')}>
+                {track.muted ? 'Unmute' : 'Mute'}
+              </button>
+              <button onClick={() => setProps({ solo: !track.solo }, 'Solo track')}>
+                {track.solo ? 'Unsolo' : 'Solo'}
+              </button>
+            </>
+          ) : (
+            <button onClick={() => setProps({ hidden: !track.hidden }, 'Hide track')}>
+              {track.hidden ? 'Show' : 'Hide'}
+            </button>
+          )}
+          <button onClick={() => setProps({ locked: !track.locked }, 'Lock track')}>
+            {track.locked ? 'Unlock' : 'Lock'}
+          </button>
+        </div>
+      </div>
+
+      <div className="field">
+        <label>Height</label>
+        <div className="value-row">
+          <input
+            type="range"
+            min={36}
+            max={160}
+            step={4}
+            value={track.height}
+            onChange={(event) =>
+              run(
+                {
+                  type: 'setTrackProps',
+                  trackId: track.id,
+                  props: { height: Number(event.target.value) },
+                },
+                'Set track height',
+                `height:${track.id}`,
+              )
+            }
+            onPointerUp={endGesture}
+          />
+          <output>{track.height}px</output>
+        </div>
+      </div>
+
+      <hr style={{ border: 0, borderTop: '1px solid var(--line)', margin: '14px 0' }} />
+
+      <div className="field">
+        <label>Track effects</label>
+        {effects.length === 0 && <p className="hint">None.</p>}
+        {effects.map((effect) => (
+          <EffectCard key={effect.id} effect={effect} />
+        ))}
+        <select
+          value=""
+          onChange={(event) => {
+            const type = event.target.value;
+            if (!type) return;
+            run(
+              {
+                type: 'addEffect',
+                owner: { kind: 'track', trackId: track.id },
+                effectType: type,
+                params: defaultParams(type),
+              },
+              `Add ${EFFECT_REGISTRY[type]?.label ?? type}`,
+            );
+          }}
+        >
+          <option value="">Add effect…</option>
+          {listEffects()
+            .filter((definition) =>
+              track.kind === 'audio'
+                ? definition.category === 'audio'
+                : definition.category !== 'audio',
+            )
+            .map((definition) => (
+              <option key={definition.type} value={definition.type}>
+                {definition.label}
+              </option>
+            ))}
+        </select>
+      </div>
+    </>
   );
 }
 

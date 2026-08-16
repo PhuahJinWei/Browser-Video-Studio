@@ -119,6 +119,13 @@ export type Command =
     }
   | { readonly type: 'removeTrack'; readonly trackId: TrackId }
   | { readonly type: 'setTrackProps'; readonly trackId: TrackId; readonly props: TrackProps }
+  /** Track-level gain and pan, which are animatable and so are not plain props. */
+  | {
+      readonly type: 'setTrackParam';
+      readonly trackId: TrackId;
+      readonly key: 'gainDb' | 'pan';
+      readonly param: Param<number>;
+    }
   | { readonly type: 'moveTrack'; readonly trackId: TrackId; readonly toIndex: number }
 
   // -- clips ----------------------------------------------------------------

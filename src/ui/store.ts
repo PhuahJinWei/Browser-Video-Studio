@@ -63,6 +63,8 @@ export interface StudioState {
   history: History;
   sequenceId: SequenceId;
   selection: readonly ClipId[];
+  /** A selected track, for editing its volume, pan and effects. */
+  selectedTrackId: TrackId | null;
   engine: Engine | null;
   /** Source blobs, kept so the engine can reopen assets. */
   mediaFiles: ReadonlyMap<AssetId, File>;
@@ -100,6 +102,7 @@ export interface StudioState {
   /** Selects these clips and everything linked or grouped with them. */
   select: (clipIds: readonly ClipId[]) => void;
   toggleSelect: (clipId: ClipId) => void;
+  selectTrack: (trackId: TrackId | null) => void;
 
   setPlayhead: (at: Time) => void;
   setZoom: (pixelsPerSecond: number) => void;
@@ -148,6 +151,7 @@ export const useStudio = create<StudioState>((set, get) => ({
   history: initHistory(initial.project),
   sequenceId: initial.sequenceId,
   selection: [],
+  selectedTrackId: null,
   engine: null,
   mediaFiles: new Map(),
   telemetry: null,
@@ -224,7 +228,13 @@ export const useStudio = create<StudioState>((set, get) => ({
   canUndoEdit: () => canUndo(get().history),
   canRedoEdit: () => canRedo(get().history),
 
-  selectExact: (clipIds) => set({ selection: clipIds }),
+  selectExact: (clipIds) => set({ selection: clipIds, selectedTrackId: null }),
+
+  /**
+   * Track and clip selection are mutually exclusive: the inspector shows one
+   * subject, and a track selected alongside a clip would leave it ambiguous.
+   */
+  selectTrack: (trackId) => set({ selectedTrackId: trackId, selection: [] }),
 
   /**
    * Selecting one member of a link or group selects the whole unit.
@@ -233,7 +243,8 @@ export const useStudio = create<StudioState>((set, get) => ({
    * they disagree with dragging — which already moves a unit together. That gap is
    * what let deleting a video clip leave its audio orphaned on the track.
    */
-  select: (clipIds) => set({ selection: expandSelection(get().project(), clipIds) }),
+  select: (clipIds) =>
+    set({ selection: expandSelection(get().project(), clipIds), selectedTrackId: null }),
 
   toggleSelect: (clipId) => {
     const project = get().project();
