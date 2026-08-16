@@ -12,10 +12,12 @@ import { insertCommand, makeFixture, run, runFrom, sec, type Fixture } from './f
 import {
   audibleClipRange,
   audioSegments,
+  DEFAULT_CROSSFADE_CURVE,
   DEFAULT_WIPE_SOFTNESS,
   ModelError,
   pairedCuts,
   renderListAt,
+  transitionCurve,
   transitionSoftness,
   transitionSpan,
 } from './selectors';
@@ -276,5 +278,65 @@ describe('alignment and softness', () => {
     const id = Object.values(p.transitions)[0]!.id;
     const clamped = runFrom(f, p, { type: 'setTransitionSoftness', transitionId: id, softness: 5 });
     expect(transitionSoftness(Object.values(clamped.transitions)[0]!)).toBe(0.5);
+  });
+});
+
+describe('crossfade curve', () => {
+  function audioPairWithTransition(): Project {
+    const p = run(
+      f,
+      insertCommand(f, {
+        trackId: f.a1, kind: 'audio', start: sec(0), duration: sec(4), sourceIn: sec(2), name: 'A',
+      }),
+      insertCommand(f, {
+        trackId: f.a1, kind: 'audio', start: sec(4), duration: sec(4), sourceIn: sec(2), name: 'B',
+      }),
+    );
+    return addTransition(p, f.a1);
+  }
+
+  it('is constant power unless asked otherwise', () => {
+    const p = audioPairWithTransition();
+    expect(DEFAULT_CROSSFADE_CURVE).toBe('equal-power');
+    expect(transitionCurve(Object.values(p.transitions)[0]!)).toBe('equal-power');
+  });
+
+  it('reaches the mixer through the segment, on both sides of the cut', () => {
+    const p = audioPairWithTransition();
+    const linear = runFrom(f, p, {
+      type: 'setTransitionCurve',
+      transitionId: Object.values(p.transitions)[0]!.id,
+      curve: 'linear',
+    });
+    expect(transitionCurve(Object.values(linear.transitions)[0]!)).toBe('linear');
+
+    const segments = audioSegments(linear, f.seqId, T.rangeFromBounds(sec(7, 2), sec(4)));
+    const outgoing = segments.find((s) => s.clip.name === 'A')!;
+    const incoming = segments.find((s) => s.clip.name === 'B')!;
+    expect(outgoing.crossfadeOut?.curve).toBe('linear');
+    expect(incoming.crossfadeIn?.curve).toBe('linear');
+  });
+
+  it('leaves the span alone when only the curve changes', () => {
+    const p = audioPairWithTransition();
+    const before = audibleClipRange(p, p.clips[p.tracks[f.a1 as never]!.clipIds[0]!]!);
+    const linear = runFrom(f, p, {
+      type: 'setTransitionCurve',
+      transitionId: Object.values(p.transitions)[0]!.id,
+      curve: 'linear',
+    });
+    const after = audibleClipRange(linear, linear.clips[linear.tracks[f.a1 as never]!.clipIds[0]!]!);
+    expect(T.toSeconds(after.range.duration)).toBe(T.toSeconds(before.range.duration));
+  });
+
+  it('refuses a curve it does not have', () => {
+    const p = audioPairWithTransition();
+    expect(() =>
+      runFrom(f, p, {
+        type: 'setTransitionCurve',
+        transitionId: Object.values(p.transitions)[0]!.id,
+        curve: 's-curve' as never,
+      }),
+    ).toThrow(ModelError);
   });
 });

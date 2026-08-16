@@ -17,6 +17,7 @@ import type {
   AssetStatus,
   BlendMode,
   ClipId,
+  CrossfadeCurve,
   EffectInstanceId,
   MarkerId,
   Param,
@@ -232,6 +233,12 @@ export type Command =
       readonly fromClipId: ClipId;
       readonly toClipId: ClipId;
       readonly to: Time;
+    }
+  /** Gain shape for the audio crossfade. Video ignores it. */
+  | {
+      readonly type: 'setTransitionCurve';
+      readonly transitionId: TransitionId;
+      readonly curve: CrossfadeCurve;
     }
   /** Wipe edge feather, 0..0.5 as a fraction of the sweep. */
   | {

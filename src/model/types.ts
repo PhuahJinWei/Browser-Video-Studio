@@ -229,6 +229,17 @@ export interface LayerWipe {
 }
 
 /**
+ * Shape of an audio crossfade's gain ramp.
+ *
+ * Only sound needs this. The video dissolve holds the outgoing clip opaque and
+ * ramps only the incoming one, so its two sides already sum to exactly 1 at
+ * every point; audio *sums* instead of compositing, so the two curves differ.
+ */
+export const CROSSFADE_CURVES = ['equal-power', 'linear'] as const;
+
+export type CrossfadeCurve = (typeof CROSSFADE_CURVES)[number];
+
+/**
  * Transition types the renderer knows. Anything else falls back to a dissolve —
  * `transitionType` stays a plain string so a project written by a later version
  * still loads, rather than failing validation on a type this build cannot draw.

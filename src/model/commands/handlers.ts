@@ -25,7 +25,7 @@ import type {
   TrackId,
   Transition,
 } from '../types';
-import { TRANSITION_TYPES } from '../types';
+import { CROSSFADE_CURVES, TRANSITION_TYPES } from '../types';
 import {
   assertPositiveDuration,
   clearRangeOnTrack,
@@ -811,6 +811,23 @@ function handleSetTransitionAlignment(
   };
 }
 
+function handleSetTransitionCurve(
+  d: Draft,
+  cmd: Extract<Command, { type: 'setTransitionCurve' }>,
+): void {
+  const transition = d.transitions[cmd.transitionId];
+  if (!transition) throw new ModelError('That transition no longer exists');
+  if (!(CROSSFADE_CURVES as readonly string[]).includes(cmd.curve)) {
+    throw new ModelError(`Unknown crossfade curve "${cmd.curve}"`);
+  }
+  assertUnlocked(draftTrack(d, transition.trackId));
+
+  d.transitions[transition.id] = {
+    ...transition,
+    params: { ...transition.params, curve: staticParam(cmd.curve) },
+  };
+}
+
 function handleSetTransitionSoftness(
   d: Draft,
   cmd: Extract<Command, { type: 'setTransitionSoftness' }>,
@@ -894,6 +911,8 @@ export function runCommand(d: Draft, command: Command, ids: IdSource): void {
       return handleSetTransitionAlignment(d, command);
     case 'setTransitionSoftness':
       return handleSetTransitionSoftness(d, command);
+    case 'setTransitionCurve':
+      return handleSetTransitionCurve(d, command);
     case 'setClipSpeed':
       return handleSetClipSpeed(d, command);
     case 'unlinkClips':

@@ -19,6 +19,7 @@ import type {
   Clip,
   ClipId,
   Crop,
+  CrossfadeCurve,
   EffectInstance,
   LayerWipe,
   Marker,
@@ -398,6 +399,21 @@ interface TrackLayer {
   readonly wipe: LayerWipe | null;
 }
 
+/**
+ * Constant power is the default because it is right for the normal case: two
+ * different shots, whose signals are uncorrelated.
+ */
+export const DEFAULT_CROSSFADE_CURVE: CrossfadeCurve = 'equal-power';
+
+/** Gain shape for a transition's audio crossfade. */
+export function transitionCurve(transition: Transition): CrossfadeCurve {
+  const param = transition.params['curve'];
+  if (!param || param.kind !== 'static' || param.value !== 'linear') {
+    return DEFAULT_CROSSFADE_CURVE;
+  }
+  return 'linear';
+}
+
 /** Wipe edge feather when a transition does not say otherwise. */
 export const DEFAULT_WIPE_SOFTNESS = 0.004;
 
@@ -467,6 +483,12 @@ function trackLayersAt(p: Project, trackId: TrackId, at: Time): readonly TrackLa
 // Audio segments — the mixer's input
 // ---------------------------------------------------------------------------
 
+/** One side of a crossfade, as the mixer needs it. */
+export interface SegmentCrossfade {
+  readonly span: TimeRange;
+  readonly curve: CrossfadeCurve;
+}
+
 export interface AudioSegment {
   readonly clip: AudioClip;
   readonly trackId: TrackId;
@@ -475,10 +497,10 @@ export interface AudioSegment {
   /** Source time matching `timelineRange.start`. */
   readonly sourceStart: Time;
   readonly speed: number;
-  /** Span over which this clip is fading up as a transition's incoming side. */
-  readonly crossfadeIn: TimeRange | null;
-  /** Span over which it is fading away as the outgoing side. */
-  readonly crossfadeOut: TimeRange | null;
+  /** Set while this clip is fading up as a transition's incoming side. */
+  readonly crossfadeIn: SegmentCrossfade | null;
+  /** Set while it is fading away as the outgoing side. */
+  readonly crossfadeOut: SegmentCrossfade | null;
   readonly effects: readonly EffectInstance[];
   readonly trackEffects: readonly EffectInstance[];
 }
@@ -493,24 +515,25 @@ export function audibleClipRange(
   clip: Clip,
 ): {
   readonly range: TimeRange;
-  readonly crossfadeIn: TimeRange | null;
-  readonly crossfadeOut: TimeRange | null;
+  readonly crossfadeIn: SegmentCrossfade | null;
+  readonly crossfadeOut: SegmentCrossfade | null;
 } {
   let start = clip.start;
   let end = clipEnd(clip);
-  let crossfadeIn: TimeRange | null = null;
-  let crossfadeOut: TimeRange | null = null;
+  let crossfadeIn: SegmentCrossfade | null = null;
+  let crossfadeOut: SegmentCrossfade | null = null;
 
   for (const transition of trackTransitions(p, clip.trackId)) {
     const span = transitionSpan(p, transition);
     if (!span) continue;
+    const curve = transitionCurve(transition);
 
     if (transition.toClipId === clip.id) {
-      crossfadeIn = span;
+      crossfadeIn = { span, curve };
       start = T.min(start, span.start);
     }
     if (transition.fromClipId === clip.id) {
-      crossfadeOut = span;
+      crossfadeOut = { span, curve };
       end = T.max(end, T.rangeEnd(span));
     }
   }

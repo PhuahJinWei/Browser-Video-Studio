@@ -13,7 +13,11 @@
  */
 
 import { evalNumber } from '../model/params';
-import { audioSegments, getSequence } from '../model/selectors';
+import {
+  audioSegments,
+  getSequence,
+  type SegmentCrossfade,
+} from '../model/selectors';
 import * as T from '../model/time';
 import type { Project, SequenceId, Time, TimeRange } from '../model/types';
 import { foldAudioGainDb } from './effects';
@@ -102,13 +106,28 @@ function applyGainAutomation(
   /**
    * Where a transition puts this clip on its curve.
    *
-   * Equal power, not linear. Audio *sums* where video composites one layer over
-   * another, so both sides have to ramp — and two uncorrelated signals at 0.5
-   * each sum to about −3 dB of perceived level, an audible dip in the middle of
-   * every crossfade. cos/sin keeps the summed power constant instead.
+   * Both sides ramp, unlike the video dissolve: audio *sums* where video
+   * composites one layer over another.
+   *
+   * Which ramp depends on how alike the two signals are, and no single curve is
+   * right for both cases:
+   *
+   *  - equal power (cos/sin) holds the summed *power* constant, which is what
+   *    two different shots need — at 0.5 each they would sum to about −3 dB of
+   *    perceived level, an audible dip mid-fade.
+   *  - linear holds the summed *amplitude* constant, which is what identical or
+   *    highly correlated material needs — there equal power adds up to +3 dB in
+   *    the middle instead.
    */
-  const crossfadeGain = (span: TimeRange, timeline: Time, rising: boolean): number => {
+  const crossfadeGain = (
+    crossfade: SegmentCrossfade,
+    timeline: Time,
+    rising: boolean,
+  ): number => {
+    const { span } = crossfade;
     const progress = Math.min(1, Math.max(0, T.ratio(T.sub(timeline, span.start), span.duration)));
+    if (crossfade.curve === 'linear') return rising ? progress : 1 - progress;
+
     const quarterTurn = (progress * Math.PI) / 2;
     return rising ? Math.sin(quarterTurn) : Math.cos(quarterTurn);
   };

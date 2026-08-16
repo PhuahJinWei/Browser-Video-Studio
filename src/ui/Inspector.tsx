@@ -19,6 +19,7 @@ import {
   maxTransitionDuration,
   pairedTransitions,
   selectionUnit,
+  transitionCurve,
   transitionSoftness,
   transitionSpan,
 } from '../model/selectors';
@@ -29,6 +30,7 @@ import type {
   BlendMode,
   Clip,
   ClipId,
+  CrossfadeCurve,
   EffectInstance,
   Param,
   Project,
@@ -115,6 +117,8 @@ function TransitionInspector({ transition }: { transition: Transition }): React.
   const span = transitionSpan(project, transition);
   const isAudio = track?.kind === 'audio';
   const isWipe = transition.transitionType.startsWith('wipe.');
+  // Only worth showing when one of the paired transitions actually carries sound.
+  const affectsAudio = paired.some((t) => project.tracks[t.trackId]?.kind === 'audio');
 
   const longest = from && to ? maxTransitionDuration(project, from, to, transition.alignment) : null;
 
@@ -216,6 +220,33 @@ function TransitionInspector({ transition }: { transition: Transition }): React.
           </p>
         )}
       </div>
+
+      {affectsAudio && (
+        <div className="field">
+          <label>Audio crossfade</label>
+          <select
+            value={transitionCurve(transition)}
+            onChange={(event) =>
+              applyToPair(
+                (t) => ({
+                  type: 'setTransitionCurve' as const,
+                  transitionId: t.id,
+                  curve: event.target.value as CrossfadeCurve,
+                }),
+                'Set crossfade curve',
+              )
+            }
+          >
+            <option value="equal-power">Constant power — different material</option>
+            <option value="linear">Constant gain — same or similar material</option>
+          </select>
+          <p className="hint">
+            Sound sums where picture layers, so both sides ramp. Constant power holds
+            the loudness steady across two different shots; constant gain suits
+            material that is alike, where constant power would swell in the middle.
+          </p>
+        </div>
+      )}
 
       {isWipe && (
         <Slider
