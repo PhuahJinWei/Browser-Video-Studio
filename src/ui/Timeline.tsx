@@ -130,6 +130,8 @@ interface DragHint {
  * than making the gesture slightly more deliberate.
  */
 interface Insertion {
+  /** Which end of the lane block it sits at, so the right gap can light up. */
+  readonly where: 'above' | 'below';
   readonly trackKind: TrackKind;
   /** Insertion index within that kind's list in the document. */
   readonly index: number;
@@ -605,6 +607,9 @@ export function Timeline(): React.JSX.Element {
    * cannot land anyway. That makes the gesture unambiguous without a proximity band
    * that would fire on the ordinary vertical drift of a horizontal drag.
    */
+  // Trimming cannot make a track, so the gaps are for a move and nothing else.
+  const clipDragging = drag?.kind === 'move';
+
   const insertionAt = useCallback(
     (clientY: number, clipKind: Clip['kind']): Insertion | null => {
       const lanes = [...(lanesRef.current?.querySelectorAll<HTMLElement>('[data-track-id]') ?? [])];
@@ -625,6 +630,7 @@ export function Timeline(): React.JSX.Element {
       // that is the end of `videoTrackIds`, since display order reverses it.
       if (!empty && clientY < rects[first]!.top) {
         return {
+          where: 'above',
           trackKind,
           index: trackKind === 'video' ? videoCount : 0,
           clientY: rects[first]!.top,
@@ -635,6 +641,7 @@ export function Timeline(): React.JSX.Element {
       const bottom = empty ? rects[rects.length - 1]!.bottom : rects[last]!.bottom;
       if (clientY > bottom) {
         return {
+          where: 'below',
           trackKind,
           index: trackKind === 'video' ? 0 : sequence.audioTrackIds.length,
           clientY: bottom,
@@ -1632,6 +1639,17 @@ export function Timeline(): React.JSX.Element {
         </div>
 
         <div className="timeline-body" ref={lanesRef}>
+          {/*
+            Real rows rather than a line drawn at the boundary. `insertionAt` fires
+            when the pointer is above the first lane or below the last, so a strip
+            occupying that space *is* the drop target — nothing else was needed to
+            make it work, only somewhere to aim.
+
+            They open for the whole drag rather than when the pointer nears an edge:
+            a gap that appears on approach moves the lanes, which moves the pointer
+            into a different row, which closes the gap again.
+          */}
+          {clipDragging && <InsertGap side="top" active={insertion?.where === 'above'} />}
           {trackIds.map((trackId) => {
             const track = getTrack(project, trackId);
             const height = Math.max(MIN_TRACK_HEIGHT, track.height);
@@ -1854,6 +1872,8 @@ export function Timeline(): React.JSX.Element {
             fill the pane — which is also what lets the playhead run to the floor —
             and it is the natural place to drop something to give it a track of its own.
           */}
+          {clipDragging && <InsertGap side="bottom" active={insertion?.where === 'below'} />}
+
           <div
             className={`timeline-tail${draggingAssetId ? ' insert-ready' : ''}${
               assetInsertion?.where === 'bottom' ? ' insert-active' : ''
@@ -1924,9 +1944,7 @@ export function Timeline(): React.JSX.Element {
         the timeline scrolled under them.
       */}
       {insertion && (
-        <div className="insert-line" style={{ top: insertion.clientY }}>
-          <span className="insert-note">{insertion.label}</span>
-        </div>
+        <div className="insert-line" style={{ top: insertion.clientY }} />
       )}
       {hint && <DragHintBox hint={hint} />}
       {/* A gesture's own readout takes precedence; two floating panels is one too many. */}
@@ -2634,6 +2652,22 @@ function minorDivisions(step: number): number {
  * does not show more of the timeline, it just overlaps the digits into a smear —
  * so the ruler gets denser by adding minors, not by crowding the numbers.
  */
+/**
+ * The strip that opens above and below the lanes while a clip is being dragged, so
+ * "drop here for a new track" is somewhere you can see rather than a boundary you
+ * have to guess at.
+ */
+function InsertGap({ side, active }: { side: 'top' | 'bottom'; active: boolean }): React.JSX.Element {
+  return (
+    <div className={`insert-gap ${side}${active ? ' active' : ''}`}>
+      <div className="insert-gap-header" style={{ width: HEADER_WIDTH }} />
+      <div className="insert-gap-lane">
+        <span>Drop here for a new track</span>
+      </div>
+    </div>
+  );
+}
+
 function buildTicks(
   totalSeconds: number,
   pxPerSecond: number,
