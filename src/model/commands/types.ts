@@ -236,6 +236,18 @@ export type Command =
       readonly toClipId: ClipId;
       readonly to: Time;
     }
+  /**
+   * Slide a transition along its cut. `offset` is where the span starts,
+   * measured from the cut; null puts it back on its preset alignment.
+   *
+   * Clamped to what the two clips can supply, so a drag can run past the end of
+   * the material and simply stop.
+   */
+  | {
+      readonly type: 'setTransitionOffset';
+      readonly transitionId: TransitionId;
+      readonly offset: Time | null;
+    }
   /** Gain shape for the audio crossfade. Video ignores it. */
   | {
       readonly type: 'setTransitionCurve';

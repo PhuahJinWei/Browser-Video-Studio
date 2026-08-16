@@ -257,3 +257,85 @@ describe('transitions keeping out of each other', () => {
     expect(problems.some((issue) => /Overlaps transition/.test(issue.message))).toBe(true);
   });
 });
+
+describe('sliding a transition along its cut', () => {
+  function pairWithTransition(duration = sec(2)): Project {
+    const p = run(
+      f,
+      insertCommand(f, { trackId: f.v1, start: sec(0), duration: sec(4), sourceIn: sec(2), name: 'A' }),
+      insertCommand(f, { trackId: f.v1, start: sec(4), duration: sec(4), sourceIn: sec(2), name: 'B' }),
+    );
+    const [a, b] = ids(p);
+    return runFrom(f, p, { type: 'addTransition', fromClipId: a!, toClipId: b!, duration });
+  }
+
+  it('starts on its preset, with no explicit position', () => {
+    const p = pairWithTransition();
+    const t = only(p);
+    expect(t.offset).toBeNull();
+    // Centred on the cut at 4 s: 3 → 5.
+    expect(T.toSeconds(transitionSpan(p, t)!.start)).toBe(3);
+  });
+
+  it('moves the span by exactly what it is given', () => {
+    const p = pairWithTransition();
+    const slid = runFrom(f, p, {
+      type: 'setTransitionOffset', transitionId: only(p).id, offset: sec(0),
+    });
+    // Offset 0 means the span begins on the cut, the same as the 'start' preset.
+    const span = transitionSpan(slid, only(slid))!;
+    expect(T.toSeconds(span.start)).toBe(4);
+    expect(T.toSeconds(T.rangeEnd(span))).toBe(6);
+    assertValidProject(slid);
+  });
+
+  it('reaches positions no preset offers', () => {
+    const p = pairWithTransition();
+    const slid = runFrom(f, p, {
+      type: 'setTransitionOffset', transitionId: only(p).id, offset: sec(-1, 2),
+    });
+    expect(T.toSeconds(transitionSpan(slid, only(slid))!.start)).toBe(3.5);
+    assertValidProject(slid);
+  });
+
+  it('is clamped to what the two clips can supply', () => {
+    const p = pairWithTransition();
+    // B only has 2 s of head, so the span cannot begin more than 2 s before the cut.
+    const tooEarly = runFrom(f, p, {
+      type: 'setTransitionOffset', transitionId: only(p).id, offset: sec(-30),
+    });
+    expect(T.toSeconds(transitionSpan(tooEarly, only(tooEarly))!.start)).toBe(2);
+    assertValidProject(tooEarly);
+
+    const tooLate = runFrom(f, p, {
+      type: 'setTransitionOffset', transitionId: only(p).id, offset: sec(30),
+    });
+    // A has 4 s of tail, so a 2 s span can start at most 2 s after the cut.
+    expect(T.toSeconds(transitionSpan(tooLate, only(tooLate))!.start)).toBe(6);
+    assertValidProject(tooLate);
+  });
+
+  it('goes back on its preset when an alignment is chosen', () => {
+    const p = pairWithTransition();
+    const slid = runFrom(f, p, {
+      type: 'setTransitionOffset', transitionId: only(p).id, offset: sec(1, 2),
+    });
+    expect(slid.transitions[only(slid).id]!.offset).not.toBeNull();
+
+    const preset = runFrom(f, slid, {
+      type: 'setTransitionAlignment', transitionId: only(slid).id, alignment: 'centered',
+    });
+    expect(preset.transitions[only(preset).id]!.offset).toBeNull();
+    expect(T.toSeconds(transitionSpan(preset, only(preset))!.start)).toBe(3);
+  });
+
+  it('refuses to slide a fade off the edge it sits against', () => {
+    const base = single();
+    const p = runFrom(f, base, {
+      type: 'addTransition', fromClipId: null, toClipId: ids(base)[0]!, duration: sec(1),
+    });
+    expect(() =>
+      runFrom(f, p, { type: 'setTransitionOffset', transitionId: only(p).id, offset: sec(1) }),
+    ).toThrow(ModelError);
+  });
+});

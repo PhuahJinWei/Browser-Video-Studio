@@ -9,7 +9,7 @@
  *  - Additive evolution: bump SCHEMA_VERSION and add a migration; never repurpose a field.
  */
 
-export const SCHEMA_VERSION = 3 as const;
+export const SCHEMA_VERSION = 4 as const;
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -278,7 +278,19 @@ export interface Transition {
   readonly fromClipId: ClipId | null;
   readonly toClipId: ClipId | null;
   readonly duration: Time;
+  /**
+   * Preset position relative to the cut. `offset` overrides it when set, so this
+   * is what the inspector's dropdown selects rather than the whole truth.
+   */
   readonly alignment: 'centered' | 'start' | 'end';
+  /**
+   * Where the span starts, measured from the cut, once it has been dragged off a
+   * preset. Null means "wherever `alignment` says", which is the normal case.
+   *
+   * Kept as exact time rather than a fraction so sliding a transition cannot
+   * drift the way a repeatedly re-derived percentage would.
+   */
+  readonly offset: Time | null;
   readonly params: ParamMap;
 }
 

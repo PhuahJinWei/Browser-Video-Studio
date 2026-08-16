@@ -98,8 +98,11 @@ interface DragState {
  * pointer event cannot make the transition drift.
  */
 interface TransitionDragState {
-  /** `length` drags an edge; `roll` moves the cut itself, under the badge. */
-  readonly kind: 'length' | 'roll';
+  /**
+   * `length` drags an edge, `slide` moves the whole badge along its cut, and
+   * `roll` moves the cut itself — the one thing the badge covers up.
+   */
+  readonly kind: 'length' | 'slide' | 'roll';
   readonly transitionId: TransitionId;
   /** Paired ids, so picture and sound stay the same length. */
   readonly ids: readonly TransitionId[];
@@ -107,6 +110,9 @@ interface TransitionDragState {
   readonly cuts: readonly { readonly fromId: ClipId; readonly toId: ClipId }[];
   readonly cut: Time;
   readonly alignment: Transition['alignment'];
+  /** Pointer offset into the badge at grab time, so a slide does not jump. */
+  readonly grabOffset: Time;
+  readonly duration: Time;
 }
 
 /** MIME type carrying an assetId when dragging from the media bin. */
@@ -391,6 +397,22 @@ export function Timeline(): React.JSX.Element {
     const move = (event: PointerEvent): void => {
       const pointer = timeAtClientX(event.clientX);
 
+      if (transitionDrag.kind === 'slide') {
+        // Where the span would start, keeping the point you grabbed under the
+        // pointer; the command clamps it to what the clips can supply.
+        const start = T.sub(pointer, transitionDrag.grabOffset);
+        runMany(
+          transitionDrag.ids.map((id) => ({
+            type: 'setTransitionOffset' as const,
+            transitionId: id,
+            offset: T.sub(start, transitionDrag.cut),
+          })),
+          'Slide transition',
+          `slide:${transitionDrag.transitionId}`,
+        );
+        return;
+      }
+
       if (transitionDrag.kind === 'roll') {
         // The command clamps to what the two clips can supply, so the pointer can
         // run past the end of the material without the gesture breaking.
@@ -480,9 +502,11 @@ export function Timeline(): React.JSX.Element {
     const from = transition.fromClipId === null ? null : (project.clips[transition.fromClipId] ?? null);
     const to = transition.toClipId === null ? null : (project.clips[transition.toClipId] ?? null);
     if (!from && !to) return;
-    // A fade against black has no cut to roll — only its length can change.
-    if (kind === 'roll' && (!from || !to)) return;
+    // A fade against black is pinned to its clip edge: no cut to roll, nowhere
+    // to slide to.
+    if ((kind === 'roll' || kind === 'slide') && (!from || !to)) return;
 
+    const span = transitionSpan(project, transition);
     selectTransition(transition.id);
     setTransitionDrag({
       kind,
@@ -494,6 +518,8 @@ export function Timeline(): React.JSX.Element {
       // Against black the anchor is the clip edge the fade sits against.
       cut: to ? to.start : clipEnd(from!),
       alignment: transition.alignment,
+      grabOffset: span ? T.sub(timeAtClientX(event.clientX), span.start) : T.TIME_ZERO,
+      duration: transition.duration,
     });
   };
 
@@ -652,6 +678,12 @@ export function Timeline(): React.JSX.Element {
     menu.open(event, entries);
   };
 
+  /** Would rolling this cut to the playhead actually move it anywhere legal? */
+  const rollableToPlayhead = (transition: Transition): boolean => {
+    const to = transition.toClipId === null ? null : project.clips[transition.toClipId];
+    return to !== null && to !== undefined && !T.eq(to.start, playhead);
+  };
+
   const openTransitionMenu = (event: React.MouseEvent, transition: Transition): void => {
     event.stopPropagation();
     const seconds = T.toSeconds(transition.duration);
@@ -679,6 +711,44 @@ export function Timeline(): React.JSX.Element {
             'Set transition style',
           ),
       })),
+      'separator',
+      {
+        label: 'Roll cut to playhead',
+        icon: <IconNextEdit />,
+        hint: 'Alt-drag',
+        // Only means anything with a clip on both sides, and somewhere to go.
+        disabled:
+          transition.fromClipId === null ||
+          transition.toClipId === null ||
+          !rollableToPlayhead(transition),
+        onSelect: () =>
+          runMany(
+            paired
+              .filter((t) => t.fromClipId !== null && t.toClipId !== null)
+              .map((t) => ({
+                type: 'rollEdit' as const,
+                fromClipId: t.fromClipId!,
+                toClipId: t.toClipId!,
+                to: playhead,
+              })),
+            'Roll edit',
+          ),
+      },
+      {
+        label: 'Recentre on the cut',
+        icon: <IconTransition />,
+        hint: 'drag to slide',
+        disabled: transition.offset === null,
+        onSelect: () =>
+          runMany(
+            paired.map((t) => ({
+              type: 'setTransitionOffset' as const,
+              transitionId: t.id,
+              offset: null,
+            })),
+            'Recentre transition',
+          ),
+      },
       'separator',
       {
         label: 'Set duration…',
@@ -959,17 +1029,16 @@ export function Timeline(): React.JSX.Element {
                           selectedTransitionId === transition.id ? ' selected' : ''
                         }`}
                         style={{ left: T.toSeconds(span.start) * pxPerSecond, width }}
-                        title={`${transitionLabel(transition.transitionType)} · ${T.formatDuration(transition.duration, { decimals: 2 })}\nDrag an edge to retime · Alt-drag to roll the cut`}
+                        title={`${transitionLabel(transition.transitionType)} · ${T.formatDuration(transition.duration, { decimals: 2 })}\nDrag to slide · drag an edge to retime · Alt-drag to roll the cut`}
                         onContextMenu={(event) => openTransitionMenu(event, transition)}
                         onPointerDown={(event) => {
                           // The badge covers the cut's own trim handles, so Alt on
                           // the body is how the cut underneath stays reachable.
-                          if (event.altKey) {
-                            startTransitionDrag(event, transition, 'roll');
-                            return;
-                          }
-                          event.stopPropagation();
-                          selectTransition(transition.id);
+                          startTransitionDrag(
+                            event,
+                            transition,
+                            event.altKey ? 'roll' : 'slide',
+                          );
                         }}
                       >
                         {/* Only worth the room once the badge is wide enough to read. */}

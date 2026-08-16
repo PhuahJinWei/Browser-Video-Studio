@@ -198,7 +198,7 @@ function TransitionInspector({ transition }: { transition: Transition }): React.
       <div className="field">
         <label>Alignment</label>
         <select
-          value={transition.alignment}
+          value={transition.offset === null ? transition.alignment : 'custom'}
           onChange={(event) =>
             applyToPair(
               (t) => ({
@@ -215,6 +215,10 @@ function TransitionInspector({ transition }: { transition: Transition }): React.
               {option.label} — {option.hint}
             </option>
           ))}
+          {/* Only reachable by dragging; picking any preset above leaves it. */}
+          {transition.offset !== null && (
+            <option value="custom">Custom — dragged off the presets</option>
+          )}
         </select>
         {span && (
           <p className="hint">

@@ -55,6 +55,18 @@ const MIGRATIONS: Readonly<Record<number, MigrationStep>> = {
    * rather than reading them as a missing clip.
    */
   2: (project) => ({ ...project, schemaVersion: 3 }),
+  /**
+   * 3 → 4: transitions gained `offset`, an exact position relative to the cut for
+   * when one has been dragged off its preset alignment. Nothing was dragged yet.
+   */
+  3: (project) => {
+    const transitions = (project.transitions ?? {}) as Record<string, Record<string, unknown>>;
+    const migrated: Record<string, unknown> = {};
+    for (const [id, transition] of Object.entries(transitions)) {
+      migrated[id] = { ...transition, offset: transition.offset ?? null };
+    }
+    return { ...project, transitions: migrated, schemaVersion: 4 };
+  },
 };
 
 export function readSchemaVersion(project: unknown): number | null {

@@ -613,6 +613,29 @@ export function audioSegments(
  * `centered` straddles the cut, so each clip must supply half the overlap;
  * `start` and `end` put the whole overlap on one side of it.
  */
+/**
+ * Where a preset alignment puts the start of the span, measured from the cut.
+ * `start` begins on it, `end` finishes on it, `centered` straddles it.
+ */
+export function presetOffset(
+  alignment: Transition['alignment'],
+  duration: Time,
+): Time {
+  switch (alignment) {
+    case 'start':
+      return T.TIME_ZERO;
+    case 'end':
+      return T.neg(duration);
+    default:
+      return T.neg(T.scale(duration, 0.5));
+  }
+}
+
+/** Where this transition's span actually starts, relative to the cut. */
+export function transitionOffset(transition: Transition): Time {
+  return transition.offset ?? presetOffset(transition.alignment, transition.duration);
+}
+
 export function transitionSpan(p: Project, transition: Transition): TimeRange | null {
   const from = transition.fromClipId === null ? null : p.clips[transition.fromClipId];
   const to = transition.toClipId === null ? null : p.clips[transition.toClipId];
@@ -626,17 +649,37 @@ export function transitionSpan(p: Project, transition: Transition): TimeRange | 
     return T.range(T.sub(clipEnd(from), transition.duration), transition.duration);
   }
 
-  const cut = to.start;
-  switch (transition.alignment) {
-    case 'start':
-      return T.range(cut, transition.duration);
-    case 'end':
-      return T.range(T.sub(cut, transition.duration), transition.duration);
-    default: {
-      const half = T.scale(transition.duration, 0.5);
-      return T.range(T.sub(cut, half), transition.duration);
-    }
-  }
+  return T.range(T.add(to.start, transitionOffset(transition)), transition.duration);
+}
+
+/**
+ * How far the span may sit either side of the cut.
+ *
+ * Both clips play throughout, so the outgoing one has to reach the far end out
+ * of its tail handle and the incoming one has to reach the near end out of its
+ * head — and neither may be asked for more than it is long.
+ */
+export function transitionOffsetBounds(
+  p: AssetLookup,
+  from: Clip,
+  to: Clip,
+  duration: Time,
+): { readonly earliest: Time; readonly latest: Time } {
+  const { tailroom } = clipTrimHandles(p, from);
+  const { headroom } = clipTrimHandles(p, to);
+
+  // Earliest: limited by the incoming clip's head, and by the outgoing clip's
+  // own length — the span cannot start before the clip it sits on.
+  let earliest = T.neg(from.duration);
+  if (headroom !== null) earliest = T.max(earliest, T.neg(headroom));
+
+  // Latest: the span must end inside the incoming clip, and within the tail.
+  let latest = T.sub(to.duration, duration);
+  if (tailroom !== null) latest = T.min(latest, T.sub(tailroom, duration));
+
+  // A span longer than the room available leaves nowhere legal; pin it rather
+  // than hand back an inverted range.
+  return T.lte(earliest, latest) ? { earliest, latest } : { earliest, latest: earliest };
 }
 
 /** Transitions living on one track, in timeline order. */

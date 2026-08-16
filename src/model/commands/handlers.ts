@@ -14,6 +14,7 @@ import {
   maxTransitionDuration,
   ModelError,
   rollBounds,
+  transitionOffsetBounds,
   transitionSpan,
 } from '../selectors';
 import { staticParam } from '../params';
@@ -778,6 +779,7 @@ function handleAddTransition(
     toClipId: to?.id ?? null,
     duration: fitTransition(d, from, to, alignment, cmd.duration),
     alignment,
+    offset: null,
     params: {},
   };
   d.sequences[sequence.id] = {
@@ -869,8 +871,52 @@ function handleSetTransitionAlignment(
   d.transitions[transition.id] = {
     ...transition,
     alignment: cmd.alignment,
+    // Picking a preset is how you get back off a custom position.
+    offset: null,
     duration: fitTransition(d, from, to, cmd.alignment, transition.duration, transition.id),
   };
+}
+
+function handleSetTransitionOffset(
+  d: Draft,
+  cmd: Extract<Command, { type: 'setTransitionOffset' }>,
+): void {
+  const transition = d.transitions[cmd.transitionId];
+  if (!transition) throw new ModelError('That transition no longer exists');
+  assertUnlocked(draftTrack(d, transition.trackId));
+
+  if (cmd.offset === null) {
+    d.transitions[transition.id] = { ...transition, offset: null };
+    return;
+  }
+
+  const from = transition.fromClipId === null ? null : draftClip(d, transition.fromClipId);
+  const to = transition.toClipId === null ? null : draftClip(d, transition.toClipId);
+  if (!from || !to) {
+    // A fade is pinned to the clip edge it sits against; there is nothing to
+    // slide it along.
+    throw new ModelError('A fade against black cannot be slid off its edge');
+  }
+
+  const bounds = transitionOffsetBounds(d, from, to, transition.duration);
+  let offset = T.clamp(cmd.offset, bounds.earliest, bounds.latest);
+
+  // Neighbouring transitions bound it too, exactly as they bound its length.
+  const cut = to.start;
+  for (const other of Object.values(d.transitions)) {
+    if (other.id === transition.id || other.trackId !== transition.trackId) continue;
+    const span = transitionSpan(d as unknown as Project, other);
+    if (!span) continue;
+
+    const end = T.rangeEnd(span);
+    if (T.lte(end, cut)) {
+      offset = T.max(offset, T.sub(end, cut));
+    } else if (T.gte(span.start, cut)) {
+      offset = T.min(offset, T.sub(T.sub(span.start, cut), transition.duration));
+    }
+  }
+
+  d.transitions[transition.id] = { ...transition, offset };
 }
 
 function handleSetTransitionCurve(
@@ -975,6 +1021,8 @@ export function runCommand(d: Draft, command: Command, ids: IdSource): void {
       return handleSetTransitionSoftness(d, command);
     case 'setTransitionCurve':
       return handleSetTransitionCurve(d, command);
+    case 'setTransitionOffset':
+      return handleSetTransitionOffset(d, command);
     case 'setClipSpeed':
       return handleSetClipSpeed(d, command);
     case 'unlinkClips':
