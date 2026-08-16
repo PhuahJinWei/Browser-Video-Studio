@@ -14,8 +14,14 @@ Early. The pure model layer is landing first; the editor UI arrives with L1.
 |---|---|
 | ✅ | Project data model ([`src/model/types.ts`](src/model/types.ts)) |
 | ✅ | Exact rational time arithmetic + SMPTE timecode ([`src/model/time.ts`](src/model/time.ts)) |
-| ⬜ | Commands, selectors, undo/redo |
-| ⬜ | L1: import, indexing, timeline, playback, export |
+| ✅ | Parameter/keyframe evaluation ([`src/model/params.ts`](src/model/params.ts)) |
+| ✅ | Selectors — render list, audio segments, snapping ([`src/model/selectors.ts`](src/model/selectors.ts)) |
+| ✅ | Commands — tracks, clips, effects, assets ([`src/model/commands/`](src/model/commands/)) |
+| ✅ | Invariant validator ([`src/model/validate.ts`](src/model/validate.ts)) |
+| ⬜ | Undo/redo history + OPFS persistence |
+| ⬜ | L1: import, indexing, timeline UI, playback, export |
+
+161 tests, all passing. The whole model layer runs in Node with no browser, GPU or media.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design and the L1–L5 roadmap, and [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md) for the document schema.
 

@@ -1,0 +1,184 @@
+/**
+ * The command vocabulary.
+ *
+ * Commands are plain serialisable data, not closures, so they can be logged, replayed,
+ * and eventually sent over a wire for collaboration. `apply()` turns one into a new
+ * document; it never mutates the old one.
+ *
+ * Undo is snapshot-based rather than inverse-command-based: with normalised immutable
+ * maps a snapshot costs one object plus structural sharing, and hand-written inverses
+ * are a classic source of subtle NLE corruption (restoring a rippled delete has to put
+ * back clips, effect instances *and* transitions, in order).
+ */
+
+import type {
+  Asset,
+  AssetId,
+  AssetStatus,
+  ClipId,
+  EffectInstanceId,
+  MarkerId,
+  Param,
+  ParamMap,
+  ParamValue,
+  SequenceId,
+  Time,
+  TrackId,
+  TrackKind,
+} from '../types';
+
+/** What a new clip should be made of. The clip's id comes from the `IdSource`. */
+export type NewClipSpec =
+  | {
+      readonly kind: 'video' | 'image' | 'nested' | 'audio';
+      readonly assetId: AssetId;
+      readonly start: Time;
+      readonly duration: Time;
+      readonly sourceIn?: Time;
+      readonly speed?: number;
+      readonly name?: string;
+      readonly streamIndex?: number;
+      readonly linkGroupId?: string;
+      readonly clipId?: ClipId;
+    }
+  | {
+      readonly kind: 'title';
+      readonly start: Time;
+      readonly duration: Time;
+      readonly text: string;
+      readonly name?: string;
+      readonly clipId?: ClipId;
+    };
+
+export interface ClipMove {
+  readonly clipId: ClipId;
+  readonly toTrackId: TrackId;
+  readonly toStart: Time;
+}
+
+export type EffectOwner =
+  | { readonly kind: 'clip'; readonly clipId: ClipId }
+  | { readonly kind: 'track'; readonly trackId: TrackId };
+
+export type TrackProps = Partial<{
+  readonly name: string;
+  readonly muted: boolean;
+  readonly solo: boolean;
+  readonly locked: boolean;
+  readonly hidden: boolean;
+  readonly height: number;
+}>;
+
+export type ClipProps = Partial<{
+  readonly name: string;
+  readonly enabled: boolean;
+  readonly locked: boolean;
+  readonly color: string | null;
+  readonly linkGroupId: string | null;
+}>;
+
+export type ViewProps = Partial<{
+  readonly playhead: Time;
+  readonly zoom: number;
+  readonly scrollX: Time;
+  readonly inPoint: Time | null;
+  readonly outPoint: Time | null;
+}>;
+
+export type Command =
+  // -- tracks ---------------------------------------------------------------
+  | {
+      readonly type: 'addTrack';
+      readonly sequenceId: SequenceId;
+      readonly kind: TrackKind;
+      readonly name?: string;
+      /** Insertion index within that kind's list. Appends when omitted. */
+      readonly index?: number;
+      readonly trackId?: TrackId;
+    }
+  | { readonly type: 'removeTrack'; readonly trackId: TrackId }
+  | { readonly type: 'setTrackProps'; readonly trackId: TrackId; readonly props: TrackProps }
+  | { readonly type: 'moveTrack'; readonly trackId: TrackId; readonly toIndex: number }
+
+  // -- clips ----------------------------------------------------------------
+  | {
+      readonly type: 'insertClip';
+      readonly trackId: TrackId;
+      readonly clip: NewClipSpec;
+      /** 'overwrite' replaces what is there; 'insert' ripples later clips right. */
+      readonly mode?: 'overwrite' | 'insert';
+    }
+  | {
+      readonly type: 'removeClips';
+      readonly clipIds: readonly ClipId[];
+      /** 'lift' leaves a gap; 'ripple' closes it. */
+      readonly mode?: 'lift' | 'ripple';
+    }
+  | { readonly type: 'moveClips'; readonly moves: readonly ClipMove[] }
+  | {
+      readonly type: 'trimClip';
+      readonly clipId: ClipId;
+      readonly edge: 'in' | 'out';
+      /** New timeline position of that edge. */
+      readonly to: Time;
+      /** Shift following clips by the same delta. */
+      readonly ripple?: boolean;
+    }
+  | { readonly type: 'slipClip'; readonly clipId: ClipId; readonly by: Time }
+  | {
+      readonly type: 'splitClips';
+      readonly trackIds: readonly TrackId[];
+      readonly at: Time;
+    }
+  | { readonly type: 'setClipProps'; readonly clipId: ClipId; readonly props: ClipProps }
+
+  // -- effects --------------------------------------------------------------
+  | {
+      readonly type: 'addEffect';
+      readonly owner: EffectOwner;
+      readonly effectType: string;
+      readonly params?: ParamMap;
+      readonly index?: number;
+      readonly effectId?: EffectInstanceId;
+    }
+  | { readonly type: 'removeEffect'; readonly effectId: EffectInstanceId }
+  | { readonly type: 'moveEffect'; readonly effectId: EffectInstanceId; readonly toIndex: number }
+  | {
+      readonly type: 'setEffectParam';
+      readonly effectId: EffectInstanceId;
+      readonly key: string;
+      readonly param: Param<ParamValue>;
+    }
+  | {
+      readonly type: 'setEffectEnabled';
+      readonly effectId: EffectInstanceId;
+      readonly enabled: boolean;
+    }
+
+  // -- assets ---------------------------------------------------------------
+  | { readonly type: 'addAsset'; readonly asset: Asset }
+  | { readonly type: 'removeAsset'; readonly assetId: AssetId }
+  | {
+      readonly type: 'setAssetStatus';
+      readonly assetId: AssetId;
+      readonly status: AssetStatus;
+    }
+
+  // -- markers --------------------------------------------------------------
+  | {
+      readonly type: 'addMarker';
+      readonly sequenceId: SequenceId;
+      readonly at: Time;
+      readonly name?: string;
+      readonly markerId?: MarkerId;
+    }
+  | { readonly type: 'removeMarker'; readonly markerId: MarkerId }
+
+  // -- view -----------------------------------------------------------------
+  | {
+      readonly type: 'setView';
+      readonly sequenceId: SequenceId;
+      readonly view: ViewProps;
+    };
+
+export type CommandType = Command['type'];

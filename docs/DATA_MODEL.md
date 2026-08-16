@@ -40,29 +40,54 @@ source time at timeline t:  sourceIn + (t - clip.start) * speed
 - Trim-in changes `start`, `duration`, `sourceIn` together; trim-out changes `duration` only. Slip changes `sourceIn` only. Slide changes `start` and neighbours.
 - **Handles**: how far a clip can be extended = source stream duration bounds; transitions consume handles.
 
-## Commands (all pure `(project, args) => { next, inverse }`)
+## Commands
 
-L1 command set:
-- `importAsset`, `updateAssetStatus`, `removeAsset`, `relinkAsset`
-- `addTrack`, `removeTrack`, `reorderTracks`, `setTrackFlags`
-- `insertClip` (overwrite | insert/ripple), `removeClips` (lift | ripple)
-- `moveClips` (with linked-clip and snap resolution), `trimClip` (in/out, ripple option), `slipClip`, `slideClip`
-- `splitClips(at)`, `joinClips`
-- `setClipProps` (enabled, name, color, opacity/transform static), `linkClips`, `unlinkClips`
-- `addEffect`, `removeEffect`, `reorderEffects`, `setParam`, `addKeyframe`, `moveKeyframe`, `removeKeyframe`
-- `addTransition`, `setTransition`, `removeTransition`
-- `addMarker`, `setMarker`, `removeMarker`
-- `setSequenceSettings`, `setView`
+Commands are **plain serialisable data**, applied by a pure function:
 
-Commands validate invariants (in dev builds, full validation after every command; in prod, targeted).
+```ts
+apply(project, command, ids?) => Project       // src/model/commands/
+applyAll(project, commands, ids?) => Project   // all-or-nothing batch
+```
 
-## Selectors (memoised on object identity)
+`apply` never mutates its input and never reads the clock (`modifiedAt` is stamped by the persistence layer). It takes an `IdSource` so that entity creation is deterministic — tests use `sequentialIdSource()`, and a future collaboration layer can record the ids a command consumed so peers replay it identically.
 
-- `trackClipsSorted(trackId)`, `clipAt(trackId, t)`, `clipsInRange(seqId, range)`
-- `renderListAt(seqId, t)` → ordered layers `{ clip, sourceTime, evaluatedParams, transform, opacity, blend, transitionBlendWith? }` — the compositor's input.
-- `audioSegments(seqId, range)` → per audio track, list of `{ clip, sourceRange, gainCurve, panCurve }` — the mixer's input.
-- `evalParam(param, tRelative)` — keyframe interpolation.
-- `sequenceDuration(seqId)`, `snapPoints(seqId)` (clip edges, markers, playhead).
+**Undo is snapshot-based, not inverse-command-based.** With normalised immutable maps a snapshot costs one object plus structural sharing, whereas hand-written inverses are a classic source of NLE corruption — undoing a ripple delete has to restore clips, their effect instances *and* their transitions, in order. `commitDraft` reuses the original entity map whenever a command did not touch it, so a `setView` on every playhead tick does not invalidate memoisation keyed on `project.clips`.
+
+### Implemented
+
+| Group | Commands |
+|---|---|
+| Tracks | `addTrack`, `removeTrack`, `setTrackProps`, `moveTrack` |
+| Clips | `insertClip` (overwrite \| insert), `removeClips` (lift \| ripple), `moveClips`, `trimClip` (in/out, ripple), `slipClip`, `splitClips`, `setClipProps` |
+| Effects | `addEffect`, `removeEffect`, `moveEffect`, `setEffectParam`, `setEffectEnabled` |
+| Assets | `addAsset`, `removeAsset`, `setAssetStatus` |
+| Markers | `addMarker`, `removeMarker` |
+| View | `setView` |
+
+Semantics worth pinning down:
+
+- **Overwrite** deletes covered clips, trims clips overlapping an edge, and *splits* a clip the new one lands inside. Trimming a head advances `sourceIn` so the picture does not jump.
+- **Ripple trim in** keeps the clip where it is and pulls the rest of the track; **ripple trim out** pushes it.
+- **Splitting shifts the right-hand half's keyframes** by −delta and gives it *cloned* effect instances, so a parameter's value at any absolute time is unchanged by the split. This is the single easiest thing to get wrong.
+- Clips may not start before zero; drags clamp, `insertClip` throws.
+- Locked tracks and locked clips reject edits.
+
+### Later
+
+`slideClip`, `joinClips`, `linkClips`/`unlinkClips`, `relinkAsset`, keyframe-level commands (`addKeyframe`, `moveKeyframe`, `removeKeyframe`), transitions (`addTransition`, `setTransition`, `removeTransition`), `setSequenceSettings`.
+
+Broken transitions are pruned automatically after every clip edit, so the transition entity is already safe to introduce.
+
+## Selectors
+
+Pure queries in `src/model/selectors.ts`. The two that matter are:
+
+- **`renderListAt(project, seqId, t)`** → the compositor's input: ordered bottom-to-top layers of `{ clip, sourceTime, transform, opacity, crop, blendMode, effects, trackEffects }`, with hidden tracks, disabled clips and disabled effects already filtered out and all animation evaluated.
+- **`audioSegments(project, seqId, range)`** → the mixer's input: `{ clip, timelineRange, sourceStart, speed, effects, trackEffects }` per audible clip, clipped to the range and filtered by mute/solo. Gain, pan and fades stay as *parameters* on the clip so the mixer evaluates them per block rather than per segment.
+
+Supporting: `clipAt`, `clipsInRange`, `gapAt`, `trackClips`, `trackDuration`, `sequenceDuration`, `clipSourceTimeAt`, `clipTrimHandles`, `audibleTrackIds`, `visibleTrackIds`, `snapPoints`, `findSnap`.
+
+Memoisation is deliberately absent for now — these are cheap over an immutable document, and caching before profiling would hide the real costs. `commitDraft`'s map reuse means identity-keyed memos can be dropped in later without touching call sites.
 
 ## Persistence
 
