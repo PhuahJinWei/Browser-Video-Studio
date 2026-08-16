@@ -216,6 +216,7 @@ export function Timeline(): React.JSX.Element {
   const selectRangeTo = useStudio((s) => s.selectRangeTo);
   const selectWithin = useStudio((s) => s.selectWithin);
   const setInspectorOpen = useLayout((s) => s.setInspectorOpen);
+  const inspectorOpen = useLayout((s) => s.inspectorOpen);
   const setError = useStudio((s) => s.setError);
   const selectedTransitionId = useStudio((s) => s.selectedTransitionId);
   const selectedTrackId = useStudio((s) => s.selectedTrackId);
@@ -753,16 +754,20 @@ export function Timeline(): React.JSX.Element {
           ),
       },
       'separator',
-      {
-        label: 'Properties',
-        icon: <IconInspector />,
-        hint: 'Ctrl+4',
-        onSelect: () => {
-          select([clip.id]);
-          setInspectorOpen(true);
-        },
-      },
-      'separator',
+      ...(inspectorOpen
+        ? []
+        : ([
+            {
+              label: 'Show properties',
+              icon: <IconInspector />,
+              hint: 'Ctrl+4',
+              onSelect: () => {
+                select([clip.id]);
+                setInspectorOpen(true);
+              },
+            },
+            'separator',
+          ] as MenuEntry[])),
       {
         label: targets.length > 1 ? `Delete ${targets.length} clips` : 'Delete',
         icon: <IconTrash />,
@@ -788,6 +793,9 @@ export function Timeline(): React.JSX.Element {
 
   const openTransitionMenu = (event: React.MouseEvent, transition: Transition): void => {
     event.stopPropagation();
+    // Same as right-clicking a clip or a track: the menu acts on this one, so the
+    // inspector should be looking at it too.
+    selectTransition(transition.id);
     const seconds = T.toSeconds(transition.duration);
     // Every paired cut restyles, retimes and clears together, so a linked A/V
     // pair can never end up with a 2 s picture wipe over a 1 s audio crossfade.
@@ -870,16 +878,17 @@ export function Timeline(): React.JSX.Element {
         },
       },
       'separator',
-      {
-        label: 'Properties',
-        icon: <IconInspector />,
-        hint: 'Ctrl+4',
-        onSelect: () => {
-          selectTransition(transition.id);
-          setInspectorOpen(true);
-        },
-      },
-      'separator',
+      ...(inspectorOpen
+        ? []
+        : ([
+            {
+              label: 'Show properties',
+              icon: <IconInspector />,
+              hint: 'Ctrl+4',
+              onSelect: () => setInspectorOpen(true),
+            },
+            'separator',
+          ] as MenuEntry[])),
       {
         label: paired.length > 1 ? `Remove transition (${paired.length})` : 'Remove transition',
         icon: <IconTrash />,
@@ -1251,6 +1260,7 @@ function TrackHeader({
 }): React.JSX.Element {
   const menu = useContextMenu();
   const setInspectorOpen = useLayout((s) => s.setInspectorOpen);
+  const inspectorOpen = useLayout((s) => s.inspectorOpen);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(track.name);
 
@@ -1275,15 +1285,19 @@ function TrackHeader({
   };
 
   const entries: MenuEntry[] = [
-    {
-      label: 'Properties',
-      icon: <IconInspector />,
-      hint: 'Ctrl+4',
-      onSelect: () => {
-        onSelect();
-        setInspectorOpen(true);
-      },
-    },
+    ...(inspectorOpen
+      ? []
+      : ([
+          {
+            label: 'Show properties',
+            icon: <IconInspector />,
+            hint: 'Ctrl+4',
+            onSelect: () => {
+              onSelect();
+              setInspectorOpen(true);
+            },
+          },
+        ] as MenuEntry[])),
     { label: 'Rename track…', icon: <IconText />, onSelect: startRename },
     'separator',
     ...(track.kind === 'audio'
