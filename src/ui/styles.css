@@ -707,13 +707,14 @@ input[type='range'] {
 /*
  * A transition straddles the cut it spans.
  *
- * Drawn full height and opaque enough to read as its own object rather than as a
- * highlight over the clips: the two clips look like they meet at its edges, which
- * is what the transition actually does to the picture.
+ * Translucent on purpose. The filmstrip underneath is how you see *what* is at the
+ * cut, so covering it would hide the thing you are making the decision about; the
+ * border, the label and the handles are what give the badge its own identity, not
+ * an opaque fill.
  *
- * The trade-off is that it covers the trim handles of both clips at that cut. That
- * matches Premiere and Resolve, where clicking the cut gets you the transition and
- * you retime the clips from their far edges.
+ * Full height, which does cover the trim handles of both clips at that cut. That
+ * matches Premiere and Resolve: clicking a cut gets you the transition, and you
+ * retime the clips from their far edges.
  */
 .clip-transition {
   position: absolute;
@@ -724,28 +725,34 @@ input[type='range'] {
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  border: 1px solid var(--accent);
+  border: 1px solid rgb(126 183 255 / 85%);
   border-radius: 4px;
+  /* Light enough to read the frames through, dark enough to read as an object. */
   background:
-    linear-gradient(to bottom right, transparent calc(50% - 1px), rgb(255 255 255 / 55%) 50%, transparent calc(50% + 1px)),
-    linear-gradient(to top right, transparent calc(50% - 1px), rgb(255 255 255 / 55%) 50%, transparent calc(50% + 1px)),
-    linear-gradient(#3d5a8a, #2b3f63);
+    linear-gradient(to bottom right, transparent calc(50% - 1px), rgb(198 224 255 / 42%) 50%, transparent calc(50% + 1px)),
+    linear-gradient(to top right, transparent calc(50% - 1px), rgb(198 224 255 / 42%) 50%, transparent calc(50% + 1px)),
+    linear-gradient(rgb(30 62 112 / 34%), rgb(18 38 72 / 34%));
   cursor: pointer;
 }
 .clip-transition:hover {
-  border-color: #9ecbff;
+  border-color: #bcd9ff;
+  background:
+    linear-gradient(to bottom right, transparent calc(50% - 1px), rgb(214 233 255 / 60%) 50%, transparent calc(50% + 1px)),
+    linear-gradient(to top right, transparent calc(50% - 1px), rgb(214 233 255 / 60%) 50%, transparent calc(50% + 1px)),
+    linear-gradient(rgb(30 62 112 / 44%), rgb(18 38 72 / 44%));
 }
 .clip-transition.selected {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
-  border-color: #9ecbff;
+  border-color: #bcd9ff;
 }
+/* Its own backing, so the name stays legible over whatever frame is underneath. */
 .transition-label {
   position: relative;
-  padding: 0 5px;
+  padding: 1px 5px;
   border-radius: 3px;
-  background: rgb(0 0 0 / 55%);
-  color: #e8f0fc;
+  background: rgb(8 14 26 / 78%);
+  color: #dce9fb;
   font-size: 10px;
   font-weight: 600;
   white-space: nowrap;
@@ -766,7 +773,7 @@ input[type='range'] {
   right: 0;
 }
 .transition-handle:hover {
-  background: rgb(88 166 255 / 55%);
+  background: rgb(126 183 255 / 45%);
 }
 .clip.solid {
   /* Overridden inline with the clip's own colour; this is the fallback. */
