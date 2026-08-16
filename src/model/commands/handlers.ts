@@ -433,6 +433,14 @@ function handleSetClipParam(d: Draft, cmd: Extract<Command, { type: 'setClipPara
   reject();
 }
 
+function handleSetSequenceParam(
+  d: Draft,
+  cmd: Extract<Command, { type: 'setSequenceParam' }>,
+): void {
+  const sequence = draftSequence(d, cmd.sequenceId);
+  d.sequences[sequence.id] = { ...sequence, [cmd.key]: cmd.param };
+}
+
 function handleSetSolidFill(d: Draft, cmd: Extract<Command, { type: 'setSolidFill' }>): void {
   const clip = draftClip(d, cmd.clipId);
   if (clip.kind !== 'solid') throw new ModelError(`"${clip.name}" is not a fill clip`);
@@ -1005,6 +1013,8 @@ export function runCommand(d: Draft, command: Command, ids: IdSource): void {
       return handleSetClipBlendMode(d, command);
     case 'setSolidFill':
       return handleSetSolidFill(d, command);
+    case 'setSequenceParam':
+      return handleSetSequenceParam(d, command);
     case 'addTransition':
       return handleAddTransition(d, command, ids);
     case 'removeTransition':

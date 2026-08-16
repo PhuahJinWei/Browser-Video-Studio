@@ -196,6 +196,16 @@ export type Command =
   /** Recolour a fill clip. Any CSS colour; alpha is honoured. */
   | { readonly type: 'setSolidFill'; readonly clipId: ClipId; readonly fill: string }
   /**
+   * A sequence-wide parameter. Only the master fader for now, which the mixer has
+   * always applied but nothing could reach.
+   */
+  | {
+      readonly type: 'setSequenceParam';
+      readonly sequenceId: SequenceId;
+      readonly key: 'masterGainDb';
+      readonly param: Param<number>;
+    }
+  /**
    * Put a transition across the cut between two adjacent clips.
    *
    * `duration` is a request, not a demand: it is shortened to whatever the two

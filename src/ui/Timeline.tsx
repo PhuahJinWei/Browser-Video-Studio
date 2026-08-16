@@ -25,11 +25,14 @@ import {
   transitionBetween,
   transitionSpan,
 } from '../model/selectors';
+import { staticParam } from '../model/params';
 import * as T from '../model/time';
 import { TRANSITION_TYPES } from '../model/types';
 import type {
   Clip,
   ClipId,
+  FrameRate,
+  Param,
   Project,
   Time,
   Track,
@@ -71,13 +74,45 @@ import {
   transitionShortLabel,
 } from './transitions';
 
-/** Width of the sticky track-header column. */
-const HEADER_WIDTH = 168;
+/**
+ * Width of the sticky track-header column.
+ *
+ * Wide enough for an audio row's name, mute, solo, fader, lock and remove
+ * without the name being squeezed to nothing.
+ */
+const HEADER_WIDTH = 216;
 const MIN_TRACK_HEIGHT = 36;
 const MIN_TAIL_SECONDS = 10;
 const SNAP_PIXELS = 8;
 
 type DragKind = 'move' | 'trim-in' | 'trim-out';
+
+/**
+ * What a click on a clip means.
+ *
+ * Ctrl/Cmd and Shift used to do the same thing. They are the two halves of
+ * multi-select everywhere else: one picks clips out individually, the other
+ * takes everything between.
+ */
+type SelectModifier = 'replace' | 'toggle' | 'range' | 'isolate';
+
+function selectModifier(event: React.PointerEvent | React.MouseEvent): SelectModifier {
+  // Alt first: isolating one clip out of its unit beats any of the others.
+  if (event.altKey) return 'isolate';
+  if (event.shiftKey) return 'range';
+  if (event.ctrlKey || event.metaKey) return 'toggle';
+  return 'replace';
+}
+
+/** A rubber-band selection in progress. */
+interface MarqueeState {
+  readonly originClientX: number;
+  readonly originClientY: number;
+  readonly clientX: number;
+  readonly clientY: number;
+  /** Ctrl/Cmd was held, so the sweep adds rather than replaces. */
+  readonly additive: boolean;
+}
 
 interface DragState {
   readonly kind: DragKind;
@@ -175,6 +210,9 @@ export function Timeline(): React.JSX.Element {
   const selectTrack = useStudio((s) => s.selectTrack);
   const selectTransition = useStudio((s) => s.selectTransition);
   const addTransitionOnCuts = useStudio((s) => s.addTransitionOnCuts);
+  const splitAtPlayhead = useStudio((s) => s.splitAtPlayhead);
+  const selectRangeTo = useStudio((s) => s.selectRangeTo);
+  const selectWithin = useStudio((s) => s.selectWithin);
   const setError = useStudio((s) => s.setError);
   const selectedTransitionId = useStudio((s) => s.selectedTransitionId);
   const selectedTrackId = useStudio((s) => s.selectedTrackId);
@@ -203,6 +241,7 @@ export function Timeline(): React.JSX.Element {
   const lanesRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [transitionDrag, setTransitionDrag] = useState<TransitionDragState | null>(null);
+  const [marquee, setMarquee] = useState<MarqueeState | null>(null);
   const [dropTrackId, setDropTrackId] = useState<TrackId | null>(null);
   /** Time+offset to restore after a zoom, so the pointer stays over the same frame. */
   const pendingAnchor = useRef<{ seconds: number; offset: number } | null>(null);
@@ -261,6 +300,23 @@ export function Timeline(): React.JSX.Element {
       }
     }
     return null;
+  }, []);
+
+  /** Every lane a vertical sweep between two screen positions touches. */
+  const tracksBetweenClientY = useCallback((a: number, b: number): readonly TrackId[] => {
+    const lanes = lanesRef.current?.querySelectorAll<HTMLElement>('[data-track-id]');
+    if (!lanes) return [];
+    const top = Math.min(a, b);
+    const bottom = Math.max(a, b);
+
+    const found: TrackId[] = [];
+    for (const lane of lanes) {
+      const rect = lane.getBoundingClientRect();
+      if (rect.bottom < top || rect.top > bottom) continue;
+      const id = lane.dataset.trackId;
+      if (id) found.push(id as TrackId);
+    }
+    return found;
   }, []);
 
   const timeAtClientX = useCallback(
@@ -482,6 +538,41 @@ export function Timeline(): React.JSX.Element {
     );
   };
 
+  /**
+   * Rubber-band selection.
+   *
+   * Resolved in time and track terms rather than in pixels, so a sweep that
+   * crosses tracks of different heights still picks up exactly the lanes it
+   * visually covers.
+   */
+  useEffect(() => {
+    if (!marquee) return;
+
+    const move = (event: PointerEvent): void => {
+      setMarquee((current) =>
+        current ? { ...current, clientX: event.clientX, clientY: event.clientY } : current,
+      );
+    };
+
+    const up = (): void => {
+      const covered = tracksBetweenClientY(marquee.originClientY, marquee.clientY);
+      const from = timeAtClientX(Math.min(marquee.originClientX, marquee.clientX));
+      const to = timeAtClientX(Math.max(marquee.originClientX, marquee.clientX));
+      setMarquee(null);
+
+      // A click rather than a sweep: the lane's own handler already cleared it.
+      if (covered.length === 0 || !T.isPositive(T.sub(to, from))) return;
+      selectWithin(covered, T.rangeFromBounds(from, to), marquee.additive);
+    };
+
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    return () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+  }, [marquee, timeAtClientX, tracksBetweenClientY, selectWithin]);
+
   const startTransitionDrag = (
     event: React.PointerEvent,
     transition: Transition,
@@ -515,18 +606,32 @@ export function Timeline(): React.JSX.Element {
     });
   };
 
-  const startDrag = (event: React.PointerEvent, clip: Clip, kind: DragKind): void => {
+  const startDrag = (
+    event: React.PointerEvent,
+    clip: Clip,
+    kind: DragKind,
+    modifier: SelectModifier,
+  ): void => {
     event.stopPropagation();
     event.preventDefault();
     const track = getTrack(project, clip.trackId);
     if (track.locked || clip.locked) return;
 
+    // Read the selection back out of the store rather than from this render's
+    // snapshot: the click that started this drag has only just changed it, and
+    // acting on the stale value is what used to undo every Ctrl-click.
+    const current = useStudio.getState().selection;
+
     // Alt isolates a single clip out of its unit, for the times you need to nudge
     // just the audio without detaching it permanently.
-    const isolate = event.altKey;
-    const groupIds = isolate ? [clip.id] : selectionUnit(project, clip.id);
-    if (isolate) selectExact([clip.id]);
-    else if (!selection.includes(clip.id)) select([clip.id]);
+    const unit = selectionUnit(project, clip.id);
+    const groupIds =
+      modifier === 'isolate'
+        ? [clip.id]
+        : // Dragging one of several selected clips takes them all.
+          current.includes(clip.id)
+          ? [...new Set([...current, ...unit])]
+          : unit;
 
     setDrag({
       kind,
@@ -583,17 +688,12 @@ export function Timeline(): React.JSX.Element {
 
     const entries: MenuEntry[] = [
       {
-        label: 'Split at playhead',
+        label: 'Split',
         icon: <IconSplit />,
         hint: 'S',
-        // Splitting only does something when the playhead is inside the clip.
+        // Only does anything when the playhead is actually inside the clip.
         disabled: !(T.lt(clip.start, playhead) && T.gt(clipEnd(clip), playhead)),
-        onSelect: () => splitAt(playhead, [clip.trackId]),
-      },
-      {
-        label: 'Split all tracks at playhead',
-        icon: <IconSplit />,
-        onSelect: () => splitAt(playhead, trackIds),
+        onSelect: () => splitAtPlayhead(),
       },
       'separator',
       dissolveEntry('Cross dissolve at start', previous, clip),
@@ -894,7 +994,10 @@ export function Timeline(): React.JSX.Element {
     el.scrollLeft = Math.max(0, anchor.seconds * pxPerSecond - anchor.offset);
   }, [pxPerSecond]);
 
-  const ticks = useMemo(() => buildTicks(totalSeconds, pxPerSecond), [totalSeconds, pxPerSecond]);
+  const ticks = useMemo(
+    () => buildTicks(totalSeconds, pxPerSecond, sequence.frameRate),
+    [totalSeconds, pxPerSecond, sequence.frameRate],
+  );
 
   return (
     <div className="timeline" ref={scrollRef}>
@@ -989,7 +1092,16 @@ export function Timeline(): React.JSX.Element {
                   }}
                   onDragEnd={() => setDropTrackId(null)}
                   onPointerDown={(event) => {
-                    if (event.target === event.currentTarget) select([]);
+                    // Only from bare lane: a clip or a badge handles its own.
+                    if (event.target !== event.currentTarget) return;
+                    if (!event.ctrlKey && !event.metaKey) select([]);
+                    setMarquee({
+                      originClientX: event.clientX,
+                      originClientY: event.clientY,
+                      clientX: event.clientX,
+                      clientY: event.clientY,
+                      additive: event.ctrlKey || event.metaKey,
+                    });
                   }}
                   onContextMenu={(event) => {
                     if (event.target === event.currentTarget) openLaneMenu(event, trackId);
@@ -1050,12 +1162,13 @@ export function Timeline(): React.JSX.Element {
                       pxPerSecond={pxPerSecond}
                       selected={selection.includes(clip.id)}
                       preview={previewStyle(clip, pxPerSecond, previews)}
-                      onSelect={(additive, isolate) => {
-                        if (isolate) selectExact([clip.id]);
-                        else if (additive) toggleSelect(clip.id);
+                      onSelect={(modifier) => {
+                        if (modifier === 'isolate') selectExact([clip.id]);
+                        else if (modifier === 'toggle') toggleSelect(clip.id);
+                        else if (modifier === 'range') selectRangeTo(clip.id);
                         else select([clip.id]);
                       }}
-                      onDragStart={(event, kind) => startDrag(event, clip, kind)}
+                      onDragStart={(event, kind, modifier) => startDrag(event, clip, kind, modifier)}
                       onContextMenu={(event) => openClipMenu(event, clip)}
                     />
                   ))}
@@ -1064,9 +1177,31 @@ export function Timeline(): React.JSX.Element {
             );
           })}
 
+        </div>
+
+        {marquee && <MarqueeBox marquee={marquee} />}
+
+        {/*
+          A sibling of the topbar and the lanes rather than a child of either, so the
+          line runs from the ruler right down through the tracks. Its head sits in
+          the ruler and takes pointer events, so the playhead can be dragged directly
+          instead of only by clicking the ruler behind it.
+        */}
+        <div
+          className="playhead"
+          style={{ left: HEADER_WIDTH + T.toSeconds(playhead) * pxPerSecond }}
+        >
           <div
-            className="playhead"
-            style={{ left: HEADER_WIDTH + T.toSeconds(playhead) * pxPerSecond }}
+            className="playhead-head"
+            onPointerDown={(event) => {
+              event.stopPropagation();
+              event.preventDefault();
+              (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+            }}
+            onPointerMove={(event) => {
+              if (event.buttons !== 1) return;
+              setPlayhead(timeAtClientX(event.clientX));
+            }}
           />
         </div>
       </div>
@@ -1210,6 +1345,7 @@ function TrackHeader({
           >
             <IconSolo />
           </button>
+          <TrackVolume track={track} />
         </>
       ) : (
         <button
@@ -1290,8 +1426,8 @@ function ClipView({
   pxPerSecond: number;
   selected: boolean;
   preview: React.CSSProperties | undefined;
-  onSelect: (additive: boolean, isolate: boolean) => void;
-  onDragStart: (event: React.PointerEvent, kind: DragKind) => void;
+  onSelect: (modifier: SelectModifier) => void;
+  onDragStart: (event: React.PointerEvent, kind: DragKind, modifier: SelectModifier) => void;
   onContextMenu: (event: React.MouseEvent) => void;
 }): React.JSX.Element {
   const left = T.toSeconds(clip.start) * pxPerSecond;
@@ -1314,23 +1450,26 @@ function ClipView({
       title={`${clip.name} · ${T.formatDuration(clip.duration, { decimals: 2 })}`}
       onContextMenu={onContextMenu}
       onPointerDown={(event) => {
-        onSelect(event.shiftKey || event.metaKey || event.ctrlKey, event.altKey);
-        onDragStart(event, 'move');
+        const modifier = selectModifier(event);
+        onSelect(modifier);
+        onDragStart(event, 'move', modifier);
       }}
     >
       <div
         className="handle left"
         onPointerDown={(event) => {
-          onSelect(false, event.altKey);
-          onDragStart(event, 'trim-in');
+          const modifier = event.altKey ? 'isolate' : 'replace';
+          onSelect(modifier);
+          onDragStart(event, 'trim-in', modifier);
         }}
       />
       <div className="clip-name">{clip.name}</div>
       <div
         className="handle right"
         onPointerDown={(event) => {
-          onSelect(false, event.altKey);
-          onDragStart(event, 'trim-out');
+          const modifier = event.altKey ? 'isolate' : 'replace';
+          onSelect(modifier);
+          onDragStart(event, 'trim-out', modifier);
         }}
       />
     </div>
@@ -1344,7 +1483,78 @@ interface Tick {
 }
 
 /** Choose a tick spacing that keeps labels at least ~80 px apart. */
-function buildTicks(totalSeconds: number, pxPerSecond: number): readonly Tick[] {
+/**
+ * Track volume, in the header rather than only in the inspector.
+ *
+ * The mixer has always applied `gainDb`; reaching it meant selecting the track
+ * first, which is not where anyone looks for a fader.
+ */
+function TrackVolume({ track }: { track: Track }): React.JSX.Element {
+  const run = useStudio((s) => s.run);
+  const endGesture = useStudio((s) => s.endGesture);
+  const db = staticValue(track.gainDb, 0);
+
+  return (
+    <input
+      className="track-volume"
+      type="range"
+      min={-60}
+      max={12}
+      step={0.5}
+      value={db}
+      title={`Volume ${db > 0 ? '+' : ''}${db.toFixed(1)} dB — double-click for unity`}
+      onChange={(event) =>
+        run(
+          {
+            type: 'setTrackParam',
+            trackId: track.id,
+            key: 'gainDb',
+            param: staticParam(Number(event.target.value)),
+          },
+          'Set track volume',
+          `gain:${track.id}`,
+        )
+      }
+      onPointerUp={endGesture}
+      onDoubleClick={() =>
+        run(
+          { type: 'setTrackParam', trackId: track.id, key: 'gainDb', param: staticParam(0) },
+          'Reset track volume',
+        )
+      }
+      // Otherwise the header behind it takes the drag and selects the track.
+      onPointerDown={(event) => event.stopPropagation()}
+    />
+  );
+}
+
+/** Static value of a parameter, or a fallback when it is keyframed. */
+function staticValue(param: Param<number>, fallback: number): number {
+  return param.kind === 'static' ? param.value : fallback;
+}
+
+/** The rubber band itself, positioned straight from the pointer. */
+function MarqueeBox({ marquee }: { marquee: MarqueeState }): React.JSX.Element {
+  const left = Math.min(marquee.originClientX, marquee.clientX);
+  const top = Math.min(marquee.originClientY, marquee.clientY);
+  return (
+    <div
+      className="marquee"
+      style={{
+        left,
+        top,
+        width: Math.abs(marquee.clientX - marquee.originClientX),
+        height: Math.abs(marquee.clientY - marquee.originClientY),
+      }}
+    />
+  );
+}
+
+function buildTicks(
+  totalSeconds: number,
+  pxPerSecond: number,
+  frameRate: FrameRate,
+): readonly Tick[] {
   const candidates = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600];
   const step = candidates.find((c) => c * pxPerSecond >= 80) ?? 3600;
 
@@ -1353,16 +1563,29 @@ function buildTicks(totalSeconds: number, pxPerSecond: number): readonly Tick[] 
     ticks.push({
       seconds,
       x: seconds * pxPerSecond,
-      label: formatTick(seconds, step),
+      label: formatTick(seconds, frameRate),
     });
   }
   return ticks;
 }
 
-function formatTick(seconds: number, step: number): string {
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds - minutes * 60;
-  const decimals = step < 1 ? 1 : 0;
-  return `${minutes}:${remainder.toFixed(decimals).padStart(decimals > 0 ? 4 : 2, '0')}`;
+/**
+ * Real timecode on the ruler.
+ *
+ * Derived from the sequence's own frame rate rather than counted in decimal
+ * seconds, so the ruler and the transport readout agree — which they did not
+ * when this formatted `M:SS` by hand.
+ */
+function formatTick(seconds: number, frameRate: FrameRate): string {
+  const [hh = '00', mm = '00', ss = '00', ff = '00'] = T.toTimecode(
+    T.fromSeconds(seconds, 1000),
+    frameRate,
+  ).split(/[:;]/);
+
+  // Frames are shown even where they are always 00, because dropping them makes
+  // `MM:SS` and `HH:MM` indistinguishable at a glance. Hours appear only once the
+  // sequence is long enough to have any.
+  const hours = Number(hh);
+  return hours > 0 ? `${hh}:${mm}:${ss}:${ff}` : `${mm}:${ss}:${ff}`;
 }
 

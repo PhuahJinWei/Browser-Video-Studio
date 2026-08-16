@@ -694,6 +694,26 @@ export function trackTransitions(p: Project, trackId: TrackId): readonly Transit
     });
 }
 
+/**
+ * Every clip on `trackIds` that overlaps `range` at all.
+ *
+ * Touching counts as overlapping only when the clip has width there, so a
+ * rectangle dragged up to a clip's edge does not pick it up.
+ */
+export function clipsWithin(
+  p: Project,
+  trackIds: readonly TrackId[],
+  range: TimeRange,
+): readonly Clip[] {
+  const found: Clip[] = [];
+  for (const trackId of trackIds) {
+    for (const clip of trackClips(p, trackId)) {
+      if (T.rangesOverlap(clipRange(clip), range)) found.push(clip);
+    }
+  }
+  return found;
+}
+
 /** The clips butting straight up against this one, sharing an exact cut. */
 export function adjacentClips(
   p: Project,

@@ -1,15 +1,24 @@
 import { useEffect, useState } from 'react';
 import { canRun, detectCapabilities, type CapabilityResult } from '../capabilities';
+import { staticParam } from '../model/params';
 import * as T from '../model/time';
 import { ContextMenuProvider } from './ContextMenu';
 import { ExportDialog } from './ExportDialog';
-import { IconExport, IconGauge, IconRedo, IconSplit, IconTrash, IconUndo } from './Icons';
+import {
+  IconExport,
+  IconGauge,
+  IconRedo,
+  IconSplit,
+  IconTrash,
+  IconUndo,
+  IconVolume,
+} from './Icons';
 import { Inspector } from './Inspector';
 import { MediaBin } from './MediaBin';
 import { MenuBar } from './MenuBar';
 import { Preview } from './Preview';
 import { Timeline } from './Timeline';
-import { flushAutosave, orderedTrackIds, useStudio } from './store';
+import { flushAutosave, useStudio } from './store';
 
 export function App(): React.JSX.Element {
   const [capabilities, setCapabilities] = useState<readonly CapabilityResult[] | null>(null);
@@ -60,6 +69,8 @@ function Studio(): React.JSX.Element {
 
   const run = useStudio((s) => s.run);
   const addTransitionNearPlayhead = useStudio((s) => s.addTransitionNearPlayhead);
+  const splitAtPlayhead = useStudio((s) => s.splitAtPlayhead);
+  const endGesture = useStudio((s) => s.endGesture);
   const undoEdit = useStudio((s) => s.undoEdit);
   const redoEdit = useStudio((s) => s.redoEdit);
   const canUndoEdit = useStudio((s) => s.canUndoEdit);
@@ -73,6 +84,8 @@ function Studio(): React.JSX.Element {
 
   const project = history.present.project;
   const sequence = project.sequences[sequenceId]!;
+  const masterDb =
+    sequence.masterGainDb.kind === 'static' ? sequence.masterGainDb.value : 0;
 
   // Save anything still inside the autosave debounce before the page goes away.
   useEffect(() => {
@@ -155,10 +168,7 @@ function Studio(): React.JSX.Element {
           break;
         case 's':
         case 'S':
-          run(
-            { type: 'splitClips', trackIds: orderedTrackIds(project, sequenceId), at: playhead() },
-            'Split at playhead',
-          );
+          splitAtPlayhead();
           break;
         case 'Delete':
         case 'Backspace':
@@ -209,16 +219,7 @@ function Studio(): React.JSX.Element {
         <button className="icon" disabled={!canRedoEdit()} onClick={redoEdit} title="Redo (Ctrl+Shift+Z)">
           <IconRedo />
         </button>
-        <button
-          className="icon"
-          title="Split all tracks at the playhead (S)"
-          onClick={() =>
-            run(
-              { type: 'splitClips', trackIds: orderedTrackIds(project, sequenceId), at: playhead() },
-              'Split at playhead',
-            )
-          }
-        >
+        <button className="icon" title="Split at the playhead (S)" onClick={splitAtPlayhead}>
           <IconSplit />
         </button>
         <button
@@ -231,6 +232,44 @@ function Studio(): React.JSX.Element {
         </button>
 
         </div>
+
+        {/*
+          Master volume. The mixer has always applied `masterGainDb` and nothing could
+          reach it; the header is the one strip that is always visible, where the
+          transport bar under a narrow preview is not.
+        */}
+        <span
+          className="master-volume"
+          title={`Master volume ${masterDb > 0 ? '+' : ''}${masterDb.toFixed(1)} dB — double-click for unity`}
+        >
+          <IconVolume size={14} />
+          <input
+            type="range"
+            min={-60}
+            max={12}
+            step={0.5}
+            value={masterDb}
+            onChange={(event) =>
+              run(
+                {
+                  type: 'setSequenceParam',
+                  sequenceId,
+                  key: 'masterGainDb',
+                  param: staticParam(Number(event.target.value)),
+                },
+                'Set master volume',
+                'master-gain',
+              )
+            }
+            onPointerUp={endGesture}
+            onDoubleClick={() =>
+              run(
+                { type: 'setSequenceParam', sequenceId, key: 'masterGainDb', param: staticParam(0) },
+                'Reset master volume',
+              )
+            }
+          />
+        </span>
 
         <button
           className={`icon${showTelemetry ? ' on' : ''}`}

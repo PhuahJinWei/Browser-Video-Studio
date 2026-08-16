@@ -8,6 +8,23 @@ import { useStudio } from './store';
 import { ASSET_DRAG_TYPE } from './Timeline';
 import { TRANSITION_DRAG_TYPE, TRANSITION_LABELS } from './transitions';
 
+type MediaFilterId = 'all' | 'video' | 'audio' | 'stills';
+
+/**
+ * How the Media tab narrows itself. An asset counts as video when it has a video
+ * stream, so a file with both appears under Video rather than twice.
+ */
+const MEDIA_FILTERS: readonly {
+  id: MediaFilterId;
+  label: string;
+  matches: (asset: Asset) => boolean;
+}[] = [
+  { id: 'all', label: 'All', matches: () => true },
+  { id: 'video', label: 'Video', matches: (a) => a.kind === 'video' },
+  { id: 'audio', label: 'Audio', matches: (a) => a.kind === 'audio' },
+  { id: 'stills', label: 'Stills', matches: (a) => a.kind === 'image' },
+];
+
 /**
  * Import surface and asset list. Nothing here uploads anything.
  *
@@ -20,11 +37,16 @@ export function MediaBin(): React.JSX.Element {
   const importViaPicker = useStudio((s) => s.importViaPicker);
   const menu = useContextMenu();
   const [dragOver, setDragOver] = useState(false);
+  const [tab, setTab] = useState<'media' | 'transitions'>('media');
+  const [filter, setFilter] = useState<MediaFilterId>('all');
   // Drag events fire for every child crossed, so a plain leave handler flickers.
   // Counting enters and leaves is what keeps the highlight steady.
   const dragDepth = useRef(0);
 
   const assets = Object.values(history.present.project.assets);
+  const visible = assets.filter(
+    (asset) => MEDIA_FILTERS.find((option) => option.id === filter)?.matches(asset) ?? true,
+  );
 
   const carriesFiles = (event: React.DragEvent): boolean =>
     event.dataTransfer.types.includes('Files');
@@ -68,26 +90,70 @@ export function MediaBin(): React.JSX.Element {
       }}
     >
       <div className="panel-head">
-        <span>Media</span>
+        <span>Library</span>
         <span className="spacer" style={{ flex: 1 }} />
         <button className="icon" title="Import media…" onClick={() => void importViaPicker()}>
           <IconPlus />
         </button>
       </div>
 
-      <div className="panel-body">
-        {assets.length === 0 ? (
-          <button className="bin-empty" onClick={() => void importViaPicker()}>
-            <IconFile size={22} />
-            <strong>Drop media anywhere here</strong>
-            <span>or click to browse</span>
+      {/*
+        Two tabs rather than one per media type: the panel is too narrow to keep
+        five labels legible, and transitions are a library rather than something
+        you imported. Within Media the type filter does the narrowing.
+      */}
+      <div className="panel-tabs">
+        {(['media', 'transitions'] as const).map((name) => (
+          <button
+            key={name}
+            className={`panel-tab${tab === name ? ' on' : ''}`}
+            onClick={() => setTab(name)}
+          >
+            {name === 'media' ? `Media${assets.length > 0 ? ` (${assets.length})` : ''}` : 'Transitions'}
           </button>
-        ) : (
-          assets.map((asset) => <AssetCard key={asset.id} asset={asset} />)
-        )}
+        ))}
       </div>
 
-      <TransitionLibrary />
+      {tab === 'media' && assets.length > 0 && (
+        <div className="bin-filters">
+          {MEDIA_FILTERS.map((option) => {
+            const count = assets.filter((asset) => option.matches(asset)).length;
+            return (
+              <button
+                key={option.id}
+                className={`bin-filter${filter === option.id ? ' on' : ''}`}
+                // Nothing of that kind imported, so the filter would only ever
+                // show an empty list.
+                disabled={count === 0 && option.id !== 'all'}
+                onClick={() => setFilter(option.id)}
+              >
+                {option.label}
+                {count > 0 && <span className="count">{count}</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {tab === 'media' ? (
+        <div className="panel-body">
+          {assets.length === 0 ? (
+            <button className="bin-empty" onClick={() => void importViaPicker()}>
+              <IconFile size={22} />
+              <strong>Drop media anywhere here</strong>
+              <span>or click to browse</span>
+            </button>
+          ) : visible.length === 0 ? (
+            <p className="hint">Nothing of that kind yet.</p>
+          ) : (
+            visible.map((asset) => <AssetCard key={asset.id} asset={asset} />)
+          )}
+        </div>
+      ) : (
+        <div className="panel-body">
+          <TransitionLibrary />
+        </div>
+      )}
 
       {dragOver && (
         <div className="bin-drop-overlay">
@@ -108,18 +174,14 @@ export function MediaBin(): React.JSX.Element {
  */
 function TransitionLibrary(): React.JSX.Element {
   const addTransitionNearPlayhead = useStudio((s) => s.addTransitionNearPlayhead);
-  const [open, setOpen] = useState(true);
 
   return (
-    <div className={`transition-library${open ? ' open' : ''}`}>
-      <button className="library-head" onClick={() => setOpen((value) => !value)}>
-        <IconTransition size={14} />
-        <span>Transitions</span>
-        <span className="spacer" style={{ flex: 1 }} />
-        <span className="chevron">{open ? '\u25be' : '\u25b8'}</span>
-      </button>
+    <div className="transition-library open">
+      <p className="hint">
+        Drag one onto a cut, or double-click to use the cut nearest the playhead.
+      </p>
 
-      {open && (
+      {(
         <div className="library-body">
           {TRANSITION_TYPES.map((type) => (
             <div

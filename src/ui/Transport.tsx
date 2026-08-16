@@ -19,7 +19,7 @@ import {
   IconStepBack,
   IconStepForward,
 } from './Icons';
-import { orderedTrackIds, useStudio } from './store';
+import { useStudio } from './store';
 
 export function Transport(): React.JSX.Element {
   const history = useStudio((s) => s.history);
@@ -28,7 +28,7 @@ export function Transport(): React.JSX.Element {
   const togglePlay = useStudio((s) => s.togglePlay);
   const setPlayhead = useStudio((s) => s.setPlayhead);
   const duration = useStudio((s) => s.duration);
-  const run = useStudio((s) => s.run);
+  const splitAtPlayhead = useStudio((s) => s.splitAtPlayhead);
   const [expanded, setExpanded] = useState(false);
 
   // The browser owns native fullscreen state (Escape, F11, the window chrome), so
@@ -118,7 +118,7 @@ export function Transport(): React.JSX.Element {
     setPlayhead(T.clamp(T.add(at, T.mulInt(frame, frames)), T.TIME_ZERO, total));
 
   const splitHere = (): void =>
-    run({ type: 'splitClips', trackIds: orderedTrackIds(project, sequenceId), at }, 'Split at playhead');
+    splitAtPlayhead();
 
   const progress = T.isPositive(total) ? Math.min(1, T.ratio(at, total)) : 0;
 
@@ -170,7 +170,7 @@ export function Transport(): React.JSX.Element {
 
         <span className="transport-gap" />
 
-        <button className="icon" title="Split at playhead (S)" onClick={splitHere}>
+        <button className="icon" title="Split at the playhead (S)" onClick={splitHere}>
           <IconSplit />
         </button>
         <button

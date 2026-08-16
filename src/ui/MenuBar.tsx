@@ -38,7 +38,7 @@ import {
   IconVideo,
 } from './Icons';
 import * as T from '../model/time';
-import { orderedTrackIds, useStudio } from './store';
+import { useStudio } from './store';
 
 /**
  * A dropdown anchored under its title.
@@ -123,6 +123,7 @@ export function MenuBar({ onExport }: { onExport: () => void }): React.JSX.Eleme
   const newProject = useStudio((s) => s.newProject);
   const addTitle = useStudio((s) => s.addTitle);
   const addSolid = useStudio((s) => s.addSolid);
+  const splitAtPlayhead = useStudio((s) => s.splitAtPlayhead);
   const importViaPicker = useStudio((s) => s.importViaPicker);
   const toggleTelemetry = useStudio((s) => s.toggleTelemetry);
   const setPlayhead = useStudio((s) => s.setPlayhead);
@@ -133,7 +134,6 @@ export function MenuBar({ onExport }: { onExport: () => void }): React.JSX.Eleme
 
   const project = history.present.project;
   const sequence = project.sequences[sequenceId]!;
-  const trackIds = orderedTrackIds(project, sequenceId);
   const hasSelection = selection.length > 0;
 
   // The first selected clip drives the Clip menu's toggles.
@@ -163,9 +163,6 @@ export function MenuBar({ onExport }: { onExport: () => void }): React.JSX.Eleme
       window.removeEventListener('keydown', onKey);
     };
   }, [open]);
-
-  const splitAtPlayhead = (): void =>
-    run({ type: 'splitClips', trackIds, at: playhead() }, 'Split at playhead');
 
   const menus: readonly MenuDefinition[] = [
     {

@@ -30,6 +30,8 @@ import {
   type History,
 } from '../model/history';
 import {
+  clipEnd,
+  clipsWithin,
   expandSelection,
   getSequence,
   nearestCut,
@@ -46,6 +48,7 @@ import type {
   Project,
   SequenceId,
   Time,
+  TimeRange,
   TrackId,
   TrackKind,
   TransitionId,
@@ -78,6 +81,8 @@ export interface StudioState {
   selectedTrackId: TrackId | null;
   /** A selected transition, for editing its style, length and alignment. */
   selectedTransitionId: TransitionId | null;
+  /** Where a Shift-click measures its range from: the last clip clicked plainly. */
+  selectionAnchor: ClipId | null;
   engine: Engine | null;
   /** Source blobs, kept so the engine can reopen assets. */
   mediaFiles: ReadonlyMap<AssetId, File>;
@@ -117,6 +122,19 @@ export interface StudioState {
   toggleSelect: (clipId: ClipId) => void;
   selectTrack: (trackId: TrackId | null) => void;
   selectTransition: (transitionId: TransitionId | null) => void;
+  /**
+   * Extend the selection from the last clip clicked to this one — Shift-click.
+   *
+   * The rectangle between the two anchors decides it, so dragging across tracks
+   * picks up everything in between rather than only what shares a track.
+   */
+  selectRangeTo: (clipId: ClipId) => void;
+  /** Clips touched by a marquee, added to the selection when `additive`. */
+  selectWithin: (
+    trackIds: readonly TrackId[],
+    range: TimeRange,
+    additive: boolean,
+  ) => void;
 
   setPlayhead: (at: Time) => void;
   setZoom: (pixelsPerSecond: number) => void;
@@ -134,6 +152,15 @@ export interface StudioState {
    * clips' tracks, or every track when nothing is selected. Returns false when
    * there was no bare cut to use.
    */
+  /**
+   * Cut at the playhead.
+   *
+   * With a selection only its tracks are cut — and since selecting one half of a
+   * linked pair selects the whole unit, a clip and its own audio come apart
+   * together. With nothing selected the cut runs across every track, which is
+   * what you want when you are simply chopping the timeline.
+   */
+  splitAtPlayhead: () => void;
   addTransitionNearPlayhead: (transitionType?: string, trackId?: TrackId) => boolean;
   /**
    * Put a transition on these cuts, shortening the clips when they have no
@@ -186,6 +213,7 @@ export const useStudio = create<StudioState>((set, get) => ({
   selection: [],
   selectedTrackId: null,
   selectedTransitionId: null,
+  selectionAnchor: null,
   engine: null,
   mediaFiles: new Map(),
   telemetry: null,
@@ -287,7 +315,50 @@ export const useStudio = create<StudioState>((set, get) => ({
       selection: expandSelection(get().project(), clipIds),
       selectedTrackId: null,
       selectedTransitionId: null,
+      selectionAnchor: clipIds[0] ?? null,
     }),
+
+  selectRangeTo: (clipId) => {
+    const state = get();
+    const project = state.project();
+    const target = project.clips[clipId];
+    const anchorId = state.selectionAnchor ?? state.selection[0];
+    const anchor = anchorId === undefined ? undefined : project.clips[anchorId];
+
+    // Nothing to reach from, so this is just an ordinary click.
+    if (!target || !anchor) {
+      state.select([clipId]);
+      return;
+    }
+
+    const order = orderedTrackIds(project, state.sequenceId);
+    const first = order.indexOf(anchor.trackId);
+    const last = order.indexOf(target.trackId);
+    const tracks = order.slice(Math.min(first, last), Math.max(first, last) + 1);
+
+    const range = T.rangeFromBounds(
+      T.min(anchor.start, target.start),
+      T.max(clipEnd(anchor), clipEnd(target)),
+    );
+    set({
+      selection: expandSelection(project, clipsWithin(project, tracks, range).map((c) => c.id)),
+      selectedTrackId: null,
+      selectedTransitionId: null,
+      // The anchor stays put, so shift-clicking again re-measures from it.
+      selectionAnchor: anchorId ?? null,
+    });
+  },
+
+  selectWithin: (trackIds, range, additive) => {
+    const project = get().project();
+    const found = expandSelection(project, clipsWithin(project, trackIds, range).map((c) => c.id));
+    const existing = additive ? get().selection : [];
+    set({
+      selection: [...existing, ...found.filter((id) => !existing.includes(id))],
+      selectedTrackId: null,
+      selectedTransitionId: null,
+    });
+  },
 
   toggleSelect: (clipId) => {
     const project = get().project();
@@ -452,6 +523,19 @@ export const useStudio = create<StudioState>((set, get) => ({
       },
       'Add title',
     );
+  },
+
+  splitAtPlayhead: () => {
+    const state = get();
+    const project = state.project();
+
+    const selected = [
+      ...new Set(state.selection.map((id) => project.clips[id]?.trackId)),
+    ].filter((id): id is TrackId => id !== undefined);
+    const trackIds = selected.length > 0 ? selected : orderedTrackIds(project, state.sequenceId);
+    if (trackIds.length === 0) return;
+
+    state.run({ type: 'splitClips', trackIds, at: state.playhead() }, 'Split');
   },
 
   addTransitionOnCuts: (cuts, transitionType, duration, label = 'Add transition') => {

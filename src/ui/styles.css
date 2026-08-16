@@ -579,8 +579,8 @@ input[type='range'] {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 0 8px;
+  gap: 3px;
+  padding: 0 6px;
   background: var(--panel);
   border-right: 1px solid var(--line);
   font-size: 12px;
@@ -595,7 +595,9 @@ input[type='range'] {
   flex: none;
 }
 .track-header .label {
-  flex: 1;
+  /* Truncates rather than widening the row, but never below a readable stub. */
+  flex: 1 1 auto;
+  min-width: 34px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -663,6 +665,10 @@ input[type='range'] {
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
 }
 
+/*
+ * Runs the whole height of the grid, ruler included. Above the sticky topbar's own
+ * stacking so the line is not cut off where it crosses it.
+ */
 .playhead {
   position: absolute;
   top: 0;
@@ -670,16 +676,29 @@ input[type='range'] {
   width: 1px;
   background: var(--danger);
   pointer-events: none;
-  z-index: 4;
+  z-index: 7;
 }
-.playhead::before {
+/* The grab handle, sized to the ruler it sits in. */
+.playhead-head {
+  position: absolute;
+  top: 0;
+  left: -6px;
+  width: 13px;
+  height: var(--ruler-h);
+  pointer-events: auto;
+  cursor: ew-resize;
+}
+.playhead-head::before {
   content: '';
   position: absolute;
   top: 0;
-  left: -5px;
+  left: 1px;
   border-left: 5px solid transparent;
   border-right: 5px solid transparent;
   border-top: 8px solid var(--danger);
+}
+.playhead-head:hover::before {
+  border-top-color: #ff8080;
 }
 
 .clip {
@@ -823,24 +842,6 @@ input[type='range'] {
   right: 0;
 }
 
-.playhead {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 1px;
-  background: var(--danger);
-  pointer-events: none;
-  z-index: 4;
-}
-.playhead::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: -5px;
-  border-left: 5px solid transparent;
-  border-right: 5px solid transparent;
-  border-top: 8px solid var(--danger);
-}
 
 /* -------------------------------------------------------------- inspector */
 
@@ -1229,4 +1230,120 @@ body.focus-mode .preview-panel .preview {
 }
 .transition-chip:active {
   cursor: grabbing;
+}
+
+/* Faders in the track header and the transport, sized to sit among the icons. */
+.track-volume,
+.master-volume input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line-strong);
+  cursor: pointer;
+}
+.track-volume {
+  /* Shares what the name and the toggles leave, down to a usable stub. */
+  flex: 1 1 36px;
+  min-width: 30px;
+  margin: 0 2px;
+}
+.track-volume::-webkit-slider-thumb,
+.master-volume input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text);
+  border: 1px solid var(--panel-2);
+}
+.track-volume:hover::-webkit-slider-thumb,
+.master-volume input[type='range']:hover::-webkit-slider-thumb {
+  background: var(--accent);
+}
+.master-volume {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+.master-volume input[type='range'] {
+  width: 72px;
+}
+
+/* Library tabs, and the type filter inside the Media tab. */
+.panel-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.panel-tab {
+  padding: 6px 10px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.panel-tab:hover {
+  color: var(--text);
+}
+.panel-tab.on {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+.bin-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 10px 0;
+  flex: 0 0 auto;
+}
+.bin-filter {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+.bin-filter:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--accent);
+}
+.bin-filter.on {
+  color: var(--text);
+  border-color: var(--accent);
+  background: #2b3f63;
+}
+.bin-filter:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.bin-filter .count {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+
+/*
+ * Rubber-band selection. Fixed rather than absolute because it is placed straight
+ * from pointer coordinates — inside the scrolling grid it would drift as soon as
+ * the timeline was scrolled at all.
+ */
+.marquee {
+  position: fixed;
+  z-index: 20;
+  pointer-events: none;
+  border: 1px solid var(--accent);
+  background: rgb(88 166 255 / 16%);
+  border-radius: 2px;
 }
