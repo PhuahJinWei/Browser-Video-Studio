@@ -98,21 +98,23 @@ fn fs(in : VertexOut) -> @location(0) vec4f {
   );
   let uv = local / u.layer_size;
 
+  // WGSL requires textureSample to be reached in uniform control flow, so the
+  // bounds and crop tests become an alpha mask rather than an early return.
+  let src = textureSample(layer_tex, samp, clamp(uv, vec2f(0.0), vec2f(1.0)));
+
   let inside_bounds = all(uv >= vec2f(0.0)) && all(uv <= vec2f(1.0));
   let inside_crop =
     uv.x >= u.crop.x && uv.y >= u.crop.y &&
     uv.x <= 1.0 - u.crop.z && uv.y <= 1.0 - u.crop.w;
-  if (!inside_bounds || !inside_crop) {
-    return base;
-  }
+  let mask = select(0.0, 1.0, inside_bounds && inside_crop);
 
-  var src = textureSample(layer_tex, samp, uv);
-  src = vec4f(apply_colour(src.rgb), src.a * u.opacity);
+  let rgb   = apply_colour(src.rgb);
+  let alpha = src.a * u.opacity * mask;
 
-  let blended = blend_rgb(u.blend_mode, base.rgb, src.rgb);
   // Standard source-over, with the blend function choosing the source colour.
-  let out_a   = src.a + base.a * (1.0 - src.a);
-  let out_rgb = blended * src.a + base.rgb * (1.0 - src.a);
+  let blended = blend_rgb(u.blend_mode, base.rgb, rgb);
+  let out_a   = alpha + base.a * (1.0 - alpha);
+  let out_rgb = blended * alpha + base.rgb * (1.0 - alpha);
   return vec4f(out_rgb, out_a);
 }
 `;
@@ -148,15 +150,14 @@ fn vs(@builtin(vertex_index) index : u32) -> VertexOut {
 
 @fragment
 fn fs(in : VertexOut) -> @location(0) vec4f {
+  // The radius comes from a uniform, so this loop bound is uniform across the
+  // draw and textureSample below stays in uniform control flow.
   let steps = i32(clamp(u.radius, 0.0, 64.0));
-  if (steps <= 0) {
-    return textureSample(src, samp, in.uv);
-  }
 
   // Premultiply while accumulating so transparent edges do not bleed dark haloes.
   var sum    = vec4f(0.0);
   var weight = 0.0;
-  let two_sigma_sq = 2.0 * u.sigma * u.sigma;
+  let two_sigma_sq = max(2.0 * u.sigma * u.sigma, 0.0001);
 
   for (var i = -steps; i <= steps; i = i + 1) {
     let offset = f32(i);
@@ -167,11 +168,8 @@ fn fs(in : VertexOut) -> @location(0) vec4f {
     weight = weight + w;
   }
 
-  let acc = sum / weight;
-  if (acc.a <= 0.0001) {
-    return vec4f(0.0);
-  }
-  return vec4f(acc.rgb / acc.a, acc.a);
+  let acc = sum / max(weight, 0.0001);
+  return select(vec4f(acc.rgb / max(acc.a, 0.0001), acc.a), vec4f(0.0), acc.a <= 0.0001);
 }
 `;
 

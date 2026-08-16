@@ -1,0 +1,473 @@
+/**
+ * Inspector.
+ *
+ * Effect controls are generated from the effect registry, so a new effect type gets a
+ * UI for free. Every edit goes through a command with a coalesce key, so dragging a
+ * slider is one undo step rather than one per pixel.
+ */
+
+import { defaultParams, EFFECT_REGISTRY, effectDefinition, listEffects } from '../engine/effects';
+import type { ClipParamKey } from '../model/commands';
+import { staticParam } from '../model/params';
+import { isAudioClip, isMediaClip, isVisualClip } from '../model/selectors';
+import * as T from '../model/time';
+import type {
+  AudioClip,
+  BlendMode,
+  Clip,
+  EffectInstance,
+  Param,
+  TitleClip,
+  VideoClip,
+} from '../model/types';
+import { useStudio } from './store';
+
+const BLEND_MODES: readonly BlendMode[] = [
+  'normal',
+  'multiply',
+  'screen',
+  'overlay',
+  'add',
+  'darken',
+  'lighten',
+  'difference',
+];
+
+export function Inspector(): React.JSX.Element {
+  const history = useStudio((s) => s.history);
+  const selection = useStudio((s) => s.selection);
+  const clip = selection.length === 1 ? history.present.project.clips[selection[0]!] : undefined;
+
+  return (
+    <div className="panel">
+      <div className="panel-head">Inspector</div>
+      <div className="panel-body">
+        {!clip && (
+          <p className="hint">
+            {selection.length > 1
+              ? `${selection.length} clips selected.`
+              : 'Select a clip to edit its properties.'}
+          </p>
+        )}
+        {clip && <ClipInspector clip={clip} />}
+      </div>
+    </div>
+  );
+}
+
+/** Static numeric value of a parameter, or a fallback when it is keyframed. */
+function staticValue(param: Param<number>, fallback: number): number {
+  return param.kind === 'static' ? param.value : fallback;
+}
+
+function ClipInspector({ clip }: { clip: Clip }): React.JSX.Element {
+  const run = useStudio((s) => s.run);
+  const endGesture = useStudio((s) => s.endGesture);
+  const history = useStudio((s) => s.history);
+  const project = history.present.project;
+
+  const effects = clip.effects
+    .map((id) => project.effects[id])
+    .filter((e): e is EffectInstance => e !== undefined);
+
+  const setParam = (key: ClipParamKey, value: number, label: string): void =>
+    run(
+      { type: 'setClipParam', clipId: clip.id, key, param: staticParam(value) },
+      label,
+      `${key}:${clip.id}`,
+    );
+
+  return (
+    <>
+      <div className="field">
+        <label>Name</label>
+        <input
+          type="text"
+          value={clip.name}
+          onChange={(event) =>
+            run(
+              { type: 'setClipProps', clipId: clip.id, props: { name: event.target.value } },
+              'Rename clip',
+              `rename:${clip.id}`,
+            )
+          }
+          onBlur={endGesture}
+        />
+      </div>
+
+      <div className="field">
+        <label>Timing</label>
+        <p className="hint" style={{ margin: 0 }}>
+          {T.formatDuration(clip.start, { decimals: 2 })} →{' '}
+          {T.formatDuration(T.add(clip.start, clip.duration), { decimals: 2 })} ·{' '}
+          {T.formatDuration(clip.duration, { decimals: 2 })}
+          {isMediaClip(clip) && (
+            <>
+              <br />
+              source @ {T.formatDuration(clip.sourceIn, { decimals: 2 })} · {clip.speed}×
+            </>
+          )}
+        </p>
+      </div>
+
+      <div className="field">
+        <div className="value-row">
+          <button
+            onClick={() =>
+              run(
+                { type: 'setClipProps', clipId: clip.id, props: { enabled: !clip.enabled } },
+                clip.enabled ? 'Disable clip' : 'Enable clip',
+              )
+            }
+          >
+            {clip.enabled ? 'Disable' : 'Enable'}
+          </button>
+          <button
+            onClick={() =>
+              run(
+                { type: 'setClipProps', clipId: clip.id, props: { locked: !clip.locked } },
+                clip.locked ? 'Unlock clip' : 'Lock clip',
+              )
+            }
+          >
+            {clip.locked ? 'Unlock' : 'Lock'}
+          </button>
+          <button onClick={() => run({ type: 'removeClips', clipIds: [clip.id] }, 'Delete clip')}>
+            Delete
+          </button>
+        </div>
+      </div>
+
+      {isVisualClip(clip) && (
+        <VisualControls clip={clip} setParam={setParam} onCommit={endGesture} />
+      )}
+      {isAudioClip(clip) && <AudioControls clip={clip} setParam={setParam} onCommit={endGesture} />}
+
+      <hr style={{ border: 0, borderTop: '1px solid var(--line)', margin: '14px 0' }} />
+
+      <div className="field">
+        <label>Effects</label>
+        {effects.length === 0 && <p className="hint">None.</p>}
+        {effects.map((effect) => (
+          <EffectCard key={effect.id} effect={effect} />
+        ))}
+        <select
+          value=""
+          onChange={(event) => {
+            const type = event.target.value;
+            if (!type) return;
+            run(
+              {
+                type: 'addEffect',
+                owner: { kind: 'clip', clipId: clip.id },
+                effectType: type,
+                params: defaultParams(type),
+              },
+              `Add ${EFFECT_REGISTRY[type]?.label ?? type}`,
+            );
+          }}
+        >
+          <option value="">Add effect…</option>
+          {listEffects()
+            .filter((definition) =>
+              clip.kind === 'audio'
+                ? definition.category === 'audio'
+                : definition.category !== 'audio',
+            )
+            .map((definition) => (
+              <option key={definition.type} value={definition.type}>
+                {definition.label}
+              </option>
+            ))}
+        </select>
+      </div>
+    </>
+  );
+}
+
+interface ControlProps {
+  setParam: (key: ClipParamKey, value: number, label: string) => void;
+  onCommit: () => void;
+}
+
+function VisualControls({
+  clip,
+  setParam,
+  onCommit,
+}: ControlProps & { clip: VideoClip | TitleClip }): React.JSX.Element {
+  const run = useStudio((s) => s.run);
+  const { transform } = clip;
+  // Titles are generated at sequence size, so cropping and blending do not apply.
+  const framed: VideoClip | null = clip.kind === 'title' ? null : clip;
+
+  return (
+    <>
+      <Slider
+        label="Opacity"
+        value={staticValue(clip.opacity, 1)}
+        min={0}
+        max={1}
+        step={0.01}
+        onChange={(value) => setParam('opacity', value, 'Set opacity')}
+        onCommit={onCommit}
+      />
+      <Slider
+        label="Scale"
+        value={staticValue(transform.scaleX, 1)}
+        min={0.05}
+        max={4}
+        step={0.01}
+        unit="×"
+        onChange={(value) => {
+          setParam('transform.scaleX', value, 'Set scale');
+          setParam('transform.scaleY', value, 'Set scale');
+        }}
+        onCommit={onCommit}
+      />
+      <Slider
+        label="Position X"
+        value={staticValue(transform.x, 0)}
+        min={-1920}
+        max={1920}
+        step={1}
+        unit=" px"
+        onChange={(value) => setParam('transform.x', value, 'Move layer')}
+        onCommit={onCommit}
+      />
+      <Slider
+        label="Position Y"
+        value={staticValue(transform.y, 0)}
+        min={-1080}
+        max={1080}
+        step={1}
+        unit=" px"
+        onChange={(value) => setParam('transform.y', value, 'Move layer')}
+        onCommit={onCommit}
+      />
+      <Slider
+        label="Rotation"
+        value={staticValue(transform.rotation, 0)}
+        min={-180}
+        max={180}
+        step={0.5}
+        unit="°"
+        onChange={(value) => setParam('transform.rotation', value, 'Rotate layer')}
+        onCommit={onCommit}
+      />
+
+      {framed && (
+        <>
+          <Slider
+            label="Crop left"
+            value={staticValue(framed.crop.left, 0)}
+            min={0}
+            max={0.49}
+            step={0.005}
+            onChange={(value) => setParam('crop.left', value, 'Crop')}
+            onCommit={onCommit}
+          />
+          <Slider
+            label="Crop right"
+            value={staticValue(framed.crop.right, 0)}
+            min={0}
+            max={0.49}
+            step={0.005}
+            onChange={(value) => setParam('crop.right', value, 'Crop')}
+            onCommit={onCommit}
+          />
+          <div className="field">
+            <label>Blend mode</label>
+            <select
+              value={framed.blendMode}
+              onChange={(event) =>
+                run(
+                  {
+                    type: 'setClipBlendMode',
+                    clipId: framed.id,
+                    blendMode: event.target.value as BlendMode,
+                  },
+                  'Set blend mode',
+                )
+              }
+            >
+              {BLEND_MODES.map((mode) => (
+                <option key={mode} value={mode}>
+                  {mode}
+                </option>
+              ))}
+            </select>
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+function AudioControls({
+  clip,
+  setParam,
+  onCommit,
+}: ControlProps & { clip: AudioClip }): React.JSX.Element {
+  const run = useStudio((s) => s.run);
+
+  return (
+    <>
+      <Slider
+        label="Gain"
+        value={staticValue(clip.gainDb, 0)}
+        min={-60}
+        max={12}
+        step={0.5}
+        unit=" dB"
+        onChange={(value) => setParam('gainDb', value, 'Set gain')}
+        onCommit={onCommit}
+      />
+      <Slider
+        label="Pan"
+        value={staticValue(clip.pan, 0)}
+        min={-1}
+        max={1}
+        step={0.01}
+        onChange={(value) => setParam('pan', value, 'Set pan')}
+        onCommit={onCommit}
+      />
+      <Slider
+        label="Fade in"
+        value={T.toSeconds(clip.fadeIn)}
+        min={0}
+        max={5}
+        step={0.05}
+        unit=" s"
+        onChange={(value) =>
+          run(
+            { type: 'setClipFade', clipId: clip.id, edge: 'in', duration: T.fromSeconds(value, 1000) },
+            'Set fade in',
+            `fadein:${clip.id}`,
+          )
+        }
+        onCommit={onCommit}
+      />
+      <Slider
+        label="Fade out"
+        value={T.toSeconds(clip.fadeOut)}
+        min={0}
+        max={5}
+        step={0.05}
+        unit=" s"
+        onChange={(value) =>
+          run(
+            { type: 'setClipFade', clipId: clip.id, edge: 'out', duration: T.fromSeconds(value, 1000) },
+            'Set fade out',
+            `fadeout:${clip.id}`,
+          )
+        }
+        onCommit={onCommit}
+      />
+    </>
+  );
+}
+
+function EffectCard({ effect }: { effect: EffectInstance }): React.JSX.Element {
+  const run = useStudio((s) => s.run);
+  const endGesture = useStudio((s) => s.endGesture);
+  const definition = effectDefinition(effect.effectType);
+
+  return (
+    <div className="effect-card">
+      <div className="effect-head">
+        <span>{definition?.label ?? effect.effectType}</span>
+        <span className="spacer" />
+        <button
+          className={`icon${effect.enabled ? ' on' : ''}`}
+          title="Toggle effect"
+          onClick={() =>
+            run(
+              { type: 'setEffectEnabled', effectId: effect.id, enabled: !effect.enabled },
+              'Toggle effect',
+            )
+          }
+        >
+          {effect.enabled ? 'On' : 'Off'}
+        </button>
+        <button
+          className="icon"
+          title="Remove effect"
+          onClick={() => run({ type: 'removeEffect', effectId: effect.id }, 'Remove effect')}
+        >
+          ×
+        </button>
+      </div>
+
+      {definition &&
+        Object.entries(definition.params).map(([key, schema]) => {
+          const param = effect.params[key];
+          const value =
+            param?.kind === 'static' && typeof param.value === 'number'
+              ? param.value
+              : schema.default;
+          return (
+            <Slider
+              key={key}
+              label={schema.label}
+              value={value}
+              min={schema.min}
+              max={schema.max}
+              step={schema.step}
+              unit={schema.unit ? ` ${schema.unit}` : ''}
+              onChange={(next) =>
+                run(
+                  { type: 'setEffectParam', effectId: effect.id, key, param: staticParam(next) },
+                  `Set ${schema.label}`,
+                  `param:${effect.id}:${key}`,
+                )
+              }
+              onCommit={endGesture}
+            />
+          );
+        })}
+    </div>
+  );
+}
+
+function Slider({
+  label,
+  value,
+  min,
+  max,
+  step,
+  unit = '',
+  onChange,
+  onCommit,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  unit?: string;
+  onChange: (value: number) => void;
+  onCommit: () => void;
+}): React.JSX.Element {
+  const decimals = step < 0.01 ? 3 : step < 1 ? 2 : 0;
+  return (
+    <div className="field">
+      <label>{label}</label>
+      <div className="value-row">
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={(event) => onChange(Number(event.target.value))}
+          onPointerUp={onCommit}
+          onKeyUp={onCommit}
+        />
+        <output>
+          {value.toFixed(decimals)}
+          {unit}
+        </output>
+      </div>
+    </div>
+  );
+}

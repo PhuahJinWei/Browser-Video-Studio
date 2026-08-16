@@ -311,11 +311,29 @@ const COMMON_RATES: readonly FrameRate[] = [
   T.FPS_60,
 ];
 
-/** Snap a measured rate onto a standard one when it is within 0.5 %. */
+/**
+ * Snap a measured rate onto a standard one.
+ *
+ * The tolerance has to be tight: 29.97 and 30 differ by only 0.1 % (a factor of
+ * 1.001), as do 23.976/24 and 59.94/60. A loose window would silently label every
+ * 30 fps clip as 29.97 — so this picks the *closest* rate and only accepts it well
+ * inside that gap.
+ */
+const SNAP_TOLERANCE = 0.0004;
+
 function snapToBroadcastRate(fps: number): FrameRate {
+  let best: FrameRate | null = null;
+  let bestError = Infinity;
+
   for (const rate of COMMON_RATES) {
-    if (Math.abs(T.fpsToNumber(rate) - fps) / fps < 0.005) return rate;
+    const error = Math.abs(T.fpsToNumber(rate) - fps) / fps;
+    if (error < bestError) {
+      bestError = error;
+      best = rate;
+    }
   }
+
+  if (best && bestError < SNAP_TOLERANCE) return best;
   const approx = T.fromSeconds(fps, 1000);
   return T.frameRate(approx.num, approx.den);
 }

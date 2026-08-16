@@ -168,7 +168,43 @@ export class Compositor {
       context.configure({ device, format: canvasFormat, alphaMode: 'premultiplied' });
     }
 
-    return new Compositor(device, context, canvasFormat, size);
+    const compositor = new Compositor(device, context, canvasFormat, size);
+    // A WGSL error only produces warnings and an invalid pipeline, which renders as a
+    // silent black frame. Surface it as an exception instead.
+    await compositor.assertShadersCompiled();
+
+    device.addEventListener('uncapturederror', (event) => {
+      const detail = (event as GPUUncapturedErrorEvent).error.message;
+      compositor.lastDeviceError = detail;
+      console.error('[compositor] GPU error:', detail);
+    });
+
+    return compositor;
+  }
+
+  /** Set when the device reports an uncaptured error; surfaced in telemetry. */
+  lastDeviceError: string | null = null;
+
+  private async assertShadersCompiled(): Promise<void> {
+    const modules: readonly [string, GPUShaderModule][] = [
+      ['composite', this.compositeModule],
+      ['blur', this.blurModule],
+      ['blit', this.blitModule],
+    ];
+
+    const problems: string[] = [];
+    for (const [name, module] of modules) {
+      const info = await module.getCompilationInfo();
+      for (const message of info.messages) {
+        if (message.type === 'error') {
+          problems.push(`${name}:${message.lineNum}:${message.linePos} ${message.message}`);
+        }
+      }
+    }
+    if (problems.length > 0) {
+      this.destroy();
+      throw new CompositorError(`Shader compilation failed:\n${problems.join('\n')}`);
+    }
   }
 
   get sequenceSize(): Size {

@@ -31,10 +31,15 @@ export interface EngineTelemetry {
 
 export type TelemetryListener = (telemetry: Readonly<EngineTelemetry>) => void;
 
+/** How often the transport clock is sampled during playback. */
+const CLOCK_INTERVAL_MS = 25;
+
 export class Engine {
   private compositor: Compositor | null = null;
   private player: AudioPlayer | null = null;
   private rafHandle: number | null = null;
+  private clockTimer: ReturnType<typeof setInterval> | null = null;
+  private playbackPosition: Time = T.TIME_ZERO;
   private rendering = false;
   private pendingSeek: Time | null = null;
   private lastRenderedAt: Time | null = null;
@@ -218,8 +223,14 @@ export class Engine {
   }
 
   /**
-   * Begin playback from `from`. `onPosition` is called once per animation frame with
-   * the position derived from the audio clock — the caller moves the playhead.
+   * Begin playback from `from`. `onPosition` reports the position derived from the
+   * audio clock — the caller moves the playhead.
+   *
+   * The clock and the renderer are deliberately separate. `requestAnimationFrame`
+   * stops firing whenever the page is not compositing (background tab, hidden
+   * window), but audio keeps playing, so driving the position from rAF would let the
+   * playhead freeze while the sound ran on — real desync on return. A timer owns the
+   * position; rAF only decides when to draw.
    */
   async play(from: Time, onPosition: (at: Time) => void, until: Time): Promise<void> {
     if (this.telemetry.playing) return;
@@ -229,28 +240,37 @@ export class Engine {
     await this.player.start(from);
 
     const startedWall = performance.now();
+    this.playbackPosition = from;
 
-    const tick = (): void => {
+    const advance = (): void => {
       if (!this.telemetry.playing || !this.player) return;
 
-      // The audio clock is authoritative; fall back to wall time if audio is silent.
+      // The audio clock is authoritative; wall time covers a silent or blocked
+      // AudioContext (autoplay policy) so the picture still runs at the right rate.
       const audioTime = this.player.currentTime();
       const wallElapsed = (performance.now() - startedWall) / 1000;
       const fallback = T.add(from, T.fromSeconds(wallElapsed, 1_000_000));
       const position = T.gt(audioTime, from) ? audioTime : fallback;
 
       if (T.gte(position, until)) {
-        void this.pause();
+        this.playbackPosition = until;
         onPosition(until);
+        void this.pause();
         return;
       }
 
+      this.playbackPosition = position;
       onPosition(position);
-      this.requestRender(position);
-      this.rafHandle = requestAnimationFrame(tick);
     };
 
-    this.rafHandle = requestAnimationFrame(tick);
+    const draw = (): void => {
+      if (!this.telemetry.playing) return;
+      this.requestRender(this.playbackPosition);
+      this.rafHandle = requestAnimationFrame(draw);
+    };
+
+    this.clockTimer = setInterval(advance, CLOCK_INTERVAL_MS);
+    this.rafHandle = requestAnimationFrame(draw);
     this.emitTelemetry();
   }
 
@@ -260,7 +280,13 @@ export class Engine {
       cancelAnimationFrame(this.rafHandle);
       this.rafHandle = null;
     }
+    if (this.clockTimer !== null) {
+      clearInterval(this.clockTimer);
+      this.clockTimer = null;
+    }
     await this.player?.stop();
+    // Land on the exact position the transport stopped at.
+    this.requestRender(this.playbackPosition);
     this.emitTelemetry();
   }
 

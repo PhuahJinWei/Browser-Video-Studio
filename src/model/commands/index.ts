@@ -15,6 +15,7 @@ import type { Command } from './types';
 
 export type {
   ClipMove,
+  ClipParamKey,
   ClipProps,
   Command,
   CommandType,

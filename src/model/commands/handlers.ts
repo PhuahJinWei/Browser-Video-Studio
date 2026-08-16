@@ -335,6 +335,68 @@ function handleSetClipProps(d: Draft, cmd: Extract<Command, { type: 'setClipProp
   d.clips[cmd.clipId] = { ...draftClip(d, cmd.clipId), ...cmd.props } as Clip;
 }
 
+function handleSetClipParam(d: Draft, cmd: Extract<Command, { type: 'setClipParam' }>): void {
+  const clip = draftClip(d, cmd.clipId);
+  const [group, channel] = cmd.key.split('.') as [string, string | undefined];
+
+  const reject = (): never => {
+    throw new ModelError(`"${clip.name}" (${clip.kind}) has no parameter "${cmd.key}"`);
+  };
+
+  if (group === 'opacity') {
+    if (clip.kind === 'audio') reject();
+    d.clips[clip.id] = { ...clip, opacity: cmd.param } as Clip;
+    return;
+  }
+  if (group === 'gainDb' || group === 'pan') {
+    if (clip.kind !== 'audio') reject();
+    d.clips[clip.id] = { ...clip, [group]: cmd.param } as Clip;
+    return;
+  }
+  if (group === 'transform' && channel) {
+    if (clip.kind === 'audio') reject();
+    const visual = clip as Extract<Clip, { transform: unknown }>;
+    d.clips[clip.id] = {
+      ...visual,
+      transform: { ...visual.transform, [channel]: cmd.param },
+    } as Clip;
+    return;
+  }
+  if (group === 'crop' && channel) {
+    if (clip.kind === 'audio' || clip.kind === 'title') reject();
+    const video = clip as Extract<Clip, { crop: unknown }>;
+    d.clips[clip.id] = { ...video, crop: { ...video.crop, [channel]: cmd.param } } as Clip;
+    return;
+  }
+  reject();
+}
+
+function handleSetClipFade(d: Draft, cmd: Extract<Command, { type: 'setClipFade' }>): void {
+  const clip = draftClip(d, cmd.clipId);
+  if (clip.kind !== 'audio') throw new ModelError(`"${clip.name}" is not an audio clip`);
+  if (T.isNegative(cmd.duration)) throw new ModelError('A fade cannot be negative');
+  // A fade longer than the clip would invert the ramp.
+  const duration = T.min(cmd.duration, clip.duration);
+  d.clips[clip.id] = { ...clip, [cmd.edge === 'in' ? 'fadeIn' : 'fadeOut']: duration };
+}
+
+function handleSetClipBlendMode(d: Draft, cmd: Extract<Command, { type: 'setClipBlendMode' }>): void {
+  const clip = draftClip(d, cmd.clipId);
+  if (clip.kind === 'audio' || clip.kind === 'title') {
+    throw new ModelError(`"${clip.name}" has no blend mode`);
+  }
+  d.clips[clip.id] = { ...clip, blendMode: cmd.blendMode };
+}
+
+function handleSetClipSpeed(d: Draft, cmd: Extract<Command, { type: 'setClipSpeed' }>): void {
+  const clip = draftClip(d, cmd.clipId);
+  if (!isMediaClip(clip)) throw new ModelError(`"${clip.name}" has no source to retime`);
+  if (!Number.isFinite(cmd.speed) || cmd.speed === 0) {
+    throw new ModelError(`Speed must be finite and non-zero, got ${cmd.speed}`);
+  }
+  d.clips[clip.id] = { ...clip, speed: cmd.speed };
+}
+
 // ---------------------------------------------------------------------------
 // Effects
 // ---------------------------------------------------------------------------
@@ -474,6 +536,14 @@ export function runCommand(d: Draft, command: Command, ids: IdSource): void {
       return handleSplitClips(d, command, ids);
     case 'setClipProps':
       return handleSetClipProps(d, command);
+    case 'setClipParam':
+      return handleSetClipParam(d, command);
+    case 'setClipFade':
+      return handleSetClipFade(d, command);
+    case 'setClipBlendMode':
+      return handleSetClipBlendMode(d, command);
+    case 'setClipSpeed':
+      return handleSetClipSpeed(d, command);
     case 'addEffect':
       return handleAddEffect(d, command, ids);
     case 'removeEffect':

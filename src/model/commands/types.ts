@@ -15,6 +15,7 @@ import type {
   Asset,
   AssetId,
   AssetStatus,
+  BlendMode,
   ClipId,
   EffectInstanceId,
   MarkerId,
@@ -77,6 +78,26 @@ export type ClipProps = Partial<{
   readonly linkGroupId: string | null;
 }>;
 
+/**
+ * Animatable properties that live on the clip itself rather than in an effect.
+ * Dotted keys address a channel of a composite structure.
+ */
+export type ClipParamKey =
+  | 'opacity'
+  | 'gainDb'
+  | 'pan'
+  | 'transform.x'
+  | 'transform.y'
+  | 'transform.scaleX'
+  | 'transform.scaleY'
+  | 'transform.rotation'
+  | 'transform.anchorX'
+  | 'transform.anchorY'
+  | 'crop.left'
+  | 'crop.top'
+  | 'crop.right'
+  | 'crop.bottom';
+
 export type ViewProps = Partial<{
   readonly playhead: Time;
   readonly zoom: number;
@@ -131,6 +152,20 @@ export type Command =
       readonly at: Time;
     }
   | { readonly type: 'setClipProps'; readonly clipId: ClipId; readonly props: ClipProps }
+  | {
+      readonly type: 'setClipParam';
+      readonly clipId: ClipId;
+      readonly key: ClipParamKey;
+      readonly param: Param<number>;
+    }
+  | {
+      readonly type: 'setClipFade';
+      readonly clipId: ClipId;
+      readonly edge: 'in' | 'out';
+      readonly duration: Time;
+    }
+  | { readonly type: 'setClipBlendMode'; readonly clipId: ClipId; readonly blendMode: BlendMode }
+  | { readonly type: 'setClipSpeed'; readonly clipId: ClipId; readonly speed: number }
 
   // -- effects --------------------------------------------------------------
   | {
