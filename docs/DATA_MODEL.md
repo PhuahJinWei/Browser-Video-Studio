@@ -73,10 +73,12 @@ Semantics worth pinning down:
 - **Splitting shifts the right-hand half's keyframes** by −delta and gives it *cloned* effect instances, so a parameter's value at any absolute time is unchanged by the split. This is the single easiest thing to get wrong.
 - Clips may not start before zero; drags clamp, `insertClip` throws.
 - Locked tracks and locked clips reject edits.
+- **Link vs group.** `linkGroupId` ties a video clip to its own audio: coincident media that trims to the same edge. `groupId` is an arbitrary user grouping: unrelated media that trims by a shared *delta* instead, since a shared absolute edge would land before another member's start. They are separate fields so a group can contain linked pairs, and `selectionUnit` is the transitive closure over both.
+- Splitting remaps **both** memberships, so each side of a cut forms its own link and its own group.
 
 ### Later
 
-`slideClip`, `joinClips`, `linkClips`/`unlinkClips`, `relinkAsset`, keyframe-level commands (`addKeyframe`, `moveKeyframe`, `removeKeyframe`), transitions (`addTransition`, `setTransition`, `removeTransition`), `setSequenceSettings`.
+`slideClip`, `joinClips`, `relinkAsset`, keyframe-level commands (`addKeyframe`, `moveKeyframe`, `removeKeyframe`), transitions (`addTransition`, `setTransition`, `removeTransition`), `setSequenceSettings`.
 
 Broken transitions are pruned automatically after every clip edit, so the transition entity is already safe to introduce.
 
