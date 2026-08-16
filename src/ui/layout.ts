@@ -11,6 +11,7 @@
 import { create } from 'zustand';
 
 export type LibraryView = 'grid' | 'list';
+export type Theme = 'light' | 'dark';
 
 /**
  * Bounds for the side panels.
@@ -28,12 +29,15 @@ export interface LayoutState {
   readonly inspectorWidth: number;
   readonly inspectorOpen: boolean;
   readonly libraryView: LibraryView;
+  readonly theme: Theme;
 
   setBinWidth: (px: number) => void;
   setInspectorWidth: (px: number) => void;
   setInspectorOpen: (open: boolean) => void;
   toggleInspector: () => void;
   setLibraryView: (view: LibraryView) => void;
+  setTheme: (theme: Theme) => void;
+  toggleTheme: () => void;
 }
 
 const STORAGE_KEY = 'bvs.layout.v1';
@@ -43,6 +47,7 @@ interface StoredLayout {
   inspectorWidth?: unknown;
   inspectorOpen?: unknown;
   libraryView?: unknown;
+  theme?: unknown;
 }
 
 const DEFAULTS = {
@@ -52,7 +57,21 @@ const DEFAULTS = {
   // is supposed to solve, not create. One click hides it for good.
   inspectorOpen: true,
   libraryView: 'grid' as LibraryView,
+  theme: 'light' as Theme,
 };
+
+/**
+ * Put the theme on <html>, where the stylesheet's `[data-theme]` override looks for it.
+ *
+ * Light is the absence of the attribute rather than a value of its own, so the
+ * default palette on bare `:root` is what renders before any script has run — there
+ * is no flash of the wrong theme while the bundle loads.
+ */
+function applyTheme(theme: Theme): void {
+  const root = document.documentElement;
+  if (theme === 'dark') root.setAttribute('data-theme', 'dark');
+  else root.removeAttribute('data-theme');
+}
 
 function clamp(value: number, low: number, high: number): number {
   return Math.min(high, Math.max(low, value));
@@ -75,6 +94,7 @@ function load(): typeof DEFAULTS {
       inspectorOpen:
         typeof stored.inspectorOpen === 'boolean' ? stored.inspectorOpen : DEFAULTS.inspectorOpen,
       libraryView: stored.libraryView === 'list' ? 'list' : DEFAULTS.libraryView,
+      theme: stored.theme === 'dark' ? 'dark' : DEFAULTS.theme,
     };
   } catch {
     // A corrupt or unavailable store is not worth failing to start over.
@@ -91,6 +111,7 @@ function save(state: LayoutState): void {
         inspectorWidth: state.inspectorWidth,
         inspectorOpen: state.inspectorOpen,
         libraryView: state.libraryView,
+        theme: state.theme,
       }),
     );
   } catch {
@@ -100,9 +121,13 @@ function save(state: LayoutState): void {
 
 export const useLayout = create<LayoutState>((set, get) => {
   const persist = (): void => save(get());
+  const initial = load();
+  // The saved choice has to reach <html> before the first paint, not on a later
+  // effect, or the app opens in light and swaps to dark in front of you.
+  applyTheme(initial.theme);
 
   return {
-    ...load(),
+    ...initial,
 
     setBinWidth: (px) => {
       set({ binWidth: clamp(px, BIN_MIN, BIN_MAX) });
@@ -122,6 +147,17 @@ export const useLayout = create<LayoutState>((set, get) => {
     },
     setLibraryView: (view) => {
       set({ libraryView: view });
+      persist();
+    },
+    setTheme: (theme) => {
+      set({ theme });
+      applyTheme(theme);
+      persist();
+    },
+    toggleTheme: () => {
+      const theme: Theme = get().theme === 'dark' ? 'light' : 'dark';
+      set({ theme });
+      applyTheme(theme);
       persist();
     },
   };

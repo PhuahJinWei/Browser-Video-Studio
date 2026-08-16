@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { canRun, detectCapabilities, type CapabilityResult } from '../capabilities';
+import { formatGain } from './format';
 import { useLayout } from './layout';
 import { PanelDivider } from './PanelDivider';
 import { staticParam } from '../model/params';
@@ -8,16 +9,19 @@ import { ContextMenuProvider } from './ContextMenu';
 import { ExportDialog } from './ExportDialog';
 import {
   IconCamera,
-  IconCursor,
   IconExport,
+  IconFit,
   IconGauge,
   IconInspector,
-  IconRazor,
+  IconMoon,
   IconRedo,
   IconSplit,
+  IconSun,
   IconTrash,
   IconUndo,
   IconVolume,
+  IconZoomIn,
+  IconZoomOut,
 } from './Icons';
 import { Inspector } from './Inspector';
 import { MediaBin } from './MediaBin';
@@ -94,9 +98,9 @@ function Studio(): React.JSX.Element {
   const importViaPicker = useStudio((s) => s.importViaPicker);
   const playhead = useStudio((s) => s.playhead);
   const duration = useStudio((s) => s.duration);
-  const tool = useStudio((s) => s.tool);
-  const setTool = useStudio((s) => s.setTool);
   const grabScreenshot = useStudio((s) => s.grabScreenshot);
+  const theme = useLayout((s) => s.theme);
+  const toggleTheme = useLayout((s) => s.toggleTheme);
 
   const project = history.present.project;
   const sequence = project.sequences[sequenceId]!;
@@ -169,21 +173,11 @@ function Studio(): React.JSX.Element {
 
       /*
        * Bare-letter shortcuts, checked separately because they must not fire with a
-       * modifier held. Ctrl+C and Ctrl+V belong to the clipboard and Ctrl+S to the
-       * browser; falling through to the switch below would have Ctrl+C pick up the
-       * razor and Ctrl+S cut the timeline.
+       * modifier held. Ctrl+S belongs to the browser, and falling through to the
+       * switch below would have it cut the timeline instead.
        */
       if (!mod) {
         switch (event.key) {
-          // Premiere's tool keys, and neither letter is claimed by anything else.
-          case 'v':
-          case 'V':
-            setTool('select');
-            return;
-          case 'c':
-          case 'C':
-            setTool('razor');
-            return;
           case 's':
             splitAtPlayhead();
             return;
@@ -219,10 +213,6 @@ function Studio(): React.JSX.Element {
           event.preventDefault();
           setPlayhead(duration());
           break;
-        // Escape puts the razor away, matching what it does everywhere else.
-        case 'Escape':
-          setTool('select');
-          break;
         case 'Delete':
         case 'Backspace':
           if (selection.length > 0) {
@@ -251,7 +241,6 @@ function Studio(): React.JSX.Element {
     sequence.frameRate,
     sequenceId,
     setPlayhead,
-    setTool,
     grabScreenshot,
     togglePlay,
     undoEdit,
@@ -265,29 +254,6 @@ function Studio(): React.JSX.Element {
         {/* Shrinkable strip so a narrow window never puts a control out of reach. */}
         <div className="toolbar">
         <MenuBar onExport={() => setShowExport(true)} />
-
-        <span className="header-divider" />
-
-        {/*
-          The tool the timeline is in. A mode needs somewhere permanent to show it,
-          or the razor becomes a cursor that changed for no visible reason.
-        */}
-        <span className="toolgroup">
-          <button
-            className={`icon${tool === 'select' ? ' on' : ''}`}
-            title="Selection tool (V)"
-            onClick={() => setTool('select')}
-          >
-            <IconCursor />
-          </button>
-          <button
-            className={`icon${tool === 'razor' ? ' on' : ''}`}
-            title="Razor — click a clip to cut it there (C)"
-            onClick={() => setTool('razor')}
-          >
-            <IconRazor />
-          </button>
-        </span>
 
         <span className="header-divider" />
 
@@ -309,7 +275,7 @@ function Studio(): React.JSX.Element {
           <IconCamera />
         </button>
         <button
-          className="icon"
+          className="icon tint-danger"
           disabled={selection.length === 0}
           title="Delete the selection (Del)"
           onClick={() => run({ type: 'removeClips', clipIds: selection, mode: 'lift' }, 'Delete clips')}
@@ -326,7 +292,7 @@ function Studio(): React.JSX.Element {
         */}
         <span
           className="master-volume"
-          title={`Master volume ${masterDb > 0 ? '+' : ''}${masterDb.toFixed(1)} dB — double-click for unity`}
+          title={`Master volume ${formatGain(masterDb)} — double-click for 100%`}
         >
           <IconVolume size={14} />
           <input
@@ -357,6 +323,13 @@ function Studio(): React.JSX.Element {
           />
         </span>
 
+        <button
+          className="icon"
+          onClick={toggleTheme}
+          title={theme === 'dark' ? 'Switch to the light theme' : 'Switch to the dark theme'}
+        >
+          {theme === 'dark' ? <IconSun /> : <IconMoon />}
+        </button>
         <button
           className={`icon${inspectorOpen ? ' on' : ''}`}
           onClick={toggleInspector}
@@ -416,16 +389,72 @@ function Studio(): React.JSX.Element {
       <Timeline />
 
       <div className="statusbar">
-        <span>{status}</span>
+        <span className="status-text">{status}</span>
         {error && <span className="err">{error}</span>}
         <span className="spacer" style={{ flex: 1 }} />
-        <span>
+        <span className="status-meta">
           {sequence.size.width}×{sequence.size.height} · {T.fpsToNumber(sequence.frameRate).toFixed(2)}{' '}
           fps · {sequence.sampleRate / 1000} kHz
         </span>
+        <ZoomSlider zoom={sequence.view.zoom} />
       </div>
 
       {showExport && <ExportDialog onClose={() => setShowExport(false)} />}
     </div>
+  );
+}
+
+/** The zoom range the store clamps to, mirrored here so the slider cannot exceed it. */
+const ZOOM_MIN = 4;
+const ZOOM_MAX = 2000;
+
+/**
+ * Timeline zoom, at the far end of the status bar.
+ *
+ * Logarithmic. The range spans 4 to 2000 pixels per second, but nearly all editing
+ * happens between about 20 and 200 — on a linear track that whole band would live in
+ * the first tenth of the travel and be impossible to land on, while nine tenths of
+ * the slider did nothing anyone wanted.
+ */
+function ZoomSlider({ zoom }: { zoom: number }): React.JSX.Element {
+  const setZoom = useStudio((s) => s.setZoom);
+  const duration = useStudio((s) => s.duration);
+
+  const toSlider = (px: number): number =>
+    (Math.log(px / ZOOM_MIN) / Math.log(ZOOM_MAX / ZOOM_MIN)) * 1000;
+  const fromSlider = (value: number): number =>
+    ZOOM_MIN * Math.pow(ZOOM_MAX / ZOOM_MIN, value / 1000);
+
+  /** Fit the whole sequence in the pane — the one zoom level worth a shortcut. */
+  const zoomToFit = (): void => {
+    const seconds = T.toSeconds(duration());
+    const pane = document.querySelector('.timeline')?.clientWidth ?? 0;
+    // Nothing on the timeline yet, so there is nothing to fit to.
+    if (seconds <= 0 || pane <= 0) return;
+    setZoom((pane - 216 - 24) / seconds);
+  };
+
+  return (
+    <span className="zoom-slider" title={`Timeline zoom — ${Math.round(zoom)} px/s`}>
+      <button className="icon" title="Zoom out" onClick={() => setZoom(zoom / 1.4)}>
+        <IconZoomOut />
+      </button>
+      <input
+        type="range"
+        min={0}
+        max={1000}
+        step={1}
+        value={Math.round(toSlider(zoom))}
+        aria-label="Timeline zoom"
+        onChange={(event) => setZoom(fromSlider(Number(event.target.value)))}
+        onDoubleClick={zoomToFit}
+      />
+      <button className="icon" title="Zoom in" onClick={() => setZoom(zoom * 1.4)}>
+        <IconZoomIn />
+      </button>
+      <button className="icon" title="Zoom to fit the sequence" onClick={zoomToFit}>
+        <IconFit />
+      </button>
+    </span>
   );
 }

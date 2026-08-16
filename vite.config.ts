@@ -21,8 +21,8 @@ export default defineConfig({
   },
   server: {
     // Honour PORT when something upstream assigns one, so a second dev server can
-    // run alongside a first instead of colliding on 5173.
-    port: Number(process.env.PORT) || 5173,
+    // run alongside a first instead of colliding on 5180.
+    port: Number(process.env.PORT) || 5180,
   },
   test: {
     globals: true,

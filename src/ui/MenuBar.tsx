@@ -25,7 +25,6 @@ import {
   IconLock,
   IconMarker,
   IconPlus,
-  IconRazor,
   IconRedo,
   IconRipple,
   IconSkipEnd,
@@ -129,8 +128,6 @@ export function MenuBar({ onExport }: { onExport: () => void }): React.JSX.Eleme
   const addSolid = useStudio((s) => s.addSolid);
   const splitAtPlayhead = useStudio((s) => s.splitAtPlayhead);
   const grabScreenshot = useStudio((s) => s.grabScreenshot);
-  const tool = useStudio((s) => s.tool);
-  const setTool = useStudio((s) => s.setTool);
   const inspectorOpen = useLayout((s) => s.inspectorOpen);
   const toggleInspector = useLayout((s) => s.toggleInspector);
   const importViaPicker = useStudio((s) => s.importViaPicker);
@@ -225,13 +222,6 @@ export function MenuBar({ onExport }: { onExport: () => void }): React.JSX.Eleme
       title: 'Clip',
       entries: [
         { label: 'Split at playhead', icon: <IconSplit />, hint: 'S', onSelect: splitAtPlayhead },
-        {
-          label: tool === 'razor' ? 'Put the razor away' : 'Razor — cut where you click',
-          icon: <IconRazor />,
-          hint: tool === 'razor' ? 'V' : 'C',
-          checked: tool === 'razor',
-          onSelect: () => setTool(tool === 'razor' ? 'select' : 'razor'),
-        },
         'separator',
         {
           label: 'Detach audio from video',

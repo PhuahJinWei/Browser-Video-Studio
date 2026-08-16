@@ -378,6 +378,55 @@ export const IconFolderUp = (p: IconProps): React.JSX.Element => (
   </Svg>
 );
 
+/**
+ * A fade: a wedge rising out of nothing. `flip` turns it into a fade out, so the
+ * two ends of a clip read as mirror images of each other.
+ */
+export const IconFade = ({ flip, ...p }: IconProps & { flip?: boolean }): React.JSX.Element => (
+  <Svg {...p}>
+    <path
+      d={flip ? 'M3 19h18L3 5v14z' : 'M3 19h18V5L3 19z'}
+      fill="currentColor"
+      stroke="none"
+    />
+  </Svg>
+);
+
+export const IconZoomIn = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <circle cx="10.5" cy="10.5" r="6.5" />
+    <path d="M15.5 15.5L21 21M10.5 7.8v5.4M7.8 10.5h5.4" />
+  </Svg>
+);
+
+export const IconZoomOut = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <circle cx="10.5" cy="10.5" r="6.5" />
+    <path d="M15.5 15.5L21 21M7.8 10.5h5.4" />
+  </Svg>
+);
+
+/** Fit the sequence to the pane: arrows meeting two walls. */
+export const IconFit = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <path d="M4 5v14M20 5v14" />
+    <path d="M8 12h8M10.5 9.5L8 12l2.5 2.5M13.5 9.5L16 12l-2.5 2.5" />
+  </Svg>
+);
+
+export const IconSun = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="4.2" />
+    <path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4" />
+  </Svg>
+);
+
+export const IconMoon = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <path d="M20 13.5A8.5 8.5 0 1110.5 4a6.8 6.8 0 009.5 9.5z" />
+  </Svg>
+);
+
 export const IconSearch = (p: IconProps): React.JSX.Element => (
   <Svg {...p}>
     <circle cx="10.5" cy="10.5" r="6.5" />

@@ -40,6 +40,7 @@ import type {
   Transition,
   VideoClip,
 } from '../model/types';
+import { formatGain, formatGainPercent } from './format';
 import { useStudio } from './store';
 
 const BLEND_MODES: readonly BlendMode[] = [
@@ -348,7 +349,8 @@ function TrackInspector({ track }: { track: Track }): React.JSX.Element {
             min={-60}
             max={12}
             step={0.5}
-            unit=" dB"
+            format={formatGainPercent}
+            detail={formatGain}
             onChange={(value) => setTrackParam('gainDb', value, 'Set track volume')}
             onCommit={endGesture}
           />
@@ -833,7 +835,8 @@ function AudioControls({
         min={-60}
         max={12}
         step={0.5}
-        unit=" dB"
+        format={formatGainPercent}
+        detail={formatGain}
         onChange={(value) => setParam('gainDb', value, 'Set gain')}
         onCommit={onCommit}
       />
@@ -951,6 +954,8 @@ function Slider({
   max,
   step,
   unit = '',
+  format,
+  detail,
   onChange,
   onCommit,
 }: {
@@ -960,6 +965,17 @@ function Slider({
   max: number;
   step: number;
   unit?: string;
+  /**
+   * Overrides the readout without touching the track.
+   *
+   * The slider's own value stays in whatever unit the document stores, so the
+   * spacing of the travel is unchanged — only the number under it is translated.
+   * That matters for gain: decibels are already logarithmic, and re-scaling the
+   * track to percent would crowd every quiet adjustment into its bottom sliver.
+   */
+  format?: (value: number) => string;
+  /** Fuller value for the readout's tooltip, where there is room for both units. */
+  detail?: (value: number) => string;
   onChange: (value: number) => void;
   onCommit: () => void;
 }): React.JSX.Element {
@@ -978,9 +994,8 @@ function Slider({
           onPointerUp={onCommit}
           onKeyUp={onCommit}
         />
-        <output>
-          {value.toFixed(decimals)}
-          {unit}
+        <output {...(detail ? { title: detail(value) } : {})}>
+          {format ? format(value) : `${value.toFixed(decimals)}${unit}`}
         </output>
       </div>
     </div>
