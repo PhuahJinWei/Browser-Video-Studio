@@ -556,12 +556,23 @@ input[type='range'] {
   overflow: hidden;
   position: relative;
 }
+/*
+ * The frame, fitted to the viewer in both directions.
+ *
+ * This was `max-width`/`max-height` alone, which only ever scales a frame *down*: a
+ * canvas larger than the panel shrank to fit, and one smaller than it was drawn at
+ * 1:1. That was invisible while every sequence was 1920x1080 and therefore always
+ * the larger of the two — but a 576x360 sequence then sat at native size in the
+ * middle of a much bigger viewer, looking exactly like the framing bug it had just
+ * stopped being.
+ *
+ * Filling the box and letting `object-fit` do the letterboxing scales in both
+ * directions, so the picture is as large as the panel allows at any format.
+ */
 .preview canvas {
-  max-width: 100%;
-  max-height: 100%;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
-  background: #000;
-  box-shadow: 0 0 0 1px var(--line);
 }
 .preview .empty {
   position: absolute;
@@ -2311,12 +2322,10 @@ body.resizing {
 .insert-gap {
   display: flex;
   flex: none;
-  height: 18px;
+  /* One height, always. Growing it on drag would shift every lane under the pointer
+     mid-gesture, and the border and label already say when it is live. */
+  height: 22px;
   overflow: hidden;
-  transition: height 90ms ease;
-}
-.insert-gap.dragging {
-  height: 28px;
 }
 .insert-gap-header {
   flex: none;
@@ -2328,6 +2337,8 @@ body.resizing {
 }
 .insert-gap-lane {
   flex: 1;
+  /* The ghost is placed against this, and cropped by the gap's own overflow. */
+  position: relative;
   display: flex;
   align-items: center;
   padding-left: 10px;
@@ -2351,3 +2362,47 @@ body.resizing {
   color: var(--text);
 }
 
+
+/*
+ * The dragged clip, shown inside the gap it will land in.
+ *
+ * Taller than the gap on purpose: it is anchored to the edge the new track appears
+ * against and cropped by the gap, so it reads as arriving from beyond the lanes
+ * rather than hovering over them.
+ */
+.insert-ghost {
+  position: absolute;
+  border-radius: 4px;
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 25%);
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0.92;
+  display: flex;
+  align-items: flex-start;
+  font-size: 11px;
+}
+.insert-ghost.video {
+  background: linear-gradient(var(--video), var(--video-2));
+}
+.insert-ghost.audio {
+  background: linear-gradient(var(--audio), var(--audio-2));
+}
+.insert-ghost.title {
+  background: linear-gradient(var(--title), var(--title-2));
+}
+.insert-ghost.solid {
+  background: #444c56;
+}
+.insert-ghost .clip-name {
+  padding: 2px 5px;
+  color: var(--clip-text, #f4f7fb);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* Hidden rather than removed: it is still the clip being dragged, and the document
+   has not changed — only where it is being drawn. */
+.clip.relocating {
+  visibility: hidden;
+}

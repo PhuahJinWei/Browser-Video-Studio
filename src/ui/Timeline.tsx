@@ -610,6 +610,28 @@ export function Timeline(): React.JSX.Element {
   // Trimming cannot make a track, so the gaps are for a move and nothing else.
   const clipDragging = drag?.kind === 'move';
 
+  /**
+   * The dragged clip, drawn where it would land rather than left behind on its old
+   * lane. The document is not touched — the track does not exist until the drop —
+   * so this is the one place the timeline shows something the project does not yet
+   * contain.
+   */
+  const insertGhost = useMemo(() => {
+    if (!drag || !insertion) return null;
+    const clip = project.clips[drag.clipId];
+    if (!clip) return null;
+
+    return {
+      where: insertion.where,
+      left: T.toSeconds(clip.start) * pxPerSecond,
+      width: Math.max(2, T.toSeconds(clip.duration) * pxPerSecond),
+      name: clip.name,
+      kind: clip.kind === 'audio' ? 'audio' : clip.kind === 'title' ? 'title' : clip.kind === 'solid' ? 'solid' : 'video',
+      height: Math.max(MIN_TRACK_HEIGHT, getTrack(project, clip.trackId).height),
+      fill: clip.kind === 'solid' ? clip.fill : undefined,
+    };
+  }, [drag, insertion, project, pxPerSecond]);
+
   const insertionAt = useCallback(
     (clientY: number, clipKind: Clip['kind']): Insertion | null => {
       const lanes = [...(lanesRef.current?.querySelectorAll<HTMLElement>('[data-track-id]') ?? [])];
@@ -1653,6 +1675,7 @@ export function Timeline(): React.JSX.Element {
             side="top"
             dragging={clipDragging || Boolean(draggingAssetId)}
             active={insertion?.where === 'above' || assetInsertion?.where === 'top'}
+            ghost={insertGhost?.where === 'above' ? insertGhost : null}
             onAssetOver={() => {
               setDropTrackId(null);
               setAssetInsertion(assetInsertionFor('top'));
@@ -1788,6 +1811,7 @@ export function Timeline(): React.JSX.Element {
                     <ClipView
                       key={clip.id}
                       clip={clip}
+                      relocating={insertion !== null && drag?.clipId === clip.id}
                       pxPerSecond={pxPerSecond}
                       selected={selection.includes(clip.id)}
                       preview={previewStyle(clip, pxPerSecond, previews)}
@@ -1890,6 +1914,7 @@ export function Timeline(): React.JSX.Element {
             side="bottom"
             dragging={clipDragging || Boolean(draggingAssetId)}
             active={insertion?.where === 'below' || assetInsertion?.where === 'bottom'}
+            ghost={insertGhost?.where === 'below' ? insertGhost : null}
             onAssetOver={() => {
               setDropTrackId(null);
               setAssetInsertion(assetInsertionFor('bottom'));
@@ -2203,6 +2228,7 @@ function previewStyle(
 
 function ClipView({
   clip,
+  relocating,
   pxPerSecond,
   selected,
   preview,
@@ -2215,6 +2241,8 @@ function ClipView({
   onHoverEnd,
 }: {
   clip: Clip;
+  /** Shown inside an insertion gap instead, so the lane copy would be a duplicate. */
+  relocating: boolean;
   pxPerSecond: number;
   selected: boolean;
   preview: React.CSSProperties | undefined;
@@ -2255,7 +2283,7 @@ function ClipView({
 
   return (
     <div
-      className={`clip ${kindClass}${selected ? ' selected' : ''}${clip.enabled ? '' : ' disabled'}${preview ? ' has-preview' : ''}${isGrouped(clip) ? ' grouped' : ''}${loading ? ' loading' : ''}${missing ? ' missing' : ''}`}
+      className={`clip ${kindClass}${relocating ? ' relocating' : ''}${selected ? ' selected' : ''}${clip.enabled ? '' : ' disabled'}${preview ? ' has-preview' : ''}${isGrouped(clip) ? ' grouped' : ''}${loading ? ' loading' : ''}${missing ? ' missing' : ''}`}
       style={{ left, width, ...preview, ...fillStyle }}
       // No `title`: the hover card replaces it. Leaving both would show a styled card
       // and then the browser's own tooltip on top of it a moment later.
@@ -2694,10 +2722,20 @@ function minorDivisions(step: number): number {
  * through native drag events, which do not move the pointer, so those are wired up
  * here instead.
  */
+interface InsertGhost {
+  readonly left: number;
+  readonly width: number;
+  readonly name: string;
+  readonly kind: string;
+  readonly height: number;
+  readonly fill: string | undefined;
+}
+
 function InsertGap({
   side,
   dragging,
   active,
+  ghost,
   onAssetOver,
   onAssetLeave,
   onAssetDrop,
@@ -2705,6 +2743,7 @@ function InsertGap({
   side: 'top' | 'bottom';
   dragging: boolean;
   active: boolean;
+  ghost: InsertGhost | null;
   onAssetOver: () => void;
   onAssetLeave: () => void;
   onAssetDrop: (assetId: string) => void;
@@ -2731,7 +2770,28 @@ function InsertGap({
           onAssetDrop(assetId);
         }}
       >
-        <span>New track</span>
+        {ghost ? (
+          /*
+            Anchored to the edge the new track will be created against, so the clip
+            grows out of the gap the way it will once the track exists. The gap
+            clips the overflow, which is what makes it read as sliding in from
+            beyond the lanes rather than floating over them.
+          */
+          <div
+            className={`insert-ghost ${ghost.kind}`}
+            style={{
+              left: ghost.left,
+              width: ghost.width,
+              height: ghost.height,
+              ...(side === 'top' ? { bottom: 0 } : { top: 0 }),
+              ...(ghost.fill ? { background: ghost.fill } : {}),
+            }}
+          >
+            <span className="clip-name">{ghost.name}</span>
+          </div>
+        ) : (
+          <span>New track</span>
+        )}
       </div>
     </div>
   );
