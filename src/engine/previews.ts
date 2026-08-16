@@ -40,12 +40,26 @@ export interface Waveform {
   readonly sourceSeconds: number;
 }
 
-const FILMSTRIP_HEIGHT = 44;
-const MAX_FILMSTRIP_FRAMES = 40;
+/*
+ * Previews are generated once and then stretched to whatever the lane happens to be,
+ * so they have to be drawn for the largest case rather than the default one.
+ *
+ * A lane is ~71 CSS px by default and taller once a track is resized, and a HiDPI
+ * screen doubles that again — so the old 44px strip was being blown up better than
+ * threefold. These are sized for a generous track at 2x, which is the same reasoning
+ * the bin poster below already used.
+ */
+const FILMSTRIP_HEIGHT = 160;
+const MAX_FILMSTRIP_FRAMES = 48;
 /** Bin cards are ~220 CSS px wide; 2x that stays crisp on a HiDPI display. */
 const POSTER_WIDTH = 440;
-const WAVEFORM_HEIGHT = 44;
-const WAVEFORM_COLUMNS = 900;
+const WAVEFORM_HEIGHT = 160;
+/*
+ * Columns across the whole source. A clip can be far wider than this on screen when
+ * zoomed in, but a waveform is an envelope rather than a picture: past a few thousand
+ * columns the extra detail is invisible and the peaks are what carry the shape.
+ */
+const WAVEFORM_COLUMNS = 2400;
 
 /**
  * How far along a generator is, 0 to 1.
