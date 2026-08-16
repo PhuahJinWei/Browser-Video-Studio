@@ -8,6 +8,7 @@
  */
 
 import { create } from 'zustand';
+import { DEFAULT_TRANSITION_SECONDS } from './transitions';
 import { Engine, type EngineTelemetry } from '../engine/engine';
 import { exportSequence, suggestBitrate, type ExportProgress, type ExportSettings } from '../engine/export';
 import { isImageFile, MediaLibrary } from '../engine/media';
@@ -27,17 +28,26 @@ import {
   undo,
   type History,
 } from '../model/history';
-import { expandSelection, getSequence, sequenceDuration, trackDuration } from '../model/selectors';
+import {
+  expandSelection,
+  getSequence,
+  nearestCut,
+  pairedCuts,
+  sequenceDuration,
+  trackDuration,
+} from '../model/selectors';
 import * as T from '../model/time';
 import type {
   Asset,
   AssetId,
+  Clip,
   ClipId,
   Project,
   SequenceId,
   Time,
   TrackId,
   TrackKind,
+  TransitionId,
 } from '../model/types';
 import { Autosaver, loadMostRecent, saveMedia } from '../storage/projectStore';
 
@@ -65,6 +75,8 @@ export interface StudioState {
   selection: readonly ClipId[];
   /** A selected track, for editing its volume, pan and effects. */
   selectedTrackId: TrackId | null;
+  /** A selected transition, for editing its style, length and alignment. */
+  selectedTransitionId: TransitionId | null;
   engine: Engine | null;
   /** Source blobs, kept so the engine can reopen assets. */
   mediaFiles: ReadonlyMap<AssetId, File>;
@@ -103,6 +115,7 @@ export interface StudioState {
   select: (clipIds: readonly ClipId[]) => void;
   toggleSelect: (clipId: ClipId) => void;
   selectTrack: (trackId: TrackId | null) => void;
+  selectTransition: (transitionId: TransitionId | null) => void;
 
   setPlayhead: (at: Time) => void;
   setZoom: (pixelsPerSecond: number) => void;
@@ -113,6 +126,14 @@ export interface StudioState {
   addAssetToTimeline: (assetId: AssetId) => Promise<void>;
   addTitle: (text: string) => void;
   addSolid: (fill: string) => void;
+  /**
+   * Put a transition on the cut nearest the playhead.
+   *
+   * `trackId` limits it to one track; without it the search covers the selected
+   * clips' tracks, or every track when nothing is selected. Returns false when
+   * there was no bare cut to use.
+   */
+  addTransitionNearPlayhead: (transitionType?: string, trackId?: TrackId) => boolean;
   dropAssetOnTrack: (assetId: AssetId, trackId: TrackId) => void;
   setDraggingAsset: (assetId: AssetId | null) => void;
   newProject: () => void;
@@ -153,6 +174,7 @@ export const useStudio = create<StudioState>((set, get) => ({
   sequenceId: initial.sequenceId,
   selection: [],
   selectedTrackId: null,
+  selectedTransitionId: null,
   engine: null,
   mediaFiles: new Map(),
   telemetry: null,
@@ -229,13 +251,18 @@ export const useStudio = create<StudioState>((set, get) => ({
   canUndoEdit: () => canUndo(get().history),
   canRedoEdit: () => canRedo(get().history),
 
-  selectExact: (clipIds) => set({ selection: clipIds, selectedTrackId: null }),
+  selectExact: (clipIds) =>
+    set({ selection: clipIds, selectedTrackId: null, selectedTransitionId: null }),
 
   /**
-   * Track and clip selection are mutually exclusive: the inspector shows one
-   * subject, and a track selected alongside a clip would leave it ambiguous.
+   * Clip, track and transition selection are mutually exclusive: the inspector
+   * shows one subject, and two at once would leave it ambiguous.
    */
-  selectTrack: (trackId) => set({ selectedTrackId: trackId, selection: [] }),
+  selectTrack: (trackId) =>
+    set({ selectedTrackId: trackId, selection: [], selectedTransitionId: null }),
+
+  selectTransition: (transitionId) =>
+    set({ selectedTransitionId: transitionId, selection: [], selectedTrackId: null }),
 
   /**
    * Selecting one member of a link or group selects the whole unit.
@@ -245,7 +272,11 @@ export const useStudio = create<StudioState>((set, get) => ({
    * what let deleting a video clip leave its audio orphaned on the track.
    */
   select: (clipIds) =>
-    set({ selection: expandSelection(get().project(), clipIds), selectedTrackId: null }),
+    set({
+      selection: expandSelection(get().project(), clipIds),
+      selectedTrackId: null,
+      selectedTransitionId: null,
+    }),
 
   toggleSelect: (clipId) => {
     const project = get().project();
@@ -410,6 +441,48 @@ export const useStudio = create<StudioState>((set, get) => ({
       },
       'Add title',
     );
+  },
+
+  addTransitionNearPlayhead: (transitionType, trackId) => {
+    const state = get();
+    const project = state.project();
+    const at = state.playhead();
+
+    const searched = trackId
+      ? [trackId]
+      : state.selection.length > 0
+        ? [...new Set(state.selection.map((id) => project.clips[id]?.trackId))].filter(
+            (id): id is TrackId => id !== undefined,
+          )
+        : orderedTrackIds(project, state.sequenceId);
+
+    let best: { from: Clip; to: Clip; distanceSeconds: number } | null = null;
+    for (const id of searched) {
+      const cut = nearestCut(project, id, at);
+      if (cut && (!best || cut.distanceSeconds < best.distanceSeconds)) best = cut;
+    }
+    if (!best) {
+      set({ error: 'No bare cut near the playhead to put a transition on' });
+      return false;
+    }
+
+    // Both halves of a linked pair, so the sound crossfades with the picture.
+    const cuts = pairedCuts(project, best.from, best.to);
+    state.runMany(
+      cuts.map((cut) => ({
+        type: 'addTransition' as const,
+        fromClipId: cut.from.id,
+        toClipId: cut.to.id,
+        duration: T.fromSeconds(DEFAULT_TRANSITION_SECONDS, 1000),
+        // Sound has no edge to wipe; it always crossfades.
+        transitionType:
+          project.tracks[cut.from.trackId]?.kind === 'audio'
+            ? 'dissolve'
+            : (transitionType ?? 'dissolve'),
+      })),
+      'Add transition',
+    );
+    return true;
   },
 
   addSolid: (fill) => {

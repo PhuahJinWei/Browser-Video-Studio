@@ -59,6 +59,7 @@ function Studio(): React.JSX.Element {
   const toggleTelemetry = useStudio((s) => s.toggleTelemetry);
 
   const run = useStudio((s) => s.run);
+  const addTransitionNearPlayhead = useStudio((s) => s.addTransitionNearPlayhead);
   const undoEdit = useStudio((s) => s.undoEdit);
   const redoEdit = useStudio((s) => s.redoEdit);
   const canUndoEdit = useStudio((s) => s.canUndoEdit);
@@ -123,6 +124,13 @@ function Studio(): React.JSX.Element {
         return;
       }
 
+      // The way most transitions actually get added, in every other editor.
+      if (mod && event.key.toLowerCase() === 'd') {
+        event.preventDefault();
+        addTransitionNearPlayhead();
+        return;
+      }
+
       const frame = T.frameDuration(sequence.frameRate);
       switch (event.key) {
         case ' ':
@@ -167,6 +175,7 @@ function Studio(): React.JSX.Element {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [
+    addTransitionNearPlayhead,
     duration,
     importViaPicker,
     playhead,

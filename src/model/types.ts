@@ -224,6 +224,8 @@ export interface LayerWipe {
   readonly direction: WipeDirection;
   /** 0 = fully hidden, 1 = fully revealed. */
   readonly progress: number;
+  /** Feather on the edge, as a fraction of the sweep. 0 is a hard line. */
+  readonly softness: number;
 }
 
 /**

@@ -47,11 +47,7 @@ const WIPE_MODE_IDS: Readonly<Record<LayerWipe['direction'], number>> = {
   iris: 5,
 };
 
-/**
- * Feather on a wipe edge, as a fraction of the sweep. Small enough to read as a
- * hard edge, wide enough that the diagonal of an iris does not stair-step.
- */
-const WIPE_SOFTNESS = 0.004;
+
 
 const BLEND_MODE_IDS: Readonly<Record<BlendMode, number>> = {
   normal: 0,
@@ -493,7 +489,7 @@ export class Compositor {
     const { wipe } = layer;
     u[22] = wipe ? (WIPE_MODE_IDS[wipe.direction] ?? 0) : 0;
     f[23] = wipe ? clamp01(wipe.progress) : 0;
-    f[24] = WIPE_SOFTNESS;
+    f[24] = wipe ? Math.min(0.5, Math.max(0, wipe.softness)) : 0;
 
     this.device.queue.writeBuffer(this.layerUniforms!, index * LAYER_UNIFORM_SIZE, data);
   }

@@ -14,6 +14,7 @@ import {
   maxTransitionDuration,
   ModelError,
 } from '../selectors';
+import { staticParam } from '../params';
 import * as T from '../time';
 import type {
   Clip,
@@ -745,6 +746,43 @@ function handleSetTransitionType(
   d.transitions[transition.id] = { ...transition, transitionType: cmd.transitionType };
 }
 
+function handleSetTransitionAlignment(
+  d: Draft,
+  cmd: Extract<Command, { type: 'setTransitionAlignment' }>,
+): void {
+  const transition = d.transitions[cmd.transitionId];
+  if (!transition) throw new ModelError('That transition no longer exists');
+  assertUnlocked(draftTrack(d, transition.trackId));
+
+  const from = draftClip(d, transition.fromClipId);
+  const to = draftClip(d, transition.toClipId);
+  // Each alignment spends a different handle, so a length that fitted centred
+  // may not fit once the whole overlap moves to one side of the cut.
+  d.transitions[transition.id] = {
+    ...transition,
+    alignment: cmd.alignment,
+    duration: fitTransition(d, from, to, cmd.alignment, transition.duration),
+  };
+}
+
+function handleSetTransitionSoftness(
+  d: Draft,
+  cmd: Extract<Command, { type: 'setTransitionSoftness' }>,
+): void {
+  const transition = d.transitions[cmd.transitionId];
+  if (!transition) throw new ModelError('That transition no longer exists');
+  if (!Number.isFinite(cmd.softness)) throw new ModelError('Softness must be a number');
+  assertUnlocked(draftTrack(d, transition.trackId));
+
+  d.transitions[transition.id] = {
+    ...transition,
+    params: {
+      ...transition.params,
+      softness: staticParam(Math.min(0.5, Math.max(0, cmd.softness))),
+    },
+  };
+}
+
 function handleSetTransitionDuration(
   d: Draft,
   cmd: Extract<Command, { type: 'setTransitionDuration' }>,
@@ -804,6 +842,10 @@ export function runCommand(d: Draft, command: Command, ids: IdSource): void {
       return handleSetTransitionDuration(d, command);
     case 'setTransitionType':
       return handleSetTransitionType(d, command);
+    case 'setTransitionAlignment':
+      return handleSetTransitionAlignment(d, command);
+    case 'setTransitionSoftness':
+      return handleSetTransitionSoftness(d, command);
     case 'setClipSpeed':
       return handleSetClipSpeed(d, command);
     case 'unlinkClips':

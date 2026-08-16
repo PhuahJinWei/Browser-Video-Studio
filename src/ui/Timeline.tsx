@@ -16,6 +16,7 @@ import {
   getTrack,
   isGrouped,
   isMediaClip,
+  nearestCut,
   pairedCuts,
   pairedTransitions,
   selectionUnit,
@@ -34,7 +35,7 @@ import type {
   Track,
   TrackId,
   Transition,
-  TransitionType,
+  TransitionId,
 } from '../model/types';
 import { useContextMenu, type MenuEntry } from './ContextMenu';
 import {
@@ -63,18 +64,14 @@ import {
   IconVolume,
 } from './Icons';
 import { appendPointFor, counterpartTrackId, orderedTrackIds, useStudio } from './store';
+import {
+  DEFAULT_TRANSITION_SECONDS,
+  TRANSITION_DRAG_TYPE,
+  transitionLabel,
+  transitionShortLabel,
+} from './transitions';
 
 /** Width of the sticky track-header column. */
-/** Menu wording for each transition style, named for where the edge travels. */
-const TRANSITION_LABELS: Readonly<Record<TransitionType, string>> = {
-  dissolve: 'Cross dissolve',
-  'wipe.right': 'Wipe right →',
-  'wipe.left': 'Wipe left ←',
-  'wipe.down': 'Wipe down ↓',
-  'wipe.up': 'Wipe up ↑',
-  'wipe.iris': 'Iris',
-};
-
 const HEADER_WIDTH = 168;
 const MIN_TRACK_HEIGHT = 36;
 const MIN_TAIL_SECONDS = 10;
@@ -91,6 +88,21 @@ interface DragState {
   readonly originTrackId: TrackId;
   /** Every clip that moves with this one (linked audio/video). */
   readonly groupIds: readonly ClipId[];
+}
+
+/**
+ * A transition being retimed by dragging one of its edges.
+ *
+ * Only the cut and the alignment are needed: the new length follows from how far
+ * the pointer is from the cut, so the gesture is never cumulative and a dropped
+ * pointer event cannot make the transition drift.
+ */
+interface TransitionDragState {
+  readonly transitionId: TransitionId;
+  /** Paired ids, so picture and sound stay the same length. */
+  readonly ids: readonly TransitionId[];
+  readonly cut: Time;
+  readonly alignment: Transition['alignment'];
 }
 
 /** MIME type carrying an assetId when dragging from the media bin. */
@@ -151,6 +163,9 @@ export function Timeline(): React.JSX.Element {
   const select = useStudio((s) => s.select);
   const selectExact = useStudio((s) => s.selectExact);
   const selectTrack = useStudio((s) => s.selectTrack);
+  const selectTransition = useStudio((s) => s.selectTransition);
+  const setError = useStudio((s) => s.setError);
+  const selectedTransitionId = useStudio((s) => s.selectedTransitionId);
   const selectedTrackId = useStudio((s) => s.selectedTrackId);
   const toggleSelect = useStudio((s) => s.toggleSelect);
   const setPlayhead = useStudio((s) => s.setPlayhead);
@@ -176,6 +191,7 @@ export function Timeline(): React.JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null);
   const lanesRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
+  const [transitionDrag, setTransitionDrag] = useState<TransitionDragState | null>(null);
   const [dropTrackId, setDropTrackId] = useState<TrackId | null>(null);
   /** Time+offset to restore after a zoom, so the pointer stays over the same frame. */
   const pendingAnchor = useRef<{ seconds: number; offset: number } | null>(null);
@@ -365,6 +381,87 @@ export function Timeline(): React.JSX.Element {
     };
   }, [drag, project, pxPerSecond, runMany, snap, endGesture, trackAtClientY]);
 
+  useEffect(() => {
+    if (!transitionDrag) return;
+
+    const move = (event: PointerEvent): void => {
+      const distance = Math.abs(
+        T.toSeconds(T.sub(timeAtClientX(event.clientX), transitionDrag.cut)),
+      );
+      // Centred transitions straddle the cut, so the pointer covers half the
+      // length; the one-sided alignments cover all of it.
+      const seconds = transitionDrag.alignment === 'centered' ? distance * 2 : distance;
+      if (seconds < 0.02) return;
+
+      runMany(
+        transitionDrag.ids.map((id) => ({
+          type: 'setTransitionDuration' as const,
+          transitionId: id,
+          duration: T.fromSeconds(seconds, 1000),
+        })),
+        'Set transition length',
+        `transition-drag:${transitionDrag.transitionId}`,
+      );
+    };
+
+    const up = (): void => {
+      setTransitionDrag(null);
+      endGesture();
+    };
+
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    return () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+  }, [transitionDrag, runMany, endGesture, timeAtClientX]);
+
+  /**
+   * Drop a transition style onto a track: it lands on the cut closest to where
+   * the pointer was let go, since a transition belongs to a cut rather than to a
+   * position.
+   */
+  const dropTransitionOnTrack = (
+    transitionType: string,
+    trackId: TrackId,
+    at: Time,
+  ): void => {
+    const cut = nearestCut(project, trackId, at);
+    if (!cut) {
+      setError('No bare cut on that track to drop a transition on');
+      return;
+    }
+    runMany(
+      pairedCuts(project, cut.from, cut.to).map((paired) => ({
+        type: 'addTransition' as const,
+        fromClipId: paired.from.id,
+        toClipId: paired.to.id,
+        duration: T.fromSeconds(DEFAULT_TRANSITION_SECONDS, 1000),
+        // Sound has no edge to wipe; it always crossfades.
+        transitionType:
+          getTrack(project, paired.from.trackId).kind === 'audio' ? 'dissolve' : transitionType,
+      })),
+      'Add transition',
+    );
+  };
+
+  const startTransitionDrag = (event: React.PointerEvent, transition: Transition): void => {
+    event.stopPropagation();
+    event.preventDefault();
+    if (getTrack(project, transition.trackId).locked) return;
+
+    const to = project.clips[transition.toClipId];
+    if (!to) return;
+    selectTransition(transition.id);
+    setTransitionDrag({
+      transitionId: transition.id,
+      ids: pairedTransitions(project, transition).map((t) => t.id),
+      cut: to.start,
+      alignment: transition.alignment,
+    });
+  };
+
   const startDrag = (event: React.PointerEvent, clip: Clip, kind: DragKind): void => {
     event.stopPropagation();
     event.preventDefault();
@@ -524,7 +621,7 @@ export function Timeline(): React.JSX.Element {
 
     menu.open(event, [
       ...TRANSITION_TYPES.map((type) => ({
-        label: TRANSITION_LABELS[type],
+        label: transitionLabel(type),
         icon: <IconTransition />,
         checked: transition.transitionType === type,
         // Sound has no edge to wipe; an audio-only transition is always a crossfade.
@@ -761,6 +858,11 @@ export function Timeline(): React.JSX.Element {
                   }`}
                   style={{ width: contentWidth }}
                   onDragOver={(event) => {
+                    if (event.dataTransfer.types.includes(TRANSITION_DRAG_TYPE)) {
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = 'copy';
+                      return;
+                    }
                     if (!event.dataTransfer.types.includes(ASSET_DRAG_TYPE)) return;
                     event.preventDefault();
                     event.dataTransfer.dropEffect = 'copy';
@@ -771,6 +873,14 @@ export function Timeline(): React.JSX.Element {
                     setDropTrackId((current) => (current === trackId ? null : current));
                   }}
                   onDrop={(event) => {
+                    const droppedTransition = event.dataTransfer.getData(TRANSITION_DRAG_TYPE);
+                    if (droppedTransition) {
+                      event.preventDefault();
+                      setDropTrackId(null);
+                      // The cut nearest where it was let go, on this track only.
+                      dropTransitionOnTrack(droppedTransition, trackId, timeAtClientX(event.clientX));
+                      return;
+                    }
                     const assetId = event.dataTransfer.getData(ASSET_DRAG_TYPE);
                     setDropTrackId(null);
                     if (!assetId) return;
@@ -799,18 +909,33 @@ export function Timeline(): React.JSX.Element {
                   {trackTransitions(project, trackId).map((transition) => {
                     const span = transitionSpan(project, transition);
                     if (!span) return null;
+                    const width = Math.max(8, T.toSeconds(span.duration) * pxPerSecond);
+                    const label = transitionShortLabel(transition.transitionType);
                     return (
                       <div
                         key={transition.id}
-                        className="clip-transition"
-                        style={{
-                          left: T.toSeconds(span.start) * pxPerSecond,
-                          width: Math.max(8, T.toSeconds(span.duration) * pxPerSecond),
-                        }}
-                        title={`${TRANSITION_LABELS[transition.transitionType as TransitionType] ?? transition.transitionType} · ${T.formatDuration(transition.duration, { decimals: 2 })}`}
+                        className={`clip-transition${
+                          selectedTransitionId === transition.id ? ' selected' : ''
+                        }`}
+                        style={{ left: T.toSeconds(span.start) * pxPerSecond, width }}
+                        title={`${transitionLabel(transition.transitionType)} · ${T.formatDuration(transition.duration, { decimals: 2 })}`}
                         onContextMenu={(event) => openTransitionMenu(event, transition)}
-                        onPointerDown={(event) => event.stopPropagation()}
-                      />
+                        onPointerDown={(event) => {
+                          event.stopPropagation();
+                          selectTransition(transition.id);
+                        }}
+                      >
+                        {/* Only worth the room once the badge is wide enough to read. */}
+                        {width >= 56 && <span className="transition-label">{label}</span>}
+                        <div
+                          className="transition-handle left"
+                          onPointerDown={(event) => startTransitionDrag(event, transition)}
+                        />
+                        <div
+                          className="transition-handle right"
+                          onPointerDown={(event) => startTransitionDrag(event, transition)}
+                        />
+                      </div>
                     );
                   })}
                   {trackClips(project, trackId).map((clip) => (

@@ -1,10 +1,12 @@
 import { useRef, useState } from 'react';
 import * as T from '../model/time';
+import { TRANSITION_TYPES } from '../model/types';
 import type { Asset } from '../model/types';
 import { useContextMenu } from './ContextMenu';
-import { IconAudio, IconFile, IconPlus, IconTrash, IconVideo } from './Icons';
+import { IconAudio, IconFile, IconPlus, IconTransition, IconTrash, IconVideo } from './Icons';
 import { useStudio } from './store';
 import { ASSET_DRAG_TYPE } from './Timeline';
+import { TRANSITION_DRAG_TYPE, TRANSITION_LABELS } from './transitions';
 
 /**
  * Import surface and asset list. Nothing here uploads anything.
@@ -85,10 +87,56 @@ export function MediaBin(): React.JSX.Element {
         )}
       </div>
 
+      <TransitionLibrary />
+
       {dragOver && (
         <div className="bin-drop-overlay">
           <IconPlus size={20} />
           Drop to import
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The transition styles, draggable onto a cut.
+ *
+ * Right-clicking a clip is quicker once you know it is there, but nothing on
+ * screen said transitions existed at all — which is the usual reason a feature
+ * goes unused.
+ */
+function TransitionLibrary(): React.JSX.Element {
+  const addTransitionNearPlayhead = useStudio((s) => s.addTransitionNearPlayhead);
+  const [open, setOpen] = useState(true);
+
+  return (
+    <div className={`transition-library${open ? ' open' : ''}`}>
+      <button className="library-head" onClick={() => setOpen((value) => !value)}>
+        <IconTransition size={14} />
+        <span>Transitions</span>
+        <span className="spacer" style={{ flex: 1 }} />
+        <span className="chevron">{open ? '\u25be' : '\u25b8'}</span>
+      </button>
+
+      {open && (
+        <div className="library-body">
+          {TRANSITION_TYPES.map((type) => (
+            <div
+              key={type}
+              className="transition-chip"
+              draggable
+              title={`Drag onto a cut, or double-click to use the cut nearest the playhead`}
+              onDragStart={(event) => {
+                event.dataTransfer.setData(TRANSITION_DRAG_TYPE, type);
+                event.dataTransfer.effectAllowed = 'copy';
+              }}
+              onDoubleClick={() => addTransitionNearPlayhead(type)}
+            >
+              <IconTransition size={13} />
+              <span>{TRANSITION_LABELS[type]}</span>
+            </div>
+          ))}
         </div>
       )}
     </div>

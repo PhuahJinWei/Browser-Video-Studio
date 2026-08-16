@@ -705,28 +705,68 @@ input[type='range'] {
   background: linear-gradient(var(--title), #8c5722);
 }
 /*
- * A transition straddles the cut it spans. It sits in a band across the top of
- * the lane rather than the full height, so the trim handles of the two clips it
- * joins — which are directly underneath it — stay reachable.
+ * A transition straddles the cut it spans.
+ *
+ * Drawn full height and opaque enough to read as its own object rather than as a
+ * highlight over the clips: the two clips look like they meet at its edges, which
+ * is what the transition actually does to the picture.
+ *
+ * The trade-off is that it covers the trim handles of both clips at that cut. That
+ * matches Premiere and Resolve, where clicking the cut gets you the transition and
+ * you retime the clips from their far edges.
  */
 .clip-transition {
   position: absolute;
-  top: 0;
-  height: 42%;
-  z-index: 3;
+  top: 2px;
+  bottom: 2px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
   border: 1px solid var(--accent);
-  border-radius: 3px;
+  border-radius: 4px;
   background:
-    linear-gradient(to bottom right, transparent calc(50% - 1px), var(--accent) 50%, transparent calc(50% + 1px)),
-    linear-gradient(to top right, transparent calc(50% - 1px), var(--accent) 50%, transparent calc(50% + 1px)),
-    rgb(88 166 255 / 22%);
-  cursor: context-menu;
+    linear-gradient(to bottom right, transparent calc(50% - 1px), rgb(255 255 255 / 55%) 50%, transparent calc(50% + 1px)),
+    linear-gradient(to top right, transparent calc(50% - 1px), rgb(255 255 255 / 55%) 50%, transparent calc(50% + 1px)),
+    linear-gradient(#3d5a8a, #2b3f63);
+  cursor: pointer;
 }
 .clip-transition:hover {
-  background:
-    linear-gradient(to bottom right, transparent calc(50% - 1px), var(--accent) 50%, transparent calc(50% + 1px)),
-    linear-gradient(to top right, transparent calc(50% - 1px), var(--accent) 50%, transparent calc(50% + 1px)),
-    rgb(88 166 255 / 38%);
+  border-color: #9ecbff;
+}
+.clip-transition.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  border-color: #9ecbff;
+}
+.transition-label {
+  position: relative;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: rgb(0 0 0 / 55%);
+  color: #e8f0fc;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  pointer-events: none;
+}
+/* Grab either edge to retime. The centre selects and opens the menu. */
+.transition-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+}
+.transition-handle.left {
+  left: 0;
+}
+.transition-handle.right {
+  right: 0;
+}
+.transition-handle:hover {
+  background: rgb(88 166 255 / 55%);
 }
 .clip.solid {
   /* Overridden inline with the clip's own colour; this is the fallback. */
@@ -1122,5 +1162,64 @@ body.focus-mode .preview-panel .preview {
   cursor: grab;
 }
 .bin-item[draggable='true']:active {
+  cursor: grabbing;
+}
+
+/*
+ * Transitions library, pinned to the foot of the media panel.
+ *
+ * Right-clicking a cut is quicker once you know it exists, but nothing on screen
+ * said transitions were there at all — which is the usual reason a feature goes
+ * unused. Drag a chip onto a cut, or double-click to use the one by the playhead.
+ */
+.transition-library {
+  border-top: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.library-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.library-head:hover {
+  color: var(--text);
+}
+.library-head .chevron {
+  font-size: 9px;
+}
+.library-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0 10px 10px;
+}
+.transition-chip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 11px;
+  cursor: grab;
+  user-select: none;
+}
+.transition-chip:hover {
+  border-color: var(--accent);
+  background: #2b3f63;
+}
+.transition-chip:active {
   cursor: grabbing;
 }

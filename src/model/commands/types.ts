@@ -214,6 +214,18 @@ export type Command =
       readonly transitionId: TransitionId;
       readonly transitionType: string;
     }
+  /** Where the overlap sits relative to the cut. Re-fits the duration. */
+  | {
+      readonly type: 'setTransitionAlignment';
+      readonly transitionId: TransitionId;
+      readonly alignment: Transition['alignment'];
+    }
+  /** Wipe edge feather, 0..0.5 as a fraction of the sweep. */
+  | {
+      readonly type: 'setTransitionSoftness';
+      readonly transitionId: TransitionId;
+      readonly softness: number;
+    }
   /** Also shortened to fit. */
   | {
       readonly type: 'setTransitionDuration';

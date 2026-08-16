@@ -12,9 +12,12 @@ import { insertCommand, makeFixture, run, runFrom, sec, type Fixture } from './f
 import {
   audibleClipRange,
   audioSegments,
+  DEFAULT_WIPE_SOFTNESS,
   ModelError,
   pairedCuts,
   renderListAt,
+  transitionSoftness,
+  transitionSpan,
 } from './selectors';
 import * as T from './time';
 import type { ClipId, Project, Transition } from './types';
@@ -60,7 +63,11 @@ describe('wipes', () => {
     expect(outgoing!.wipe).toBeNull();
     // A dissolve would put 0.5 here; a wipe reveals at full strength.
     expect(incoming!.opacity).toBe(1);
-    expect(incoming!.wipe).toEqual({ direction: 'right', progress: 0.5 });
+    expect(incoming!.wipe).toEqual({
+      direction: 'right',
+      progress: 0.5,
+      softness: DEFAULT_WIPE_SOFTNESS,
+    });
   });
 
   it('carries the direction through to the layer', () => {
@@ -212,5 +219,62 @@ describe('linked picture and sound', () => {
     const segments = audioSegments(withTransitions, f.seqId, T.rangeFromBounds(sec(0), sec(8)));
     expect(segments.filter((s) => s.crossfadeIn ?? s.crossfadeOut)).toHaveLength(2);
     assertValidProject(withTransitions);
+  });
+});
+
+describe('alignment and softness', () => {
+  it('re-fits the length when the overlap moves to one side of the cut', () => {
+    // Centred, the 4 s tail and 2 s head each supply half, so 4 s fits.
+    const p = addTransition(videoPair(), f.v1);
+    expect(T.toSeconds(Object.values(p.transitions)[0]!.duration)).toBe(2);
+
+    const grown = runFrom(f, p, {
+      type: 'setTransitionDuration',
+      transitionId: Object.values(p.transitions)[0]!.id,
+      duration: sec(4),
+    });
+    expect(T.toSeconds(Object.values(grown.transitions)[0]!.duration)).toBe(4);
+
+    // Wholly before the cut, only the incoming clip's 2 s head pays for it.
+    const realigned = runFrom(f, grown, {
+      type: 'setTransitionAlignment',
+      transitionId: Object.values(grown.transitions)[0]!.id,
+      alignment: 'end',
+    });
+    const t = Object.values(realigned.transitions)[0]!;
+    expect(t.alignment).toBe('end');
+    expect(T.toSeconds(t.duration)).toBe(2);
+    assertValidProject(realigned);
+  });
+
+  it('moves the span to the right side of the cut', () => {
+    const p = addTransition(videoPair(), f.v1);
+    const id = Object.values(p.transitions)[0]!.id;
+
+    // The cut is at 4 s and the transition is 2 s long.
+    const centred = transitionSpan(p, Object.values(p.transitions)[0]!)!;
+    expect(T.toSeconds(centred.start)).toBe(3);
+
+    const atStart = runFrom(f, p, { type: 'setTransitionAlignment', transitionId: id, alignment: 'start' });
+    const span = transitionSpan(atStart, Object.values(atStart.transitions)[0]!)!;
+    expect(T.toSeconds(span.start)).toBe(4);
+    expect(T.toSeconds(T.rangeEnd(span))).toBe(6);
+  });
+
+  it('defaults the wipe feather and carries an explicit one through', () => {
+    const p = addTransition(videoPair(), f.v1, 'wipe.right');
+    const id = Object.values(p.transitions)[0]!.id;
+    expect(transitionSoftness(Object.values(p.transitions)[0]!)).toBe(DEFAULT_WIPE_SOFTNESS);
+
+    const softened = runFrom(f, p, { type: 'setTransitionSoftness', transitionId: id, softness: 0.1 });
+    expect(transitionSoftness(Object.values(softened.transitions)[0]!)).toBe(0.1);
+    expect(renderListAt(softened, f.seqId, sec(4))[1]!.wipe?.softness).toBe(0.1);
+  });
+
+  it('clamps a nonsensical feather rather than refusing it', () => {
+    const p = addTransition(videoPair(), f.v1, 'wipe.right');
+    const id = Object.values(p.transitions)[0]!.id;
+    const clamped = runFrom(f, p, { type: 'setTransitionSoftness', transitionId: id, softness: 5 });
+    expect(transitionSoftness(Object.values(clamped.transitions)[0]!)).toBe(0.5);
   });
 });

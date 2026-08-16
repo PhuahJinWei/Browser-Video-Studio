@@ -12,6 +12,7 @@ import { insertCommand, makeFixture, run, runFrom, sec, type Fixture } from './f
 import {
   activeTransitionAt,
   maxTransitionDuration,
+  nearestCut,
   ModelError,
   renderListAt,
   transitionSpan,
@@ -265,5 +266,38 @@ describe('staying consistent with the clips', () => {
     expect(clipIds(removed)).toHaveLength(2);
     expect(removed.sequences[f.seqId]!.transitionIds).toHaveLength(0);
     assertValidProject(removed);
+  });
+});
+
+describe('finding a cut to put one on', () => {
+  it('picks the join closest to the given time', () => {
+    const p = run(
+      f,
+      insertCommand(f, { trackId: f.v1, start: sec(0), duration: sec(2), name: 'A' }),
+      insertCommand(f, { trackId: f.v1, start: sec(2), duration: sec(2), name: 'B' }),
+      insertCommand(f, { trackId: f.v1, start: sec(4), duration: sec(2), name: 'C' }),
+    );
+    expect(nearestCut(p, f.v1, sec(1))?.to.name).toBe('B'); // cut at 2 s
+    expect(nearestCut(p, f.v1, sec(5))?.to.name).toBe('C'); // cut at 4 s
+  });
+
+  it('ignores a cut that already carries a transition', () => {
+    const p = addDissolve(adjacentPair());
+    // The only join on the track is taken, so there is nothing bare left.
+    expect(nearestCut(p, f.v1, sec(4))).toBeNull();
+  });
+
+  it('does not treat a gap between clips as a cut', () => {
+    const p = run(
+      f,
+      insertCommand(f, { trackId: f.v1, start: sec(0), duration: sec(2), name: 'A' }),
+      insertCommand(f, { trackId: f.v1, start: sec(5), duration: sec(2), name: 'B' }),
+    );
+    expect(nearestCut(p, f.v1, sec(3))).toBeNull();
+  });
+
+  it('finds nothing on a track with a single clip', () => {
+    const p = run(f, insertCommand(f, { trackId: f.v1, start: sec(0), duration: sec(4) }));
+    expect(nearestCut(p, f.v1, sec(2))).toBeNull();
   });
 });

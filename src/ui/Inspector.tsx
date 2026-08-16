@@ -7,6 +7,8 @@
  */
 
 import { defaultParams, EFFECT_REGISTRY, effectDefinition, listEffects } from '../engine/effects';
+import type { Command } from '../model/commands';
+import { TRANSITION_LABELS } from './transitions';
 import type { ClipParamKey } from '../model/commands';
 import { staticParam } from '../model/params';
 import {
@@ -14,9 +16,14 @@ import {
   isMediaClip,
   isSyntheticClip,
   isVisualClip,
+  maxTransitionDuration,
+  pairedTransitions,
   selectionUnit,
+  transitionSoftness,
+  transitionSpan,
 } from '../model/selectors';
 import * as T from '../model/time';
+import { TRANSITION_TYPES } from '../model/types';
 import type {
   AudioClip,
   BlendMode,
@@ -28,6 +35,7 @@ import type {
   SolidClip,
   TitleClip,
   Track,
+  Transition,
   VideoClip,
 } from '../model/types';
 import { useStudio } from './store';
@@ -47,8 +55,10 @@ export function Inspector(): React.JSX.Element {
   const history = useStudio((s) => s.history);
   const selection = useStudio((s) => s.selection);
   const selectedTrackId = useStudio((s) => s.selectedTrackId);
+  const selectedTransitionId = useStudio((s) => s.selectedTransitionId);
   const project = history.present.project;
   const track = selectedTrackId ? project.tracks[selectedTrackId] : undefined;
+  const transition = selectedTransitionId ? project.transitions[selectedTransitionId] : undefined;
 
   const selected = selection.map((id) => project.clips[id]).filter((c): c is Clip => Boolean(c));
 
@@ -64,17 +74,184 @@ export function Inspector(): React.JSX.Element {
     <div className="panel">
       <div className="panel-head">Inspector</div>
       <div className="panel-body">
-        {track && <TrackInspector track={track} />}
-        {!track && !unit && (
+        {transition && <TransitionInspector transition={transition} />}
+        {!transition && track && <TrackInspector track={track} />}
+        {!transition && !track && !unit && (
           <p className="hint">
             {selected.length > 1
               ? `${selected.length} clips selected.`
-              : 'Select a clip, or a track header, to edit its properties.'}
+              : 'Select a clip, a track header or a transition to edit its properties.'}
           </p>
         )}
-        {!track && unit && <UnitInspector unit={unit} />}
+        {!transition && !track && unit && <UnitInspector unit={unit} />}
       </div>
     </div>
+  );
+}
+
+const ALIGNMENTS: readonly { value: Transition['alignment']; label: string; hint: string }[] = [
+  { value: 'centered', label: 'Centre on cut', hint: 'Half from each clip' },
+  { value: 'start', label: 'Start at cut', hint: 'All from the outgoing clip' },
+  { value: 'end', label: 'End at cut', hint: 'All from the incoming clip' },
+];
+
+/**
+ * Transition properties.
+ *
+ * Every edit goes to the whole paired set, so a linked A/V pair can never end up
+ * with a 2 s picture wipe over a 1 s audio crossfade.
+ */
+function TransitionInspector({ transition }: { transition: Transition }): React.JSX.Element {
+  const run = useStudio((s) => s.run);
+  const runMany = useStudio((s) => s.runMany);
+  const endGesture = useStudio((s) => s.endGesture);
+  const history = useStudio((s) => s.history);
+  const project = history.present.project;
+
+  const paired = pairedTransitions(project, transition);
+  const track = project.tracks[transition.trackId];
+  const from = project.clips[transition.fromClipId];
+  const to = project.clips[transition.toClipId];
+  const span = transitionSpan(project, transition);
+  const isAudio = track?.kind === 'audio';
+  const isWipe = transition.transitionType.startsWith('wipe.');
+
+  const longest = from && to ? maxTransitionDuration(project, from, to, transition.alignment) : null;
+
+  const applyToPair = (
+    build: (t: Transition) => Command,
+    label: string,
+    coalesceKey?: string,
+  ): void => runMany(paired.map(build), label, coalesceKey);
+
+  return (
+    <>
+      <div className="field">
+        <label>Transition</label>
+        <p className="hint" style={{ margin: 0 }}>
+          {from?.name ?? '?'} → {to?.name ?? '?'} on {track?.name ?? '?'}
+          {paired.length > 1 && <> · picture and sound</>}
+        </p>
+      </div>
+
+      <div className="field">
+        <label>Style</label>
+        <select
+          value={transition.transitionType}
+          disabled={isAudio}
+          onChange={(event) =>
+            applyToPair(
+              (t) => ({
+                type: 'setTransitionType' as const,
+                transitionId: t.id,
+                // Sound has no edge to wipe, so it stays a crossfade underneath.
+                transitionType:
+                  project.tracks[t.trackId]?.kind === 'audio' ? 'dissolve' : event.target.value,
+              }),
+              'Set transition style',
+            )
+          }
+        >
+          {TRANSITION_TYPES.map((type) => (
+            <option key={type} value={type}>
+              {TRANSITION_LABELS[type]}
+            </option>
+          ))}
+        </select>
+        {isAudio && <p className="hint">Sound crossfades; there is no edge to wipe.</p>}
+      </div>
+
+      <Slider
+        label="Duration"
+        value={T.toSeconds(transition.duration)}
+        min={0.04}
+        max={Math.max(0.04, longest ? T.toSeconds(longest) : 4)}
+        step={0.02}
+        unit=" s"
+        onChange={(value) =>
+          applyToPair(
+            (t) => ({
+              type: 'setTransitionDuration' as const,
+              transitionId: t.id,
+              duration: T.fromSeconds(value, 1000),
+            }),
+            'Set transition length',
+            `transition-duration:${transition.id}`,
+          )
+        }
+        onCommit={endGesture}
+      />
+      {longest && (
+        <p className="hint">
+          Up to {T.formatDuration(longest, { decimals: 2 })} here — limited by the
+          material either side of the cut.
+        </p>
+      )}
+
+      <div className="field">
+        <label>Alignment</label>
+        <select
+          value={transition.alignment}
+          onChange={(event) =>
+            applyToPair(
+              (t) => ({
+                type: 'setTransitionAlignment' as const,
+                transitionId: t.id,
+                alignment: event.target.value as Transition['alignment'],
+              }),
+              'Set transition alignment',
+            )
+          }
+        >
+          {ALIGNMENTS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label} — {option.hint}
+            </option>
+          ))}
+        </select>
+        {span && (
+          <p className="hint">
+            {T.formatDuration(span.start, { decimals: 2 })} →{' '}
+            {T.formatDuration(T.rangeEnd(span), { decimals: 2 })}
+          </p>
+        )}
+      </div>
+
+      {isWipe && (
+        <Slider
+          label="Edge softness"
+          value={transitionSoftness(transition) * 100}
+          min={0}
+          max={20}
+          step={0.2}
+          unit="%"
+          onChange={(value) =>
+            run(
+              { type: 'setTransitionSoftness', transitionId: transition.id, softness: value / 100 },
+              'Set edge softness',
+              `transition-softness:${transition.id}`,
+            )
+          }
+          onCommit={endGesture}
+        />
+      )}
+
+      <div className="field">
+        <div className="value-row">
+          <button
+            className="danger"
+            onClick={() =>
+              applyToPair(
+                (t) => ({ type: 'removeTransition' as const, transitionId: t.id }),
+                'Remove transition',
+              )
+            }
+          >
+            {paired.length > 1 ? `Remove (${paired.length})` : 'Remove'}
+          </button>
+        </div>
+      </div>
+    </>
   );
 }
 

@@ -398,6 +398,24 @@ interface TrackLayer {
   readonly wipe: LayerWipe | null;
 }
 
+/** Wipe edge feather when a transition does not say otherwise. */
+export const DEFAULT_WIPE_SOFTNESS = 0.004;
+
+/**
+ * Edge feather for a wipe, as a fraction of the sweep.
+ *
+ * Kept in the transition's `params` rather than as a field so older documents
+ * — which have none — simply fall back to the default instead of needing a
+ * migration.
+ */
+export function transitionSoftness(transition: Transition): number {
+  const param = transition.params['softness'];
+  if (!param || param.kind !== 'static' || typeof param.value !== 'number') {
+    return DEFAULT_WIPE_SOFTNESS;
+  }
+  return Math.min(0.5, Math.max(0, param.value));
+}
+
 /** Transition types that reveal behind a moving edge rather than fading. */
 const WIPE_DIRECTIONS: Readonly<Record<string, WipeDirection>> = {
   'wipe.right': 'right',
@@ -423,7 +441,11 @@ function trackLayersAt(p: Project, trackId: TrackId, at: Time): readonly TrackLa
         {
           clip: active.to,
           opacityScale: 1,
-          wipe: { direction, progress: active.progress },
+          wipe: {
+            direction,
+            progress: active.progress,
+            softness: transitionSoftness(active.transition),
+          },
         },
       ];
     }
@@ -633,6 +655,32 @@ export function pairedCuts(
     if (next && next.linkGroupId === to.linkGroupId) cuts.push({ from: candidate, to: next });
   }
   return cuts;
+}
+
+/**
+ * The cut on a track closest to `at`, ignoring cuts that already carry a
+ * transition. Cuts are exact joins, so a gap between two clips is not one.
+ */
+export function nearestCut(
+  p: Project,
+  trackId: TrackId,
+  at: Time,
+): { readonly from: Clip; readonly to: Clip; readonly distanceSeconds: number } | null {
+  const clips = trackClips(p, trackId);
+  let best: { from: Clip; to: Clip; distanceSeconds: number } | null = null;
+
+  for (let i = 0; i + 1 < clips.length; i++) {
+    const from = clips[i]!;
+    const to = clips[i + 1]!;
+    if (!T.eq(clipEnd(from), to.start)) continue;
+    if (transitionBetween(p, from.id, to.id)) continue;
+
+    const distanceSeconds = Math.abs(T.toSeconds(T.sub(to.start, at)));
+    if (!best || distanceSeconds < best.distanceSeconds) {
+      best = { from, to, distanceSeconds };
+    }
+  }
+  return best;
 }
 
 /** A transition together with the ones on its paired cuts. */
