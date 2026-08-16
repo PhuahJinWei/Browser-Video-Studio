@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { canRun, detectCapabilities, type CapabilityResult } from '../capabilities';
-import { orderedTrackIds, useStudio } from './store';
+import { flushAutosave, orderedTrackIds, useStudio } from './store';
 import { ExportDialog } from './ExportDialog';
 import { Inspector } from './Inspector';
 import { MediaBin } from './MediaBin';
@@ -57,6 +57,8 @@ function Studio(): React.JSX.Element {
   const canUndoEdit = useStudio((s) => s.canUndoEdit);
   const canRedoEdit = useStudio((s) => s.canRedoEdit);
   const togglePlay = useStudio((s) => s.togglePlay);
+  const addTitle = useStudio((s) => s.addTitle);
+  const newProject = useStudio((s) => s.newProject);
   const setPlayhead = useStudio((s) => s.setPlayhead);
   const playhead = useStudio((s) => s.playhead);
   const duration = useStudio((s) => s.duration);
@@ -64,6 +66,16 @@ function Studio(): React.JSX.Element {
   const project = history.present.project;
   const sequence = project.sequences[sequenceId]!;
   const playing = useStudio((s) => s.telemetry?.playing ?? false);
+
+  // Save anything still inside the autosave debounce before the page goes away.
+  useEffect(() => {
+    const onHide = (): void => flushAutosave();
+    window.addEventListener('pagehide', onHide);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') onHide();
+    });
+    return () => window.removeEventListener('pagehide', onHide);
+  }, []);
 
   // ---------------------------------------------------------------- shortcuts
   useEffect(() => {
@@ -151,6 +163,24 @@ function Studio(): React.JSX.Element {
     <div className="app">
       <header className="header">
         <h1>Browser Video Studio</h1>
+
+        <button
+          onClick={() => {
+            if (confirm('Start a new project? Unsaved work in this one is kept on disk.')) {
+              newProject();
+            }
+          }}
+        >
+          New
+        </button>
+        <button
+          onClick={() => {
+            const text = prompt('Title text', 'Hello');
+            if (text) addTitle(text);
+          }}
+        >
+          + Title
+        </button>
 
         <button onClick={() => void togglePlay()} title="Space">
           {playing ? '❚❚ Pause' : '▶ Play'}

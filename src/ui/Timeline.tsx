@@ -217,9 +217,29 @@ export function Timeline(): React.JSX.Element {
   return (
     <div className="timeline" onWheel={onWheel}>
       <div className="track-headers">
-        <div className="ruler-spacer" />
+        <div className="ruler-spacer" style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '0 6px' }}>
+          <button
+            className="icon"
+            title="Add a video track"
+            onClick={() => run({ type: 'addTrack', sequenceId, kind: 'video' }, 'Add video track')}
+          >
+            + V
+          </button>
+          <button
+            className="icon"
+            title="Add an audio track"
+            onClick={() => run({ type: 'addTrack', sequenceId, kind: 'audio' }, 'Add audio track')}
+          >
+            + A
+          </button>
+        </div>
         {trackIds.map((trackId) => (
-          <TrackHeader key={trackId} track={getTrack(project, trackId)} onCommand={run} />
+          <TrackHeader
+            key={trackId}
+            track={getTrack(project, trackId)}
+            onCommand={run}
+            removable={trackIds.length > 1}
+          />
         ))}
       </div>
 
@@ -280,9 +300,11 @@ export function Timeline(): React.JSX.Element {
 function TrackHeader({
   track,
   onCommand,
+  removable,
 }: {
   track: Track;
   onCommand: (command: Command, label: string) => void;
+  removable: boolean;
 }): React.JSX.Element {
   const toggle = (props: Record<string, boolean>, label: string): void =>
     onCommand({ type: 'setTrackProps', trackId: track.id, props }, label);
@@ -325,6 +347,15 @@ function TrackHeader({
       >
         L
       </button>
+      {removable && (
+        <button
+          className="icon"
+          title="Delete this track and its clips"
+          onClick={() => onCommand({ type: 'removeTrack', trackId: track.id }, 'Remove track')}
+        >
+          ×
+        </button>
+      )}
     </div>
   );
 }

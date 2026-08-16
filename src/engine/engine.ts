@@ -36,6 +36,8 @@ const CLOCK_INTERVAL_MS = 25;
 
 export class Engine {
   private compositor: Compositor | null = null;
+  private attachedCanvas: HTMLCanvasElement | null = null;
+  private attaching: Promise<void> | null = null;
   private player: AudioPlayer | null = null;
   private rafHandle: number | null = null;
   private clockTimer: ReturnType<typeof setInterval> | null = null;
@@ -43,6 +45,8 @@ export class Engine {
   private rendering = false;
   private pendingSeek: Time | null = null;
   private lastRenderedAt: Time | null = null;
+  /** Most recent time asked for, whether or not that render has finished yet. */
+  private lastRequestedAt: Time | null = null;
 
   private readonly telemetry: EngineTelemetry = {
     fps: 0,
@@ -67,15 +71,39 @@ export class Engine {
     return new Engine(getProject, sequenceId);
   }
 
-  /** Attach a canvas. Safe to call again after the sequence size changes. */
+  /**
+   * Attach a canvas. Safe to call again after the sequence size changes.
+   *
+   * Concurrent calls share one creation. Without this, two overlapping calls each
+   * see no compositor and each build a `GPUDevice`; the canvas ends up configured
+   * with one device while rendering submits on the other, and every frame silently
+   * fails validation. React StrictMode double-invokes effects in development, so
+   * this is the normal path, not an edge case.
+   */
   async attachCanvas(canvas: HTMLCanvasElement, size: Size): Promise<void> {
-    if (this.compositor) {
+    if (this.compositor && this.attachedCanvas === canvas) {
       this.compositor.resize(size);
       return;
     }
-    canvas.width = size.width;
-    canvas.height = size.height;
-    this.compositor = await Compositor.create(canvas, size);
+    if (this.attaching) return this.attaching;
+
+    this.attaching = (async () => {
+      // A different canvas means the old device's swap chain is gone.
+      if (this.compositor) {
+        this.compositor.destroy();
+        this.compositor = null;
+      }
+      canvas.width = size.width;
+      canvas.height = size.height;
+      this.compositor = await Compositor.create(canvas, size);
+      this.attachedCanvas = canvas;
+    })();
+
+    try {
+      await this.attaching;
+    } finally {
+      this.attaching = null;
+    }
   }
 
   get hasCanvas(): boolean {
@@ -194,6 +222,7 @@ export class Engine {
    */
   requestRender(at: Time): void {
     this.pendingSeek = at;
+    this.lastRequestedAt = at;
     if (this.rendering) {
       this.telemetry.droppedFrames++;
       return;
@@ -290,9 +319,16 @@ export class Engine {
     this.emitTelemetry();
   }
 
-  /** Re-render the current position, e.g. after an edit. */
+  /**
+   * Re-render the current position, e.g. after an edit.
+   *
+   * Uses the last *requested* time rather than the last completed one: an edit made
+   * while a render is still in flight would otherwise re-render a stale position, or
+   * nothing at all before the first frame has ever finished.
+   */
   refresh(): void {
-    if (this.lastRenderedAt) this.requestRender(this.lastRenderedAt);
+    const at = this.lastRequestedAt ?? this.lastRenderedAt;
+    if (at) this.requestRender(at);
   }
 
   async openAsset(assetId: AssetId, blob: Blob): Promise<void> {

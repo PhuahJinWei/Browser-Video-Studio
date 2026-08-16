@@ -15,9 +15,13 @@ export function Preview(): React.JSX.Element {
   const sequence = history.present.project.sequences[sequenceId]!;
   const hasClips = Object.keys(history.present.project.clips).length > 0;
 
+  const restoreLastProject = useStudio((s) => s.restoreLastProject);
+
   useEffect(() => {
-    if (canvasRef.current) void attachEngine(canvasRef.current);
-  }, [attachEngine]);
+    if (!canvasRef.current) return;
+    // Attach first so restored media can be opened straight into the engine.
+    void attachEngine(canvasRef.current).then(() => restoreLastProject());
+  }, [attachEngine, restoreLastProject]);
 
   return (
     <div className="preview">

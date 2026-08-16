@@ -29,8 +29,12 @@ import {
 import { getSequence, sequenceDuration } from '../model/selectors';
 import * as T from '../model/time';
 import type { AssetId, ClipId, Project, SequenceId, Time, TrackId } from '../model/types';
+import { Autosaver, loadMostRecent, saveMedia } from '../storage/projectStore';
 
 const ids = randomIdSource;
+
+/** Files above this size are not copied into OPFS; reopening asks for them again. */
+const MEDIA_COPY_LIMIT_BYTES = 2_000_000_000;
 
 function starterProject(): { project: Project; sequenceId: SequenceId } {
   const sequenceId = ids.sequence();
@@ -80,11 +84,35 @@ export interface StudioState {
   attachEngine: (canvas: HTMLCanvasElement) => Promise<void>;
   importFiles: (files: readonly File[]) => Promise<void>;
   addAssetToTimeline: (assetId: AssetId) => Promise<void>;
+  addTitle: (text: string) => void;
+  newProject: () => void;
   togglePlay: () => Promise<void>;
   runExport: (settings: ExportSettings) => Promise<void>;
   setStatus: (status: string) => void;
   setError: (error: string | null) => void;
   toggleTelemetry: () => void;
+  restoreLastProject: () => Promise<void>;
+}
+
+/**
+ * Autosave. Lives outside the store because it is a side-effect owner, not state:
+ * every recorded edit schedules a debounced write of the current document.
+ */
+const autosaver = new Autosaver(800, (error) => {
+  useStudio.setState({ error: `Autosave failed: ${error.message}` });
+});
+
+/**
+ * Write any pending edit immediately.
+ *
+ * Without this, anything done inside the debounce window is lost when the tab
+ * closes. `pagehide` is the reliable signal — `beforeunload` is skipped when a tab
+ * is discarded or the page is restored from the back/forward cache.
+ */
+export function flushAutosave(): void {
+  const state = useStudio.getState();
+  autosaver.schedule(state.project());
+  void autosaver.flush();
 }
 
 const initial = starterProject();
@@ -114,6 +142,7 @@ export const useStudio = create<StudioState>((set, get) => ({
         ids,
       );
       set({ history, error: null });
+      autosaver.schedule(current(history));
       get().engine?.refresh();
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
@@ -124,13 +153,12 @@ export const useStudio = create<StudioState>((set, get) => ({
     try {
       let project = get().project();
       for (const command of commands) project = apply(project, command, ids);
-      set({
-        history: push(get().history, project, {
-          label,
-          ...(coalesceKey !== undefined ? { coalesceKey } : {}),
-        }),
-        error: null,
+      const history = push(get().history, project, {
+        label,
+        ...(coalesceKey !== undefined ? { coalesceKey } : {}),
       });
+      set({ history, error: null });
+      autosaver.schedule(project);
       get().engine?.refresh();
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
@@ -152,11 +180,15 @@ export const useStudio = create<StudioState>((set, get) => ({
 
   endGesture: () => set({ history: breakCoalescing(get().history) }),
   undoEdit: () => {
-    set({ history: undo(get().history), selection: [] });
+    const history = undo(get().history);
+    set({ history, selection: [] });
+    autosaver.schedule(current(history));
     get().engine?.refresh();
   },
   redoEdit: () => {
-    set({ history: redo(get().history), selection: [] });
+    const history = redo(get().history);
+    set({ history, selection: [] });
+    autosaver.schedule(current(history));
     get().engine?.refresh();
   },
   canUndoEdit: () => canUndo(get().history),
@@ -219,6 +251,8 @@ export const useStudio = create<StudioState>((set, get) => ({
         commands.push({ type: 'addAsset', asset });
         nextFiles.set(assetId, file);
         await get().engine?.openAsset(assetId, file);
+        // Copy beside the project so it reopens after a reload.
+        await saveMedia(get().project().id, assetId, file, MEDIA_COPY_LIMIT_BYTES).catch(() => false);
       } catch (err) {
         failures.push(`${file.name}: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -281,6 +315,47 @@ export const useStudio = create<StudioState>((set, get) => ({
     }
     get().runMany(commands, `Add "${asset.name}"`);
     get().engine?.requestRender(start);
+  },
+
+  /** Drop a 3-second title on the topmost video track at the playhead. */
+  addTitle: (text) => {
+    const state = get();
+    const sequence = getSequence(state.project(), state.sequenceId);
+    const trackId = sequence.videoTrackIds[sequence.videoTrackIds.length - 1];
+    if (!trackId) {
+      set({ error: 'Add a video track first' });
+      return;
+    }
+    state.run(
+      {
+        type: 'insertClip',
+        trackId,
+        mode: 'overwrite',
+        clip: {
+          kind: 'title',
+          start: state.playhead(),
+          duration: T.time(3),
+          text,
+          name: text.slice(0, 24) || 'Title',
+        },
+      },
+      'Add title',
+    );
+  },
+
+  newProject: () => {
+    const { project, sequenceId } = starterProject();
+    set({
+      history: initHistory(project),
+      sequenceId,
+      selection: [],
+      mediaFiles: new Map(),
+      status: 'New project.',
+      error: null,
+    });
+    get().engine?.setSequence(sequenceId);
+    autosaver.schedule(project);
+    get().engine?.requestRender(T.TIME_ZERO);
   },
 
   togglePlay: async () => {
@@ -352,6 +427,35 @@ export const useStudio = create<StudioState>((set, get) => ({
   setStatus: (status) => set({ status }),
   setError: (error) => set({ error }),
   toggleTelemetry: () => set({ showTelemetry: !get().showTelemetry }),
+
+  /** Reopen the most recently saved project, if there is one. */
+  restoreLastProject: async () => {
+    try {
+      const loaded = await loadMostRecent();
+      if (!loaded) return;
+
+      const sequenceId = loaded.project.activeSequenceId;
+      set({
+        history: initHistory(loaded.project),
+        sequenceId,
+        selection: [],
+        mediaFiles: loaded.media,
+        status:
+          loaded.missingAssetIds.length > 0
+            ? `Reopened "${loaded.project.name}" — ${loaded.missingAssetIds.length} file(s) need re-importing.`
+            : `Reopened "${loaded.project.name}".`,
+      });
+
+      const engine = get().engine;
+      if (engine) {
+        engine.setSequence(sequenceId);
+        for (const [assetId, file] of loaded.media) await engine.openAsset(assetId, file);
+        engine.requestRender(get().playhead());
+      }
+    } catch (err) {
+      set({ error: `Could not reopen the last project: ${err instanceof Error ? err.message : err}` });
+    }
+  },
 }));
 
 /** Default export settings derived from the sequence. */
