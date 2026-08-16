@@ -16,6 +16,8 @@ import {
   getTrack,
   isGrouped,
   isMediaClip,
+  pairedCuts,
+  pairedTransitions,
   selectionUnit,
   trackClips,
   trackTransitions,
@@ -23,6 +25,7 @@ import {
   transitionSpan,
 } from '../model/selectors';
 import * as T from '../model/time';
+import { TRANSITION_TYPES } from '../model/types';
 import type {
   Clip,
   ClipId,
@@ -31,6 +34,7 @@ import type {
   Track,
   TrackId,
   Transition,
+  TransitionType,
 } from '../model/types';
 import { useContextMenu, type MenuEntry } from './ContextMenu';
 import {
@@ -61,6 +65,16 @@ import {
 import { appendPointFor, counterpartTrackId, orderedTrackIds, useStudio } from './store';
 
 /** Width of the sticky track-header column. */
+/** Menu wording for each transition style, named for where the edge travels. */
+const TRANSITION_LABELS: Readonly<Record<TransitionType, string>> = {
+  dissolve: 'Cross dissolve',
+  'wipe.right': 'Wipe right →',
+  'wipe.left': 'Wipe left ←',
+  'wipe.down': 'Wipe down ↓',
+  'wipe.up': 'Wipe up ↑',
+  'wipe.iris': 'Iris',
+};
+
 const HEADER_WIDTH = 168;
 const MIN_TRACK_HEIGHT = 36;
 const MIN_TAIL_SECONDS = 10;
@@ -401,13 +415,20 @@ export function Timeline(): React.JSX.Element {
         icon: <IconTransition />,
         // Needs a neighbour sharing an exact cut, and nothing there already.
         disabled: !from || !to || existing !== null,
-        onSelect: () =>
-          from &&
-          to &&
-          run(
-            { type: 'addTransition', fromClipId: from.id, toClipId: to.id, duration: T.time(1) },
+        onSelect: () => {
+          if (!from || !to) return;
+          // One command per cut so a linked A/V pair crossfades its sound too,
+          // batched into a single undo step.
+          runMany(
+            pairedCuts(project, from, to).map((cut) => ({
+              type: 'addTransition' as const,
+              fromClipId: cut.from.id,
+              toClipId: cut.to.id,
+              duration: T.time(1),
+            })),
             'Add cross dissolve',
-          ),
+          );
+        },
       };
     };
 
@@ -496,7 +517,31 @@ export function Timeline(): React.JSX.Element {
   const openTransitionMenu = (event: React.MouseEvent, transition: Transition): void => {
     event.stopPropagation();
     const seconds = T.toSeconds(transition.duration);
+    // Every paired cut restyles, retimes and clears together, so a linked A/V
+    // pair can never end up with a 2 s picture wipe over a 1 s audio crossfade.
+    const paired = pairedTransitions(project, transition);
+    const audioOnly = getTrack(project, transition.trackId).kind === 'audio';
+
     menu.open(event, [
+      ...TRANSITION_TYPES.map((type) => ({
+        label: TRANSITION_LABELS[type],
+        icon: <IconTransition />,
+        checked: transition.transitionType === type,
+        // Sound has no edge to wipe; an audio-only transition is always a crossfade.
+        disabled: audioOnly && type !== 'dissolve',
+        onSelect: () =>
+          runMany(
+            paired.map((t) => ({
+              type: 'setTransitionType' as const,
+              transitionId: t.id,
+              // The picture wipes; the sound underneath still crossfades.
+              transitionType:
+                getTrack(project, t.trackId).kind === 'audio' ? 'dissolve' : type,
+            })),
+            'Set transition style',
+          ),
+      })),
+      'separator',
       {
         label: 'Set duration…',
         icon: <IconTransition />,
@@ -504,23 +549,26 @@ export function Timeline(): React.JSX.Element {
           const answer = prompt('Transition length in seconds', String(seconds));
           const value = answer === null ? NaN : Number(answer);
           if (!Number.isFinite(value) || value <= 0) return;
-          run(
-            {
-              type: 'setTransitionDuration',
-              transitionId: transition.id,
+          runMany(
+            paired.map((t) => ({
+              type: 'setTransitionDuration' as const,
+              transitionId: t.id,
               duration: T.fromSeconds(value, 1000),
-            },
+            })),
             'Set transition length',
           );
         },
       },
       'separator',
       {
-        label: 'Remove transition',
+        label: paired.length > 1 ? `Remove transition (${paired.length})` : 'Remove transition',
         icon: <IconTrash />,
         danger: true,
         onSelect: () =>
-          run({ type: 'removeTransition', transitionId: transition.id }, 'Remove transition'),
+          runMany(
+            paired.map((t) => ({ type: 'removeTransition' as const, transitionId: t.id })),
+            'Remove transition',
+          ),
       },
     ]);
   };
@@ -759,7 +807,7 @@ export function Timeline(): React.JSX.Element {
                           left: T.toSeconds(span.start) * pxPerSecond,
                           width: Math.max(8, T.toSeconds(span.duration) * pxPerSecond),
                         }}
-                        title={`${transition.transitionType} · ${T.formatDuration(transition.duration, { decimals: 2 })}`}
+                        title={`${TRANSITION_LABELS[transition.transitionType as TransitionType] ?? transition.transitionType} · ${T.formatDuration(transition.duration, { decimals: 2 })}`}
                         onContextMenu={(event) => openTransitionMenu(event, transition)}
                         onPointerDown={(event) => event.stopPropagation()}
                       />

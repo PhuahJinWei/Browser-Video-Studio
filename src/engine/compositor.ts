@@ -11,7 +11,7 @@
  * pipeline handles video frames, canvases and bitmaps alike.
  */
 
-import type { BlendMode, Crop, Size, Transform2D } from '../model/types';
+import type { BlendMode, Crop, LayerWipe, Size, Transform2D } from '../model/types';
 import { BLIT_SHADER, BLUR_SHADER, COMPOSITE_SHADER } from './compositor.wgsl';
 import { NEUTRAL_EFFECTS, type LayerEffectState } from './effects';
 
@@ -33,8 +33,25 @@ export interface DrawLayer {
   readonly opacity: number;
   readonly crop: Crop;
   readonly blendMode: BlendMode;
+  /** Reveal this layer behind a moving edge instead of drawing it whole. */
+  readonly wipe?: LayerWipe | null;
   readonly effects: LayerEffectState;
 }
+
+/** Must match the `wipe_mode` cases in the composite shader. */
+const WIPE_MODE_IDS: Readonly<Record<LayerWipe['direction'], number>> = {
+  right: 1,
+  left: 2,
+  down: 3,
+  up: 4,
+  iris: 5,
+};
+
+/**
+ * Feather on a wipe edge, as a fraction of the sweep. Small enough to read as a
+ * hard edge, wide enough that the diagonal of an iris does not stair-step.
+ */
+const WIPE_SOFTNESS = 0.004;
 
 const BLEND_MODE_IDS: Readonly<Record<BlendMode, number>> = {
   normal: 0,
@@ -472,6 +489,11 @@ export class Compositor {
 
     f[20] = clamp01(layer.opacity);
     u[21] = BLEND_MODE_IDS[layer.blendMode] ?? 0;
+
+    const { wipe } = layer;
+    u[22] = wipe ? (WIPE_MODE_IDS[wipe.direction] ?? 0) : 0;
+    f[23] = wipe ? clamp01(wipe.progress) : 0;
+    f[24] = WIPE_SOFTNESS;
 
     this.device.queue.writeBuffer(this.layerUniforms!, index * LAYER_UNIFORM_SIZE, data);
   }

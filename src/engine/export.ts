@@ -255,6 +255,7 @@ async function collectExportLayers(
         opacity: layer.opacity,
         crop: layer.crop,
         blendMode: layer.blendMode,
+        wipe: layer.wipe,
         effects,
       });
       continue;
@@ -269,6 +270,7 @@ async function collectExportLayers(
         opacity: layer.opacity,
         crop: layer.crop,
         blendMode: layer.blendMode,
+        wipe: layer.wipe,
         effects,
       });
       continue;
@@ -284,6 +286,7 @@ async function collectExportLayers(
         opacity: layer.opacity,
         crop: layer.crop,
         blendMode: layer.blendMode,
+        wipe: layer.wipe,
         effects,
       });
       continue;
@@ -304,6 +307,7 @@ async function collectExportLayers(
       opacity: layer.opacity,
       crop: layer.crop,
       blendMode: layer.blendMode,
+      wipe: layer.wipe,
       effects,
     });
   }

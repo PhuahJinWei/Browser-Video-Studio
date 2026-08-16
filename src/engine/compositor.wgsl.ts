@@ -50,7 +50,10 @@ struct LayerUniforms {
   colour      : vec4f,   // brightness, contrast, saturation, exposure
   opacity     : f32,
   blend_mode  : u32,
-  _pad        : vec2f,
+  wipe_mode   : u32,   // 0 none, 1 right, 2 left, 3 down, 4 up, 5 iris
+  wipe_prog   : f32,   // 0 fully hidden, 1 fully revealed
+  wipe_soft   : f32,   // feather width, as a fraction of the sweep
+  _pad        : vec3f,
 };
 
 @group(0) @binding(0) var<uniform> u        : LayerUniforms;
@@ -74,6 +77,39 @@ fn vs(@builtin(vertex_index) index : u32) -> VertexOut {
   out.position = vec4f(p, 0.0, 1.0);
   out.uv = vec2f((p.x + 1.0) * 0.5, (1.0 - p.y) * 0.5);
   return out;
+}
+
+/**
+ * Reveal mask for a wipe, in target space so a scaled or repositioned clip
+ * still wipes across the frame rather than across its own box.
+ */
+fn wipe_mask(uv : vec2f) -> f32 {
+  // How far along the sweep a pixel sits. Lowest values are revealed first.
+  var travel = 0.0;
+  if (u.wipe_mode == 1u) {
+    travel = uv.x;                                   // edge moves right
+  } else if (u.wipe_mode == 2u) {
+    travel = 1.0 - uv.x;                             // edge moves left
+  } else if (u.wipe_mode == 3u) {
+    travel = uv.y;                                   // edge moves down
+  } else if (u.wipe_mode == 4u) {
+    travel = 1.0 - uv.y;                             // edge moves up
+  } else {
+    // Iris opens from the centre. Distance is measured with the frame's aspect
+    // applied, or the circle would come out as an ellipse stretched to the frame;
+    // dividing by the corner distance makes full progress just clear the corners.
+    let aspect = vec2f(u.target_size.x / max(u.target_size.y, 1.0), 1.0);
+    travel = length((uv - vec2f(0.5)) * aspect) / length(vec2f(0.5) * aspect);
+  }
+
+  // Run the edge from just before 0 to just past 1 so the feather itself is
+  // fully off-screen at both ends — otherwise a wipe starts half-revealed.
+  let soft = max(u.wipe_soft, 0.0001);
+  let edge = u.wipe_prog * (1.0 + 2.0 * soft) - soft;
+  let revealed = 1.0 - smoothstep(edge - soft, edge + soft, travel);
+
+  // Selected rather than branched, so every layer runs the same control flow.
+  return select(revealed, 1.0, u.wipe_mode == 0u);
 }
 
 fn apply_colour(rgb : vec3f) -> vec3f {
@@ -109,7 +145,7 @@ fn fs(in : VertexOut) -> @location(0) vec4f {
   let mask = select(0.0, 1.0, inside_bounds && inside_crop);
 
   let rgb   = apply_colour(src.rgb);
-  let alpha = src.a * u.opacity * mask;
+  let alpha = src.a * u.opacity * mask * wipe_mask(in.uv);
 
   // Standard source-over, with the blend function choosing the source colour.
   let blended = blend_rgb(u.blend_mode, base.rgb, rgb);

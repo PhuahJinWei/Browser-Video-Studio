@@ -162,6 +162,7 @@ export class Engine {
           opacity: layer.opacity,
           crop: layer.crop,
           blendMode: layer.blendMode,
+          wipe: layer.wipe,
           effects,
         });
         continue;
@@ -176,6 +177,7 @@ export class Engine {
           opacity: layer.opacity,
           crop: layer.crop,
           blendMode: layer.blendMode,
+          wipe: layer.wipe,
           effects,
         });
         continue;
@@ -192,6 +194,7 @@ export class Engine {
           opacity: layer.opacity,
           crop: layer.crop,
           blendMode: layer.blendMode,
+          wipe: layer.wipe,
           effects,
         });
         continue;
@@ -212,6 +215,7 @@ export class Engine {
         opacity: layer.opacity,
         crop: layer.crop,
         blendMode: layer.blendMode,
+        wipe: layer.wipe,
         effects,
       });
     }

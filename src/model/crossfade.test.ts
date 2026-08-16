@@ -1,0 +1,216 @@
+/**
+ * Wipes and audio crossfades.
+ *
+ * The interesting cases are the ones where audio and video deliberately behave
+ * differently: a wipe leaves the incoming picture fully opaque and masks it
+ * spatially, while a crossfade has to reach past both clips' own edges and ramp
+ * *both* sides, because audio sums where video composites.
+ */
+
+import { beforeEach, describe, expect, it } from 'vitest';
+import { insertCommand, makeFixture, run, runFrom, sec, type Fixture } from './fixtures';
+import {
+  audibleClipRange,
+  audioSegments,
+  ModelError,
+  pairedCuts,
+  renderListAt,
+} from './selectors';
+import * as T from './time';
+import type { ClipId, Project, Transition } from './types';
+import { assertValidProject } from './validate';
+
+let f: Fixture;
+beforeEach(() => {
+  f = makeFixture();
+});
+
+/** Two adjacent 4 s video clips on V1, each with a second of handle either side. */
+function videoPair(): Project {
+  return run(
+    f,
+    insertCommand(f, { trackId: f.v1, start: sec(0), duration: sec(4), sourceIn: sec(2), name: 'A' }),
+    insertCommand(f, { trackId: f.v1, start: sec(4), duration: sec(4), sourceIn: sec(2), name: 'B' }),
+  );
+}
+
+function clipIds(p: Project, trackId: string): readonly ClipId[] {
+  return p.tracks[trackId as never]!.clipIds;
+}
+
+function addTransition(p: Project, trackId: string, transitionType?: string): Project {
+  const [from, to] = clipIds(p, trackId);
+  return runFrom(f, p, {
+    type: 'addTransition',
+    fromClipId: from!,
+    toClipId: to!,
+    duration: sec(2),
+    ...(transitionType ? { transitionType } : {}),
+  });
+}
+
+describe('wipes', () => {
+  it('keeps the incoming clip opaque and masks it instead', () => {
+    const p = addTransition(videoPair(), f.v1, 'wipe.right');
+    const layers = renderListAt(p, f.seqId, sec(4));
+    expect(layers).toHaveLength(2);
+
+    const [outgoing, incoming] = layers;
+    expect(outgoing!.opacity).toBe(1);
+    expect(outgoing!.wipe).toBeNull();
+    // A dissolve would put 0.5 here; a wipe reveals at full strength.
+    expect(incoming!.opacity).toBe(1);
+    expect(incoming!.wipe).toEqual({ direction: 'right', progress: 0.5 });
+  });
+
+  it('carries the direction through to the layer', () => {
+    for (const [type, direction] of [
+      ['wipe.left', 'left'],
+      ['wipe.down', 'down'],
+      ['wipe.up', 'up'],
+      ['wipe.iris', 'iris'],
+    ] as const) {
+      const p = addTransition(videoPair(), f.v1, type);
+      const layers = renderListAt(p, f.seqId, sec(4));
+      expect(layers[1]!.wipe?.direction).toBe(direction);
+    }
+  });
+
+  it('leaves a dissolve with no wipe at all', () => {
+    const p = addTransition(videoPair(), f.v1);
+    const layers = renderListAt(p, f.seqId, sec(4));
+    expect(layers.every((l) => l.wipe === null)).toBe(true);
+    expect(layers[1]!.opacity).toBeCloseTo(0.5, 6);
+  });
+
+  it('refuses a type it cannot draw, rather than silently dissolving', () => {
+    expect(() => addTransition(videoPair(), f.v1, 'wipe.diagonal')).toThrow(ModelError);
+  });
+});
+
+describe('audio crossfade', () => {
+  /** Two adjacent 4 s audio clips on A1, both with handles. */
+  function audioPair(): Project {
+    return run(
+      f,
+      insertCommand(f, {
+        trackId: f.a1, kind: 'audio', start: sec(0), duration: sec(4), sourceIn: sec(2), name: 'A',
+      }),
+      insertCommand(f, {
+        trackId: f.a1, kind: 'audio', start: sec(4), duration: sec(4), sourceIn: sec(2), name: 'B',
+      }),
+    );
+  }
+
+  it('is allowed on an audio track', () => {
+    const p = addTransition(audioPair(), f.a1);
+    expect(Object.values(p.transitions)).toHaveLength(1);
+    assertValidProject(p);
+  });
+
+  it('reaches past both clips into their handles', () => {
+    const p = addTransition(audioPair(), f.a1);
+    const [a, b] = clipIds(p, f.a1).map((id) => p.clips[id]!);
+
+    // The cut is at 4 s and the transition spans 3 → 5.
+    const outgoing = audibleClipRange(p, a!);
+    expect(T.toSeconds(T.rangeEnd(outgoing.range))).toBe(5); // plays 1 s past its out point
+    expect(outgoing.crossfadeOut).not.toBeNull();
+    expect(outgoing.crossfadeIn).toBeNull();
+
+    const incoming = audibleClipRange(p, b!);
+    expect(T.toSeconds(incoming.range.start)).toBe(3); // starts 1 s before its in point
+    expect(incoming.crossfadeIn).not.toBeNull();
+    expect(incoming.crossfadeOut).toBeNull();
+  });
+
+  it('puts both clips in the mix during the overlap', () => {
+    const p = addTransition(audioPair(), f.a1);
+    // A 0.5 s window inside the transition: without the handles only B would be here.
+    const segments = audioSegments(p, f.seqId, T.rangeFromBounds(sec(7, 2), sec(4)));
+    expect(segments.map((s) => s.clip.name).sort()).toEqual(['A', 'B']);
+
+    const outgoing = segments.find((s) => s.clip.name === 'A')!;
+    expect(outgoing.crossfadeOut).not.toBeNull();
+    // Reading past its out point: 2 s in-point + 3.5 s elapsed.
+    expect(T.toSeconds(outgoing.sourceStart)).toBe(5.5);
+  });
+
+  it('leaves an ordinary cut with no crossfade marked', () => {
+    const p = audioPair();
+    const segments = audioSegments(p, f.seqId, T.rangeFromBounds(sec(0), sec(8)));
+    expect(segments).toHaveLength(2);
+    expect(segments.every((s) => s.crossfadeIn === null && s.crossfadeOut === null)).toBe(true);
+  });
+});
+
+describe('linked picture and sound', () => {
+  /**
+   * A video clip and its own audio, split down the middle so both tracks have the
+   * same cut — exactly what dropping a clip and cutting it produces.
+   */
+  function linkedPair(): Project {
+    const linkGroupId = 'lg_test';
+    const p = run(
+      f,
+      {
+        type: 'insertClip',
+        trackId: f.v1,
+        mode: 'overwrite',
+        clip: { kind: 'video', assetId: f.assetId, start: sec(0), duration: sec(8), sourceIn: sec(1), linkGroupId },
+      },
+      {
+        type: 'insertClip',
+        trackId: f.a1,
+        mode: 'overwrite',
+        clip: { kind: 'audio', assetId: f.assetId, start: sec(0), duration: sec(8), sourceIn: sec(1), linkGroupId },
+      },
+    );
+    return runFrom(f, p, { type: 'splitClips', trackIds: [f.v1, f.a1], at: sec(4) });
+  }
+
+  it('finds the sound cut underneath a picture cut', () => {
+    const p = linkedPair();
+    const [va, vb] = clipIds(p, f.v1).map((id) => p.clips[id]!);
+    const cuts = pairedCuts(p, va!, vb!);
+
+    expect(cuts).toHaveLength(2);
+    const tracks = cuts.map((c) => c.from.trackId).sort();
+    expect(tracks).toEqual([f.a1, f.v1].sort());
+  });
+
+  it('does not pair unrelated clips that merely sit next to each other', () => {
+    const p = videoPair(); // no links at all
+    const [a, b] = clipIds(p, f.v1).map((id) => p.clips[id]!);
+    expect(pairedCuts(p, a!, b!)).toHaveLength(1);
+  });
+
+  it('crossfades the sound when the picture dissolves', () => {
+    const p = linkedPair();
+    const [va, vb] = clipIds(p, f.v1);
+
+    // What the UI issues: one addTransition per paired cut, in a single batch.
+    const cuts = pairedCuts(p, p.clips[va!]!, p.clips[vb!]!);
+    const withTransitions = runFrom(
+      f,
+      p,
+      ...cuts.map((cut) => ({
+        type: 'addTransition' as const,
+        fromClipId: cut.from.id,
+        toClipId: cut.to.id,
+        duration: sec(1),
+      })),
+    );
+
+    const transitions = Object.values(withTransitions.transitions) as Transition[];
+    expect(transitions).toHaveLength(2);
+    expect(transitions.map((t) => t.trackId).sort()).toEqual([f.a1, f.v1].sort());
+
+    // The picture blends...
+    expect(renderListAt(withTransitions, f.seqId, sec(4))).toHaveLength(2);
+    // ...and so does the sound, instead of cutting hard underneath it.
+    const segments = audioSegments(withTransitions, f.seqId, T.rangeFromBounds(sec(0), sec(8)));
+    expect(segments.filter((s) => s.crossfadeIn ?? s.crossfadeOut)).toHaveLength(2);
+    assertValidProject(withTransitions);
+  });
+});

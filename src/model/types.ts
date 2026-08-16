@@ -211,9 +211,40 @@ export interface EffectInstance {
   readonly params: ParamMap;
 }
 
+/**
+ * How a wipe's edge travels across the frame. `iris` opens from the centre.
+ *
+ * Named for the direction the boundary moves, so `right` reveals the incoming
+ * clip starting at the left edge.
+ */
+export type WipeDirection = 'right' | 'left' | 'down' | 'up' | 'iris';
+
+/** A layer being revealed behind a moving edge rather than faded up. */
+export interface LayerWipe {
+  readonly direction: WipeDirection;
+  /** 0 = fully hidden, 1 = fully revealed. */
+  readonly progress: number;
+}
+
+/**
+ * Transition types the renderer knows. Anything else falls back to a dissolve —
+ * `transitionType` stays a plain string so a project written by a later version
+ * still loads, rather than failing validation on a type this build cannot draw.
+ */
+export const TRANSITION_TYPES = [
+  'dissolve',
+  'wipe.right',
+  'wipe.left',
+  'wipe.down',
+  'wipe.up',
+  'wipe.iris',
+] as const;
+
+export type TransitionType = (typeof TRANSITION_TYPES)[number];
+
 export interface Transition {
   readonly id: TransitionId;
-  readonly transitionType: string; // e.g. 'dissolve', 'wipe.left'
+  readonly transitionType: string; // one of TRANSITION_TYPES; see the note there
   readonly trackId: TrackId;
   /** Transition sits across the cut between these two adjacent clips on the same track. */
   readonly fromClipId: ClipId;

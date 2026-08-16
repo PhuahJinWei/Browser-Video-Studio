@@ -23,6 +23,7 @@ import type {
   TrackId,
   Transition,
 } from '../types';
+import { TRANSITION_TYPES } from '../types';
 import {
   assertPositiveDuration,
   clearRangeOnTrack,
@@ -681,9 +682,14 @@ function handleAddTransition(
   }
   const track = draftTrack(d, from.trackId);
   assertUnlocked(track);
-  if (track.kind !== 'video') {
-    throw new ModelError('Transitions are video-only for now');
+
+  const transitionType = cmd.transitionType ?? 'dissolve';
+  // Checked on the way in so an unknown type cannot sit in the document quietly
+  // rendering as a dissolve. Loading still tolerates one, for forward compatibility.
+  if (!(TRANSITION_TYPES as readonly string[]).includes(transitionType)) {
+    throw new ModelError(`Unknown transition type "${transitionType}"`);
   }
+  // Audio tracks crossfade regardless of the type; there is nothing to wipe.
   if (!T.eq(clipEnd(from), to.start)) {
     throw new ModelError(`"${from.name}" and "${to.name}" are not adjacent`);
   }
@@ -702,7 +708,7 @@ function handleAddTransition(
   const id = ids.transition();
   d.transitions[id] = {
     id,
-    transitionType: cmd.transitionType ?? 'dissolve',
+    transitionType,
     trackId: track.id,
     fromClipId: from.id,
     toClipId: to.id,
@@ -724,6 +730,19 @@ function handleRemoveTransition(
     throw new ModelError('That transition no longer exists');
   }
   deleteTransition(d, cmd.transitionId);
+}
+
+function handleSetTransitionType(
+  d: Draft,
+  cmd: Extract<Command, { type: 'setTransitionType' }>,
+): void {
+  const transition = d.transitions[cmd.transitionId];
+  if (!transition) throw new ModelError('That transition no longer exists');
+  if (!(TRANSITION_TYPES as readonly string[]).includes(cmd.transitionType)) {
+    throw new ModelError(`Unknown transition type "${cmd.transitionType}"`);
+  }
+  assertUnlocked(draftTrack(d, transition.trackId));
+  d.transitions[transition.id] = { ...transition, transitionType: cmd.transitionType };
 }
 
 function handleSetTransitionDuration(
@@ -783,6 +802,8 @@ export function runCommand(d: Draft, command: Command, ids: IdSource): void {
       return handleRemoveTransition(d, command);
     case 'setTransitionDuration':
       return handleSetTransitionDuration(d, command);
+    case 'setTransitionType':
+      return handleSetTransitionType(d, command);
     case 'setClipSpeed':
       return handleSetClipSpeed(d, command);
     case 'unlinkClips':

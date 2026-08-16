@@ -99,11 +99,28 @@ function applyGainAutomation(
   const trackGainDb = track ? evalNumber(track.gainDb, T.TIME_ZERO) : 0;
   const trackPan = track ? evalNumber(track.pan, T.TIME_ZERO) : 0;
 
+  /**
+   * Where a transition puts this clip on its curve.
+   *
+   * Equal power, not linear. Audio *sums* where video composites one layer over
+   * another, so both sides have to ramp — and two uncorrelated signals at 0.5
+   * each sum to about −3 dB of perceived level, an audible dip in the middle of
+   * every crossfade. cos/sin keeps the summed power constant instead.
+   */
+  const crossfadeGain = (span: TimeRange, timeline: Time, rising: boolean): number => {
+    const progress = Math.min(1, Math.max(0, T.ratio(T.sub(timeline, span.start), span.duration)));
+    const quarterTurn = (progress * Math.PI) / 2;
+    return rising ? Math.sin(quarterTurn) : Math.cos(quarterTurn);
+  };
+
   /** Combined gain at a timeline time, including fades. */
   const gainAt = (timeline: Time): number => {
     const relative = T.sub(timeline, clip.start);
     const clipDb = evalNumber(clip.gainDb, relative);
     let value = dbToGain(clipDb + clipEffectGain + trackGainDb + trackEffectGain);
+
+    if (segment.crossfadeIn) value *= crossfadeGain(segment.crossfadeIn, timeline, true);
+    if (segment.crossfadeOut) value *= crossfadeGain(segment.crossfadeOut, timeline, false);
 
     // Fades are linear on amplitude, measured from the clip's own edges.
     if (T.isPositive(clip.fadeIn)) {
@@ -128,7 +145,9 @@ function applyGainAutomation(
     clip.gainDb.kind === 'keyframed' ||
     clip.pan.kind === 'keyframed' ||
     T.isPositive(clip.fadeIn) ||
-    T.isPositive(clip.fadeOut);
+    T.isPositive(clip.fadeOut) ||
+    segment.crossfadeIn !== null ||
+    segment.crossfadeOut !== null;
 
   if (!isAnimated) {
     gain.gain.value = gainAt(startTime);

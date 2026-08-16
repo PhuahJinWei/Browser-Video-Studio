@@ -20,6 +20,7 @@ import type {
   ClipId,
   Crop,
   EffectInstance,
+  LayerWipe,
   Marker,
   Project,
   Sequence,
@@ -33,6 +34,7 @@ import type {
   Transform2D,
   Transition,
   VideoClip,
+  WipeDirection,
 } from './types';
 
 export class ModelError extends Error {
@@ -339,6 +341,8 @@ export interface RenderLayer {
   readonly opacity: number;
   readonly crop: Crop;
   readonly blendMode: BlendMode;
+  /** Set while a wipe transition is revealing this layer. */
+  readonly wipe: LayerWipe | null;
   /** Track-level effects apply after the clip's own stack. */
   readonly effects: readonly EffectInstance[];
   readonly trackEffects: readonly EffectInstance[];
@@ -363,7 +367,7 @@ export function renderListAt(p: Project, sequenceId: SequenceId, at: Time): read
   const layers: RenderLayer[] = [];
 
   for (const trackId of visibleTrackIds(p, sequenceId)) {
-    for (const { clip, opacityScale } of trackLayersAt(p, trackId, at)) {
+    for (const { clip, opacityScale, wipe } of trackLayersAt(p, trackId, at)) {
       if (!clip.enabled || !isVisualClip(clip)) continue;
 
       const rel = clipRelativeTime(clip, at);
@@ -376,6 +380,7 @@ export function renderListAt(p: Project, sequenceId: SequenceId, at: Time): read
         // Generated layers already fill the frame, so there is nothing to crop.
         crop: isSyntheticClip(clip) ? NO_CROP : evalCrop(clip.crop, rel),
         blendMode: clip.kind === 'title' ? 'normal' : clip.blendMode,
+        wipe,
         effects: resolveEffects(p, clip.effects),
         trackEffects: resolveEffects(p, getTrack(p, trackId).effects),
       });
@@ -389,7 +394,18 @@ interface TrackLayer {
   readonly clip: Clip;
   /** Multiplied into the clip's own opacity. This is what mixes a dissolve. */
   readonly opacityScale: number;
+  /** Set instead of `opacityScale` when the transition is a wipe. */
+  readonly wipe: LayerWipe | null;
 }
+
+/** Transition types that reveal behind a moving edge rather than fading. */
+const WIPE_DIRECTIONS: Readonly<Record<string, WipeDirection>> = {
+  'wipe.right': 'right',
+  'wipe.left': 'left',
+  'wipe.down': 'down',
+  'wipe.up': 'up',
+  'wipe.iris': 'iris',
+};
 
 /**
  * What one track contributes at an instant: normally a single clip, but two
@@ -398,17 +414,31 @@ interface TrackLayer {
 function trackLayersAt(p: Project, trackId: TrackId, at: Time): readonly TrackLayer[] {
   const active = activeTransitionAt(p, trackId, at);
   if (active) {
+    const direction = WIPE_DIRECTIONS[active.transition.transitionType];
+    if (direction) {
+      // A wipe hides the incoming clip behind an edge instead of fading it, so
+      // it stays fully opaque and the mask does the work.
+      return [
+        { clip: active.from, opacityScale: 1, wipe: null },
+        {
+          clip: active.to,
+          opacityScale: 1,
+          wipe: { direction, progress: active.progress },
+        },
+      ];
+    }
+
     // Only the incoming clip ramps. Fading both would darken the middle of the
     // dissolve: compositing `over` twice gives A(1-p)² + Bp, where a cross
     // dissolve is A(1-p) + Bp. Holding the outgoing clip opaque and letting the
     // incoming one fade up over it produces exactly the latter.
     return [
-      { clip: active.from, opacityScale: 1 },
-      { clip: active.to, opacityScale: active.progress },
+      { clip: active.from, opacityScale: 1, wipe: null },
+      { clip: active.to, opacityScale: active.progress, wipe: null },
     ];
   }
   const clip = clipAt(p, trackId, at);
-  return clip ? [{ clip, opacityScale: 1 }] : [];
+  return clip ? [{ clip, opacityScale: 1, wipe: null }] : [];
 }
 
 // ---------------------------------------------------------------------------
@@ -423,8 +453,47 @@ export interface AudioSegment {
   /** Source time matching `timelineRange.start`. */
   readonly sourceStart: Time;
   readonly speed: number;
+  /** Span over which this clip is fading up as a transition's incoming side. */
+  readonly crossfadeIn: TimeRange | null;
+  /** Span over which it is fading away as the outgoing side. */
+  readonly crossfadeOut: TimeRange | null;
   readonly effects: readonly EffectInstance[];
   readonly trackEffects: readonly EffectInstance[];
+}
+
+/**
+ * When a clip can be heard, which reaches past its own edges wherever a
+ * transition overlaps it — the outgoing side keeps playing into its tail handle
+ * and the incoming side starts early out of its head handle.
+ */
+export function audibleClipRange(
+  p: Project,
+  clip: Clip,
+): {
+  readonly range: TimeRange;
+  readonly crossfadeIn: TimeRange | null;
+  readonly crossfadeOut: TimeRange | null;
+} {
+  let start = clip.start;
+  let end = clipEnd(clip);
+  let crossfadeIn: TimeRange | null = null;
+  let crossfadeOut: TimeRange | null = null;
+
+  for (const transition of trackTransitions(p, clip.trackId)) {
+    const span = transitionSpan(p, transition);
+    if (!span) continue;
+
+    if (transition.toClipId === clip.id) {
+      crossfadeIn = span;
+      start = T.min(start, span.start);
+    }
+    if (transition.fromClipId === clip.id) {
+      crossfadeOut = span;
+      end = T.max(end, T.rangeEnd(span));
+    }
+  }
+
+  return { range: T.rangeFromBounds(start, end), crossfadeIn, crossfadeOut };
 }
 
 /**
@@ -445,9 +514,13 @@ export function audioSegments(
     const track = getTrack(p, trackId);
     const trackEffects = resolveEffects(p, track.effects);
 
-    for (const clip of clipsInRange(p, trackId, range)) {
+    // Every clip on the track, not just those overlapping the range: a clip just
+    // outside it can still be audible inside it through a transition handle.
+    for (const clip of trackClips(p, trackId)) {
       if (!clip.enabled || !isAudioClip(clip)) continue;
-      const overlap = T.intersect(clipRange(clip), range);
+
+      const audible = audibleClipRange(p, clip);
+      const overlap = T.intersect(audible.range, range);
       if (!overlap) continue;
 
       segments.push({
@@ -456,6 +529,8 @@ export function audioSegments(
         timelineRange: overlap,
         sourceStart: clipSourceTimeAt(clip, overlap.start),
         speed: clip.speed,
+        crossfadeIn: audible.crossfadeIn,
+        crossfadeOut: audible.crossfadeOut,
         effects: resolveEffects(p, clip.effects),
         trackEffects,
       });
@@ -532,6 +607,44 @@ export function transitionBetween(
       (t) => t.fromClipId === fromClipId && t.toClipId === toClipId,
     ) ?? null
   );
+}
+
+/**
+ * Every cut that should carry the same transition as this one.
+ *
+ * A linked A/V pair is edited as one unit, so a dissolve on the picture has to
+ * take the sound with it — otherwise the image blends over a hard audio cut.
+ */
+export function pairedCuts(
+  p: Project,
+  from: Clip,
+  to: Clip,
+): readonly { readonly from: Clip; readonly to: Clip }[] {
+  const cuts = [{ from, to }];
+  if (!from.linkGroupId || !to.linkGroupId) return cuts;
+
+  for (const candidate of Object.values(p.clips)) {
+    if (candidate.id === from.id) continue;
+    if (candidate.linkGroupId !== from.linkGroupId) continue;
+
+    // The counterpart's own next clip must be the counterpart of `to`, or these
+    // are two unrelated cuts that merely happen to involve linked clips.
+    const { next } = adjacentClips(p, candidate);
+    if (next && next.linkGroupId === to.linkGroupId) cuts.push({ from: candidate, to: next });
+  }
+  return cuts;
+}
+
+/** A transition together with the ones on its paired cuts. */
+export function pairedTransitions(p: Project, transition: Transition): readonly Transition[] {
+  const from = p.clips[transition.fromClipId];
+  const to = p.clips[transition.toClipId];
+  if (!from || !to) return [transition];
+
+  const found = pairedCuts(p, from, to)
+    .map((cut) => transitionBetween(p, cut.from.id, cut.to.id))
+    .filter((t): t is Transition => t !== null);
+  return found.length > 0 ? found : [transition];
 }
 
 export interface ActiveTransition {

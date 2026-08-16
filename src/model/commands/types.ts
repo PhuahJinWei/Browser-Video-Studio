@@ -209,6 +209,11 @@ export type Command =
       readonly alignment?: Transition['alignment'];
     }
   | { readonly type: 'removeTransition'; readonly transitionId: TransitionId }
+  | {
+      readonly type: 'setTransitionType';
+      readonly transitionId: TransitionId;
+      readonly transitionType: string;
+    }
   /** Also shortened to fit. */
   | {
       readonly type: 'setTransitionDuration';
