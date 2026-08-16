@@ -6,61 +6,91 @@ import { IconAudio, IconFile, IconPlus, IconTrash, IconVideo } from './Icons';
 import { useStudio } from './store';
 import { ASSET_DRAG_TYPE } from './Timeline';
 
-/** Import surface and asset list. Nothing here uploads anything. */
+/**
+ * Import surface and asset list. Nothing here uploads anything.
+ *
+ * The whole panel is the drop target rather than a dedicated box, so a file can be
+ * let go anywhere over it.
+ */
 export function MediaBin(): React.JSX.Element {
   const history = useStudio((s) => s.history);
   const importFiles = useStudio((s) => s.importFiles);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const importViaPicker = useStudio((s) => s.importViaPicker);
+  const menu = useContextMenu();
   const [dragOver, setDragOver] = useState(false);
+  // Drag events fire for every child crossed, so a plain leave handler flickers.
+  // Counting enters and leaves is what keeps the highlight steady.
+  const dragDepth = useRef(0);
 
   const assets = Object.values(history.present.project.assets);
 
-  const handleFiles = (list: FileList | null): void => {
-    if (!list || list.length === 0) return;
-    void importFiles([...list]);
-  };
+  const carriesFiles = (event: React.DragEvent): boolean =>
+    event.dataTransfer.types.includes('Files');
 
   return (
-    <div className="panel">
-      <div className="panel-head">Media</div>
-      <div className="panel-body">
-        <div
-          className={`dropzone${dragOver ? ' over' : ''}`}
-          onClick={() => inputRef.current?.click()}
-          onDragOver={(event) => {
-            event.preventDefault();
-            setDragOver(true);
-          }}
-          onDragLeave={() => setDragOver(false)}
-          onDrop={(event) => {
-            event.preventDefault();
-            setDragOver(false);
-            handleFiles(event.dataTransfer.files);
-          }}
-        >
-          Drop media here
-          <br />
-          or click to browse
-        </div>
-        <input
-          ref={inputRef}
-          type="file"
-          accept="video/*,audio/*"
-          multiple
-          hidden
-          onChange={(event) => {
-            handleFiles(event.target.files);
-            event.target.value = '';
-          }}
-        />
-
-        <div style={{ marginTop: 10 }}>
-          {assets.length === 0 && <p className="hint">No media imported yet.</p>}
-          {assets.map((asset) => (
-            <AssetCard key={asset.id} asset={asset} />
-          ))}
-        </div>
+    <div
+      className={`panel media-bin${dragOver ? ' drag-over' : ''}`}
+      onDragEnter={(event) => {
+        if (!carriesFiles(event)) return;
+        dragDepth.current += 1;
+        setDragOver(true);
+      }}
+      onDragOver={(event) => {
+        if (!carriesFiles(event)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'copy';
+      }}
+      onDragLeave={(event) => {
+        if (!carriesFiles(event)) return;
+        dragDepth.current -= 1;
+        if (dragDepth.current <= 0) {
+          dragDepth.current = 0;
+          setDragOver(false);
+        }
+      }}
+      onDrop={(event) => {
+        if (!carriesFiles(event)) return;
+        event.preventDefault();
+        dragDepth.current = 0;
+        setDragOver(false);
+        const files = [...event.dataTransfer.files];
+        if (files.length > 0) void importFiles(files);
+      }}
+      onContextMenu={(event) => {
+        if (event.target !== event.currentTarget && !(event.target as HTMLElement).closest('.bin-empty')) {
+          return;
+        }
+        menu.open(event, [
+          { label: 'Import media…', icon: <IconPlus />, onSelect: () => void importViaPicker() },
+        ]);
+      }}
+    >
+      <div className="panel-head">
+        <span>Media</span>
+        <span className="spacer" style={{ flex: 1 }} />
+        <button className="icon" title="Import media…" onClick={() => void importViaPicker()}>
+          <IconPlus />
+        </button>
       </div>
+
+      <div className="panel-body">
+        {assets.length === 0 ? (
+          <button className="bin-empty" onClick={() => void importViaPicker()}>
+            <IconFile size={22} />
+            <strong>Drop media anywhere here</strong>
+            <span>or click to browse</span>
+          </button>
+        ) : (
+          assets.map((asset) => <AssetCard key={asset.id} asset={asset} />)
+        )}
+      </div>
+
+      {dragOver && (
+        <div className="bin-drop-overlay">
+          <IconPlus size={20} />
+          Drop to import
+        </div>
+      )}
     </div>
   );
 }

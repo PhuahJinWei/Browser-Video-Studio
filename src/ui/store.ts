@@ -87,6 +87,7 @@ export interface StudioState {
 
   attachEngine: (canvas: HTMLCanvasElement) => Promise<void>;
   importFiles: (files: readonly File[]) => Promise<void>;
+  importViaPicker: () => Promise<void>;
   addAssetToTimeline: (assetId: AssetId) => Promise<void>;
   addTitle: (text: string) => void;
   dropAssetOnTrack: (assetId: AssetId, trackId: TrackId, at: Time) => void;
@@ -279,6 +280,29 @@ export const useStudio = create<StudioState>((set, get) => ({
     // Filmstrips and waveforms are built in the background; the timeline picks them
     // up when they land rather than blocking the import on them.
     void get().buildPreviews();
+  },
+
+  /**
+   * Open the system file dialog and import whatever is chosen.
+   *
+   * Built from a detached <input type=file> rather than `showOpenFilePicker`, which
+   * is not available in every context the app runs in (embedded frames especially)
+   * and would need a separate fallback anyway.
+   */
+  importViaPicker: async () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'video/*,audio/*';
+    input.multiple = true;
+
+    const files = await new Promise<readonly File[]>((resolve) => {
+      input.addEventListener('change', () => resolve(input.files ? [...input.files] : []), { once: true });
+      // A cancelled dialog fires no 'change' event; 'cancel' covers that.
+      input.addEventListener('cancel', () => resolve([]), { once: true });
+      input.click();
+    });
+
+    if (files.length > 0) await get().importFiles(files);
   },
 
   /** Append an asset at the playhead, linking its video and audio parts. */

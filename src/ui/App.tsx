@@ -3,19 +3,10 @@ import { canRun, detectCapabilities, type CapabilityResult } from '../capabiliti
 import * as T from '../model/time';
 import { ContextMenuProvider } from './ContextMenu';
 import { ExportDialog } from './ExportDialog';
-import {
-  IconExport,
-  IconFile,
-  IconGauge,
-  IconRedo,
-  IconRipple,
-  IconSplit,
-  IconText,
-  IconTrash,
-  IconUndo,
-} from './Icons';
+import { IconExport, IconGauge, IconRedo, IconSplit, IconTrash, IconUndo } from './Icons';
 import { Inspector } from './Inspector';
 import { MediaBin } from './MediaBin';
+import { MenuBar } from './MenuBar';
 import { Preview } from './Preview';
 import { Timeline } from './Timeline';
 import { flushAutosave, orderedTrackIds, useStudio } from './store';
@@ -73,9 +64,9 @@ function Studio(): React.JSX.Element {
   const canUndoEdit = useStudio((s) => s.canUndoEdit);
   const canRedoEdit = useStudio((s) => s.canRedoEdit);
   const togglePlay = useStudio((s) => s.togglePlay);
-  const addTitle = useStudio((s) => s.addTitle);
-  const newProject = useStudio((s) => s.newProject);
   const setPlayhead = useStudio((s) => s.setPlayhead);
+  const selectClips = useStudio((s) => s.select);
+  const importViaPicker = useStudio((s) => s.importViaPicker);
   const playhead = useStudio((s) => s.playhead);
   const duration = useStudio((s) => s.duration);
 
@@ -108,6 +99,21 @@ function Studio(): React.JSX.Element {
       if (mod && event.key.toLowerCase() === 'y') {
         event.preventDefault();
         redoEdit();
+        return;
+      }
+      if (mod && event.key.toLowerCase() === 'a') {
+        event.preventDefault();
+        selectClips(Object.keys(project.clips) as never);
+        return;
+      }
+      if (mod && event.key.toLowerCase() === 'i') {
+        event.preventDefault();
+        void importViaPicker();
+        return;
+      }
+      if (mod && event.key.toLowerCase() === 'e') {
+        event.preventDefault();
+        setShowExport(true);
         return;
       }
 
@@ -156,10 +162,12 @@ function Studio(): React.JSX.Element {
     return () => window.removeEventListener('keydown', onKey);
   }, [
     duration,
+    importViaPicker,
     playhead,
     project,
     redoEdit,
     run,
+    selectClips,
     selection,
     sequence.frameRate,
     sequenceId,
@@ -171,76 +179,44 @@ function Studio(): React.JSX.Element {
   return (
     <div className="app">
       <header className="header">
-        <h1>Browser Video Studio</h1>
+        <span className="brand">Browser Video Studio</span>
 
-        {/* Scrollable so a narrow window can never put a control out of reach. */}
+        {/* Shrinkable strip so a narrow window never puts a control out of reach. */}
         <div className="toolbar">
-          <button
-            onClick={() => {
-              if (confirm('Start a new project? Unsaved work in this one is kept on disk.')) {
-                newProject();
-              }
-            }}
-            title="New project"
-          >
-            <IconFile /> New
-          </button>
-          <button
-            onClick={() => {
-              const text = prompt('Title text', 'Hello');
-              if (text) addTitle(text);
-            }}
-            title="Add a title clip at the playhead"
-          >
-            <IconText /> Title
-          </button>
+        <MenuBar onExport={() => setShowExport(true)} />
 
-          <span className="header-divider" />
+        <span className="header-divider" />
 
-          <button
-            className="icon"
-            title="Split all tracks at the playhead (S)"
-            onClick={() =>
-              run(
-                { type: 'splitClips', trackIds: orderedTrackIds(project, sequenceId), at: playhead() },
-                'Split at playhead',
-              )
-            }
-          >
-            <IconSplit />
-          </button>
-          <button
-            className="icon"
-            disabled={selection.length === 0}
-            title="Ripple delete: remove the selection and close the gap"
-            onClick={() =>
-              run({ type: 'removeClips', clipIds: selection, mode: 'ripple' }, 'Ripple delete')
-            }
-          >
-            <IconRipple />
-          </button>
-          <button
-            className="icon"
-            disabled={selection.length === 0}
-            title="Delete the selection (Del)"
-            onClick={() =>
-              run({ type: 'removeClips', clipIds: selection, mode: 'lift' }, 'Delete clips')
-            }
-          >
-            <IconTrash />
-          </button>
+        {/* The few actions worth reaching without opening a menu. */}
+        <button className="icon" disabled={!canUndoEdit()} onClick={undoEdit} title="Undo (Ctrl+Z)">
+          <IconUndo />
+        </button>
+        <button className="icon" disabled={!canRedoEdit()} onClick={redoEdit} title="Redo (Ctrl+Shift+Z)">
+          <IconRedo />
+        </button>
+        <button
+          className="icon"
+          title="Split all tracks at the playhead (S)"
+          onClick={() =>
+            run(
+              { type: 'splitClips', trackIds: orderedTrackIds(project, sequenceId), at: playhead() },
+              'Split at playhead',
+            )
+          }
+        >
+          <IconSplit />
+        </button>
+        <button
+          className="icon"
+          disabled={selection.length === 0}
+          title="Delete the selection (Del)"
+          onClick={() => run({ type: 'removeClips', clipIds: selection, mode: 'lift' }, 'Delete clips')}
+        >
+          <IconTrash />
+        </button>
 
-          <span className="header-divider" />
-
-          <button className="icon" disabled={!canUndoEdit()} onClick={undoEdit} title="Undo (Ctrl+Z)">
-            <IconUndo />
-          </button>
-          <button className="icon" disabled={!canRedoEdit()} onClick={redoEdit} title="Redo (Ctrl+Shift+Z)">
-            <IconRedo />
-          </button>
         </div>
 
-        {/* Pinned: these must stay reachable at any width. */}
         <button
           className={`icon${showTelemetry ? ' on' : ''}`}
           onClick={toggleTelemetry}
@@ -248,7 +224,7 @@ function Studio(): React.JSX.Element {
         >
           <IconGauge />
         </button>
-        <button className="primary" onClick={() => setShowExport(true)} title="Export the sequence">
+        <button className="primary" onClick={() => setShowExport(true)} title="Export the sequence (Ctrl+E)">
           <IconExport /> Export
         </button>
       </header>

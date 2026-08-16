@@ -125,6 +125,46 @@ input[type='range'] {
   min-width: 0;
 }
 
+/* ------------------------------------------------------------------ menubar */
+
+.menubar {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  flex: none;
+}
+.menubar-item {
+  position: relative;
+}
+.menubar-title {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 4px 9px;
+  color: var(--text);
+  font-size: 12.5px;
+}
+.menubar-title:hover {
+  background: var(--panel-2);
+  border-color: transparent;
+}
+.menubar-title.open {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+.menubar-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 40;
+  min-width: 232px;
+  padding: 4px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+
 /* The middle button strip absorbs the squeeze and scrolls if it must. */
 .toolbar {
   display: flex;
@@ -132,7 +172,10 @@ input[type='range'] {
   gap: 6px;
   flex: 1 1 auto;
   min-width: 0;
+  /* `visible` on the block axis lets dropdowns escape downward while the strip
+     still scrolls sideways. Plain `overflow-x: auto` would clip them. */
   overflow-x: auto;
+  overflow-y: visible;
   scrollbar-width: none;
   padding: 6px 0;
 }
@@ -143,11 +186,13 @@ input[type='range'] {
 .header > .timecode {
   flex: none;
 }
-.header h1 {
-  font-size: 14px;
+.header .brand {
+  font-size: 13px;
   font-weight: 600;
-  margin: 0 12px 0 0;
   white-space: nowrap;
+  color: var(--text);
+  padding-right: 4px;
+  flex: none;
 }
 .header .timecode {
   font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
@@ -195,6 +240,54 @@ input[type='range'] {
 }
 
 /* -------------------------------------------------------------------- bin */
+
+/* The whole panel is the drop target, so it needs to anchor the overlay. */
+.media-bin {
+  position: relative;
+}
+.media-bin.drag-over {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+}
+.bin-drop-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(76, 141, 255, 0.14);
+  color: var(--text);
+  font-weight: 500;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.bin-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 26px 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  text-align: center;
+}
+.bin-empty:hover {
+  border-color: var(--accent);
+  color: var(--text);
+  background: rgba(76, 141, 255, 0.06);
+}
+.bin-empty strong {
+  font-weight: 500;
+}
+.bin-empty span {
+  font-size: 11.5px;
+}
 
 .bin-item {
   display: flex;
@@ -280,19 +373,6 @@ input[type='range'] {
   margin-top: 4px;
 }
 
-.dropzone {
-  border: 1px dashed var(--line-strong);
-  border-radius: 8px;
-  padding: 18px 10px;
-  text-align: center;
-  color: var(--muted);
-  cursor: pointer;
-}
-.dropzone.over {
-  border-color: var(--accent);
-  color: var(--text);
-  background: rgba(76, 141, 255, 0.08);
-}
 
 /* ---------------------------------------------------------------- preview */
 

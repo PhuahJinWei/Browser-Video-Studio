@@ -16,6 +16,8 @@ export interface MenuItem {
   /** Shortcut hint shown right-aligned, e.g. "S". */
   readonly hint?: string;
   readonly danger?: boolean;
+  /** Shows a tick, for entries that toggle something on and off. */
+  readonly checked?: boolean;
 }
 
 export type MenuEntry = MenuItem | 'separator';
@@ -56,6 +58,44 @@ export function ContextMenuProvider({ children }: { children: React.ReactNode })
       {children}
       {menu && <Menu state={menu} onClose={close} />}
     </ContextMenuContext.Provider>
+  );
+}
+
+/**
+ * Renders a list of entries. Shared by the right-click menu and the menu bar so
+ * both look and behave identically.
+ */
+export function renderMenuEntries(
+  entries: readonly MenuEntry[],
+  onClose: () => void,
+): React.ReactNode {
+  return entries.map((entry, index) =>
+    entry === 'separator' ? (
+      <div key={`sep-${index}`} className="menu-separator" />
+    ) : (
+      <button
+        key={entry.label}
+        type="button"
+        className={`menu-item${entry.danger ? ' danger' : ''}`}
+        disabled={entry.disabled ?? false}
+        onClick={() => {
+          onClose();
+          entry.onSelect();
+        }}
+      >
+        <span className="menu-icon">{entry.checked ? <Tick /> : entry.icon}</span>
+        <span className="menu-label">{entry.label}</span>
+        {entry.hint && <span className="menu-hint">{entry.hint}</span>}
+      </button>
+    ),
+  );
+}
+
+function Tick(): React.JSX.Element {
+  return (
+    <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M4 12l5 5L20 6" />
+    </svg>
   );
 }
 
@@ -100,26 +140,7 @@ function Menu({ state, onClose }: { state: MenuState; onClose: () => void }): Re
       style={{ left: position.x, top: position.y }}
       onContextMenu={(event) => event.preventDefault()}
     >
-      {state.entries.map((entry, index) =>
-        entry === 'separator' ? (
-          <div key={`sep-${index}`} className="menu-separator" />
-        ) : (
-          <button
-            key={entry.label}
-            type="button"
-            className={`menu-item${entry.danger ? ' danger' : ''}`}
-            disabled={entry.disabled ?? false}
-            onClick={() => {
-              onClose();
-              entry.onSelect();
-            }}
-          >
-            <span className="menu-icon">{entry.icon}</span>
-            <span className="menu-label">{entry.label}</span>
-            {entry.hint && <span className="menu-hint">{entry.hint}</span>}
-          </button>
-        ),
-      )}
+      {renderMenuEntries(state.entries, onClose)}
     </div>
   );
 }
