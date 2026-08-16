@@ -18,6 +18,7 @@ import {
   draftSequence,
   draftTrack,
   type Draft,
+  type LinkRemap,
   ownerOfEffect,
   pruneBrokenTransitions,
   putClip,
@@ -102,12 +103,24 @@ function assertUnlocked(track: Track): void {
   if (track.locked) throw new ModelError(`Track "${track.name}" is locked`);
 }
 
-/** Split whatever clip straddles `at` on a track, so the point becomes an edit point. */
-function splitAcross(d: Draft, trackId: TrackId, at: Time, ids: IdSource): void {
+/**
+ * Split whatever clip straddles `at` on a track, so the point becomes an edit point.
+ *
+ * `linkRemap` is shared across every track in one command so a video clip and its
+ * linked audio produce right-hand halves that stay linked to each other — but not to
+ * the halves on the left of the cut.
+ */
+function splitAcross(
+  d: Draft,
+  trackId: TrackId,
+  at: Time,
+  ids: IdSource,
+  linkRemap: LinkRemap,
+): void {
   for (const clipId of [...draftTrack(d, trackId).clipIds]) {
     const clip = draftClip(d, clipId);
     if (T.lt(clip.start, at) && T.gt(clipEnd(clip), at)) {
-      const [left, right] = splitClipAt(d, clip, at, ids);
+      const [left, right] = splitClipAt(d, clip, at, ids, linkRemap);
       d.clips[left.id] = left;
       putClip(d, right);
     }
@@ -181,11 +194,12 @@ function handleInsertClip(d: Draft, cmd: Extract<Command, { type: 'insertClip' }
   assertClipFits(clip, track);
   if (d.clips[clip.id]) throw new ModelError(`Clip "${clip.id}" already exists`);
 
+  const linkRemap: LinkRemap = new Map();
   if ((cmd.mode ?? 'overwrite') === 'insert') {
-    splitAcross(d, cmd.trackId, clip.start, ids);
+    splitAcross(d, cmd.trackId, clip.start, ids, linkRemap);
     rippleTrack(d, cmd.trackId, clip.start, clip.duration);
   } else {
-    clearRangeOnTrack(d, cmd.trackId, clipRange(clip), ids);
+    clearRangeOnTrack(d, cmd.trackId, clipRange(clip), ids, new Set(), linkRemap);
   }
 
   putClip(d, clip);
@@ -247,11 +261,12 @@ function handleMoveClips(d: Draft, cmd: Extract<Command, { type: 'moveClips' }>,
   }
 
   const movedIds = new Set<ClipId>(moving.map(({ clip }) => clip.id));
+  const linkRemap: LinkRemap = new Map();
   for (const { move, clip } of moving) {
     // A drag can overshoot the start of the timeline; clamp rather than reject.
     const start = T.max(move.toStart, T.TIME_ZERO);
     const placed: Clip = { ...clip, trackId: move.toTrackId, start };
-    clearRangeOnTrack(d, move.toTrackId, clipRange(placed), ids, movedIds);
+    clearRangeOnTrack(d, move.toTrackId, clipRange(placed), ids, movedIds, linkRemap);
     d.clips[placed.id] = placed;
     putClip(d, placed);
   }
@@ -325,9 +340,10 @@ function handleSlipClip(d: Draft, cmd: Extract<Command, { type: 'slipClip' }>): 
 }
 
 function handleSplitClips(d: Draft, cmd: Extract<Command, { type: 'splitClips' }>, ids: IdSource): void {
+  const linkRemap: LinkRemap = new Map();
   for (const trackId of cmd.trackIds) {
     assertUnlocked(draftTrack(d, trackId));
-    splitAcross(d, trackId, cmd.at, ids);
+    splitAcross(d, trackId, cmd.at, ids, linkRemap);
   }
 }
 
@@ -386,6 +402,31 @@ function handleSetClipBlendMode(d: Draft, cmd: Extract<Command, { type: 'setClip
     throw new ModelError(`"${clip.name}" has no blend mode`);
   }
   d.clips[clip.id] = { ...clip, blendMode: cmd.blendMode };
+}
+
+/** Detach audio from video: every clip sharing a group with the given ones goes solo. */
+function handleUnlinkClips(d: Draft, cmd: Extract<Command, { type: 'unlinkClips' }>): void {
+  const groups = new Set<string>();
+  for (const clipId of cmd.clipIds) {
+    const clip = d.clips[clipId];
+    if (clip?.linkGroupId) groups.add(clip.linkGroupId);
+  }
+  if (groups.size === 0) return;
+
+  for (const clip of Object.values(d.clips)) {
+    if (clip.linkGroupId && groups.has(clip.linkGroupId)) {
+      d.clips[clip.id] = { ...clip, linkGroupId: null };
+    }
+  }
+}
+
+function handleLinkClips(d: Draft, cmd: Extract<Command, { type: 'linkClips' }>, ids: IdSource): void {
+  if (cmd.clipIds.length < 2) return;
+  const groupId = `lg_${ids.clip()}`;
+  for (const clipId of cmd.clipIds) {
+    const clip = draftClip(d, clipId);
+    d.clips[clipId] = { ...clip, linkGroupId: groupId };
+  }
 }
 
 function handleSetClipSpeed(d: Draft, cmd: Extract<Command, { type: 'setClipSpeed' }>): void {
@@ -544,6 +585,10 @@ export function runCommand(d: Draft, command: Command, ids: IdSource): void {
       return handleSetClipBlendMode(d, command);
     case 'setClipSpeed':
       return handleSetClipSpeed(d, command);
+    case 'unlinkClips':
+      return handleUnlinkClips(d, command);
+    case 'linkClips':
+      return handleLinkClips(d, command, ids);
     case 'addEffect':
       return handleAddEffect(d, command, ids);
     case 'removeEffect':

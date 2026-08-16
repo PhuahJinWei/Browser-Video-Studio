@@ -312,8 +312,39 @@ export function trimClipIn(clip: Clip, delta: Time): Clip {
   return { ...base, sourceIn: T.add(clip.sourceIn, sourceDelta) } as Clip;
 }
 
+/**
+ * Tracks the new link group each original group maps to during one split command.
+ *
+ * A link group ties a video clip to *its own* audio so they move together. When a
+ * clip is cut, the right-hand halves must form their own group: without this they
+ * keep the original id and the two halves stay welded, so dragging one drags the
+ * other. Sharing one map across a whole command keeps the video and audio halves of
+ * the same cut linked to each other.
+ */
+export type LinkRemap = Map<string, string>;
+
+function remapLinkGroup(
+  linkGroupId: string | null,
+  ids: IdSource,
+  remap: LinkRemap | undefined,
+): string | null {
+  if (!linkGroupId) return null;
+  if (!remap) return `lg_${ids.clip()}`;
+  const existing = remap.get(linkGroupId);
+  if (existing) return existing;
+  const created = `lg_${ids.clip()}`;
+  remap.set(linkGroupId, created);
+  return created;
+}
+
 /** Split a clip at an absolute timeline time; returns [left, right]. */
-export function splitClipAt(d: Draft, clip: Clip, at: Time, ids: IdSource): [Clip, Clip] {
+export function splitClipAt(
+  d: Draft,
+  clip: Clip,
+  at: Time,
+  ids: IdSource,
+  linkRemap?: LinkRemap,
+): [Clip, Clip] {
   const delta = T.sub(at, clip.start);
   const left: Clip = { ...clip, duration: delta };
 
@@ -323,6 +354,7 @@ export function splitClipAt(d: Draft, clip: Clip, at: Time, ids: IdSource): [Cli
     ...rightBase,
     id: rightId,
     effects: cloneEffects(d, clip.effects, T.neg(delta), ids),
+    linkGroupId: remapLinkGroup(clip.linkGroupId, ids, linkRemap),
   };
   return [left, right];
 }
@@ -342,6 +374,7 @@ export function clearRangeOnTrack(
   range: TimeRange,
   ids: IdSource,
   exclude: ReadonlySet<ClipId> = new Set(),
+  linkRemap?: LinkRemap,
 ): void {
   if (T.isZero(range.duration)) return;
   const rangeStart = range.start;
@@ -362,7 +395,7 @@ export function clearRangeOnTrack(
       deleteClip(d, clipId);
     } else if (!coveredAtStart && !coveredAtStop) {
       // The range punches a hole in the middle: keep both ends.
-      const [left, right] = splitClipAt(d, clip, rangeStart, ids);
+      const [left, right] = splitClipAt(d, clip, rangeStart, ids, linkRemap);
       const tail = trimClipIn(right, T.sub(rangeStop, right.start));
       d.clips[left.id] = left;
       putClip(d, tail);

@@ -1,12 +1,24 @@
 import { useEffect, useState } from 'react';
 import { canRun, detectCapabilities, type CapabilityResult } from '../capabilities';
-import { flushAutosave, orderedTrackIds, useStudio } from './store';
+import * as T from '../model/time';
+import { ContextMenuProvider } from './ContextMenu';
 import { ExportDialog } from './ExportDialog';
+import {
+  IconExport,
+  IconFile,
+  IconGauge,
+  IconRedo,
+  IconRipple,
+  IconSplit,
+  IconText,
+  IconTrash,
+  IconUndo,
+} from './Icons';
 import { Inspector } from './Inspector';
 import { MediaBin } from './MediaBin';
-import { Preview, Timecode } from './Preview';
+import { Preview } from './Preview';
 import { Timeline } from './Timeline';
-import * as T from '../model/time';
+import { flushAutosave, orderedTrackIds, useStudio } from './store';
 
 export function App(): React.JSX.Element {
   const [capabilities, setCapabilities] = useState<readonly CapabilityResult[] | null>(null);
@@ -17,7 +29,11 @@ export function App(): React.JSX.Element {
 
   if (!capabilities) return <div className="unsupported">Checking browser capabilities…</div>;
   if (!canRun(capabilities)) return <Unsupported capabilities={capabilities} />;
-  return <Studio />;
+  return (
+    <ContextMenuProvider>
+      <Studio />
+    </ContextMenuProvider>
+  );
 }
 
 function Unsupported({ capabilities }: { capabilities: readonly CapabilityResult[] }): React.JSX.Element {
@@ -65,7 +81,6 @@ function Studio(): React.JSX.Element {
 
   const project = history.present.project;
   const sequence = project.sequences[sequenceId]!;
-  const playing = useStudio((s) => s.telemetry?.playing ?? false);
 
   // Save anything still inside the autosave debounce before the page goes away.
   useEffect(() => {
@@ -153,66 +168,88 @@ function Studio(): React.JSX.Element {
     undoEdit,
   ]);
 
-  const splitAtPlayhead = (): void =>
-    run(
-      { type: 'splitClips', trackIds: orderedTrackIds(project, sequenceId), at: playhead() },
-      'Split at playhead',
-    );
-
   return (
     <div className="app">
       <header className="header">
         <h1>Browser Video Studio</h1>
 
-        <button
-          onClick={() => {
-            if (confirm('Start a new project? Unsaved work in this one is kept on disk.')) {
-              newProject();
+        {/* Scrollable so a narrow window can never put a control out of reach. */}
+        <div className="toolbar">
+          <button
+            onClick={() => {
+              if (confirm('Start a new project? Unsaved work in this one is kept on disk.')) {
+                newProject();
+              }
+            }}
+            title="New project"
+          >
+            <IconFile /> New
+          </button>
+          <button
+            onClick={() => {
+              const text = prompt('Title text', 'Hello');
+              if (text) addTitle(text);
+            }}
+            title="Add a title clip at the playhead"
+          >
+            <IconText /> Title
+          </button>
+
+          <span className="header-divider" />
+
+          <button
+            className="icon"
+            title="Split all tracks at the playhead (S)"
+            onClick={() =>
+              run(
+                { type: 'splitClips', trackIds: orderedTrackIds(project, sequenceId), at: playhead() },
+                'Split at playhead',
+              )
             }
-          }}
-        >
-          New
-        </button>
+          >
+            <IconSplit />
+          </button>
+          <button
+            className="icon"
+            disabled={selection.length === 0}
+            title="Ripple delete: remove the selection and close the gap"
+            onClick={() =>
+              run({ type: 'removeClips', clipIds: selection, mode: 'ripple' }, 'Ripple delete')
+            }
+          >
+            <IconRipple />
+          </button>
+          <button
+            className="icon"
+            disabled={selection.length === 0}
+            title="Delete the selection (Del)"
+            onClick={() =>
+              run({ type: 'removeClips', clipIds: selection, mode: 'lift' }, 'Delete clips')
+            }
+          >
+            <IconTrash />
+          </button>
+
+          <span className="header-divider" />
+
+          <button className="icon" disabled={!canUndoEdit()} onClick={undoEdit} title="Undo (Ctrl+Z)">
+            <IconUndo />
+          </button>
+          <button className="icon" disabled={!canRedoEdit()} onClick={redoEdit} title="Redo (Ctrl+Shift+Z)">
+            <IconRedo />
+          </button>
+        </div>
+
+        {/* Pinned: these must stay reachable at any width. */}
         <button
-          onClick={() => {
-            const text = prompt('Title text', 'Hello');
-            if (text) addTitle(text);
-          }}
+          className={`icon${showTelemetry ? ' on' : ''}`}
+          onClick={toggleTelemetry}
+          title="Toggle the pipeline panel"
         >
-          + Title
+          <IconGauge />
         </button>
-
-        <button onClick={() => void togglePlay()} title="Space">
-          {playing ? '❚❚ Pause' : '▶ Play'}
-        </button>
-        <button onClick={() => setPlayhead(T.TIME_ZERO)} title="Home">
-          ⏮
-        </button>
-        <button onClick={splitAtPlayhead} title="S">
-          Split
-        </button>
-        <button
-          disabled={selection.length === 0}
-          onClick={() => run({ type: 'removeClips', clipIds: selection, mode: 'ripple' }, 'Ripple delete')}
-        >
-          Ripple delete
-        </button>
-
-        <span style={{ width: 8 }} />
-        <button disabled={!canUndoEdit()} onClick={undoEdit} title="Ctrl+Z">
-          Undo
-        </button>
-        <button disabled={!canRedoEdit()} onClick={redoEdit} title="Ctrl+Shift+Z">
-          Redo
-        </button>
-
-        <span className="spacer" />
-        <button className={showTelemetry ? 'primary' : ''} onClick={toggleTelemetry}>
-          Pipeline
-        </button>
-        <Timecode />
-        <button className="primary" onClick={() => setShowExport(true)}>
-          Export
+        <button className="primary" onClick={() => setShowExport(true)} title="Export the sequence">
+          <IconExport /> Export
         </button>
       </header>
 

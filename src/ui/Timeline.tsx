@@ -12,6 +12,28 @@ import type { PreviewCache } from '../engine/previews';
 import { clipEnd, getTrack, isMediaClip, trackClips } from '../model/selectors';
 import * as T from '../model/time';
 import type { Clip, ClipId, Time, Track, TrackId } from '../model/types';
+import { useContextMenu, type MenuEntry } from './ContextMenu';
+import {
+  IconAudio,
+  IconLink,
+  IconMarker,
+  IconNextEdit,
+  IconPlus,
+  IconSkipStart,
+  IconClose,
+  IconEye,
+  IconEyeOff,
+  IconLock,
+  IconMuted,
+  IconRipple,
+  IconSolo,
+  IconSplit,
+  IconTrash,
+  IconUnlink,
+  IconUnlocked,
+  IconVideo,
+  IconVolume,
+} from './Icons';
 import { orderedTrackIds, useStudio } from './store';
 
 const TRACK_HEIGHT = 56;
@@ -47,6 +69,7 @@ export function Timeline(): React.JSX.Element {
   const setZoom = useStudio((s) => s.setZoom);
   const duration = useStudio((s) => s.duration);
   const previews = useStudio((s) => s.previews);
+  const menu = useContextMenu();
   // Previews arrive asynchronously; this re-renders the lanes when one lands.
   useStudio((s) => s.previewVersion);
 
@@ -196,6 +219,151 @@ export function Timeline(): React.JSX.Element {
     });
   };
 
+  // ---------------------------------------------------------- context menus
+
+  const splitAt = (at: Time, trackIds: readonly TrackId[]): void =>
+    run({ type: 'splitClips', trackIds, at }, 'Split');
+
+  const openClipMenu = (event: React.MouseEvent, clip: Clip): void => {
+    if (!selection.includes(clip.id)) select([clip.id]);
+    const targets = selection.includes(clip.id) && selection.length > 1 ? selection : [clip.id];
+
+    // Only offer "detach" when the clip is actually tied to another one.
+    const linked = clip.linkGroupId
+      ? Object.values(project.clips).filter((c) => c.linkGroupId === clip.linkGroupId)
+      : [];
+
+    const entries: MenuEntry[] = [
+      {
+        label: 'Split at playhead',
+        icon: <IconSplit />,
+        hint: 'S',
+        // Splitting only does something when the playhead is inside the clip.
+        disabled: !(T.lt(clip.start, playhead) && T.gt(clipEnd(clip), playhead)),
+        onSelect: () => splitAt(playhead, [clip.trackId]),
+      },
+      {
+        label: 'Split all tracks at playhead',
+        icon: <IconSplit />,
+        onSelect: () => splitAt(playhead, trackIds),
+      },
+      'separator',
+      {
+        label: linked.length > 1 ? `Detach audio from video (${linked.length} clips)` : 'Detach audio from video',
+        icon: <IconUnlink />,
+        disabled: linked.length < 2,
+        onSelect: () => run({ type: 'unlinkClips', clipIds: [clip.id] }, 'Detach audio'),
+      },
+      {
+        label: 'Link selected clips',
+        icon: <IconLink />,
+        disabled: selection.length < 2,
+        onSelect: () => run({ type: 'linkClips', clipIds: selection }, 'Link clips'),
+      },
+      'separator',
+      {
+        label: clip.enabled ? 'Disable' : 'Enable',
+        icon: clip.enabled ? <IconEyeOff /> : <IconEye />,
+        onSelect: () =>
+          run(
+            { type: 'setClipProps', clipId: clip.id, props: { enabled: !clip.enabled } },
+            clip.enabled ? 'Disable clip' : 'Enable clip',
+          ),
+      },
+      {
+        label: clip.locked ? 'Unlock' : 'Lock',
+        icon: clip.locked ? <IconLock /> : <IconUnlocked />,
+        onSelect: () =>
+          run(
+            { type: 'setClipProps', clipId: clip.id, props: { locked: !clip.locked } },
+            clip.locked ? 'Unlock clip' : 'Lock clip',
+          ),
+      },
+      'separator',
+      {
+        label: targets.length > 1 ? `Delete ${targets.length} clips` : 'Delete',
+        icon: <IconTrash />,
+        hint: 'Del',
+        danger: true,
+        onSelect: () => run({ type: 'removeClips', clipIds: targets, mode: 'lift' }, 'Delete clips'),
+      },
+      {
+        label: 'Ripple delete',
+        icon: <IconRipple />,
+        danger: true,
+        onSelect: () => run({ type: 'removeClips', clipIds: targets, mode: 'ripple' }, 'Ripple delete'),
+      },
+    ];
+    menu.open(event, entries);
+  };
+
+  const openLaneMenu = (event: React.MouseEvent, trackId: TrackId): void => {
+    const at = timeAtClientX(event.clientX);
+    menu.open(event, [
+      {
+        label: 'Move playhead here',
+        icon: <IconNextEdit />,
+        onSelect: () => setPlayhead(at),
+      },
+      {
+        label: 'Split all tracks at playhead',
+        icon: <IconSplit />,
+        hint: 'S',
+        onSelect: () => splitAt(playhead, trackIds),
+      },
+      'separator',
+      {
+        label: 'Add video track',
+        icon: <IconVideo />,
+        onSelect: () => run({ type: 'addTrack', sequenceId, kind: 'video' }, 'Add video track'),
+      },
+      {
+        label: 'Add audio track',
+        icon: <IconAudio />,
+        onSelect: () => run({ type: 'addTrack', sequenceId, kind: 'audio' }, 'Add audio track'),
+      },
+      'separator',
+      {
+        label: 'Delete this track',
+        icon: <IconTrash />,
+        danger: true,
+        disabled: trackIds.length <= 1,
+        onSelect: () => run({ type: 'removeTrack', trackId }, 'Remove track'),
+      },
+    ]);
+  };
+
+  const openRulerMenu = (event: React.MouseEvent): void => {
+    const at = timeAtClientX(event.clientX);
+    menu.open(event, [
+      {
+        label: 'Split all tracks at playhead',
+        icon: <IconSplit />,
+        hint: 'S',
+        onSelect: () => splitAt(playhead, trackIds),
+      },
+      {
+        label: 'Split all tracks here',
+        icon: <IconSplit />,
+        onSelect: () => {
+          setPlayhead(at);
+          splitAt(at, trackIds);
+        },
+      },
+      'separator',
+      {
+        label: 'Add marker here',
+        icon: <IconMarker />,
+        onSelect: () => run({ type: 'addMarker', sequenceId, at }, 'Add marker'),
+      },
+      {
+        label: 'Go to start',
+        icon: <IconSkipStart />,
+        onSelect: () => setPlayhead(T.TIME_ZERO),
+      },
+    ]);
+  };
+
   // ------------------------------------------------------------- interaction
 
   const scrubFromEvent = (event: React.PointerEvent): void => {
@@ -227,14 +395,14 @@ export function Timeline(): React.JSX.Element {
             title="Add a video track"
             onClick={() => run({ type: 'addTrack', sequenceId, kind: 'video' }, 'Add video track')}
           >
-            + V
+            <IconPlus /> <IconVideo size={11} />
           </button>
           <button
             className="icon"
             title="Add an audio track"
             onClick={() => run({ type: 'addTrack', sequenceId, kind: 'audio' }, 'Add audio track')}
           >
-            + A
+            <IconPlus /> <IconAudio size={11} />
           </button>
         </div>
         {trackIds.map((trackId) => (
@@ -254,6 +422,7 @@ export function Timeline(): React.JSX.Element {
             style={{ width: contentWidth }}
             onPointerDown={onRulerPointerDown}
             onPointerMove={onRulerPointerMove}
+            onContextMenu={openRulerMenu}
           >
             {ticks.map((tick) => (
               <div key={tick.seconds} className="tick" style={{ left: tick.x }}>
@@ -272,6 +441,9 @@ export function Timeline(): React.JSX.Element {
                 onPointerDown={(event) => {
                   if (event.target === event.currentTarget) select([]);
                 }}
+                onContextMenu={(event) => {
+                  if (event.target === event.currentTarget) openLaneMenu(event, trackId);
+                }}
               >
                 {trackClips(project, trackId).map((clip) => (
                   <ClipView
@@ -284,6 +456,7 @@ export function Timeline(): React.JSX.Element {
                       additive ? toggleSelect(clip.id) : select([clip.id])
                     }
                     onDragStart={(event, kind) => startDrag(event, clip, kind)}
+                    onContextMenu={(event) => openClipMenu(event, clip)}
                   />
                 ))}
               </div>
@@ -311,11 +484,58 @@ function TrackHeader({
   onCommand: (command: Command, label: string) => void;
   removable: boolean;
 }): React.JSX.Element {
+  const menu = useContextMenu();
   const toggle = (props: Record<string, boolean>, label: string): void =>
     onCommand({ type: 'setTrackProps', trackId: track.id, props }, label);
 
+  const remove = (): void =>
+    onCommand({ type: 'removeTrack', trackId: track.id }, 'Remove track');
+
+  const entries: MenuEntry[] = [
+    ...(track.kind === 'audio'
+      ? [
+          {
+            label: track.muted ? 'Unmute' : 'Mute',
+            icon: track.muted ? <IconMuted /> : <IconVolume />,
+            onSelect: () => toggle({ muted: !track.muted }, 'Mute track'),
+          },
+          {
+            label: track.solo ? 'Unsolo' : 'Solo',
+            icon: <IconSolo />,
+            onSelect: () => toggle({ solo: !track.solo }, 'Solo track'),
+          },
+        ]
+      : [
+          {
+            label: track.hidden ? 'Show track' : 'Hide track',
+            icon: track.hidden ? <IconEyeOff /> : <IconEye />,
+            onSelect: () => toggle({ hidden: !track.hidden }, 'Hide track'),
+          },
+        ]),
+    {
+      label: track.locked ? 'Unlock track' : 'Lock track',
+      icon: track.locked ? <IconLock /> : <IconUnlocked />,
+      onSelect: () => toggle({ locked: !track.locked }, 'Lock track'),
+    },
+    'separator',
+    {
+      label: 'Delete track',
+      icon: <IconTrash />,
+      danger: true,
+      disabled: !removable,
+      onSelect: remove,
+    },
+  ];
+
   return (
-    <div className="track-header" style={{ height: TRACK_HEIGHT }}>
+    <div
+      className="track-header"
+      style={{ height: TRACK_HEIGHT }}
+      onContextMenu={(event) => menu.open(event, entries)}
+    >
+      <span className="track-kind">
+        {track.kind === 'audio' ? <IconAudio size={12} /> : <IconVideo size={12} />}
+      </span>
       <span className="label" title={track.name}>
         {track.name}
       </span>
@@ -323,42 +543,38 @@ function TrackHeader({
         <>
           <button
             className={`icon${track.muted ? ' on' : ''}`}
-            title="Mute"
+            title={track.muted ? 'Unmute' : 'Mute'}
             onClick={() => toggle({ muted: !track.muted }, 'Mute track')}
           >
-            M
+            {track.muted ? <IconMuted /> : <IconVolume />}
           </button>
           <button
             className={`icon${track.solo ? ' on' : ''}`}
             title="Solo"
             onClick={() => toggle({ solo: !track.solo }, 'Solo track')}
           >
-            S
+            <IconSolo />
           </button>
         </>
       ) : (
         <button
           className={`icon${track.hidden ? ' on' : ''}`}
-          title="Hide"
+          title={track.hidden ? 'Show track' : 'Hide track'}
           onClick={() => toggle({ hidden: !track.hidden }, 'Hide track')}
         >
-          {track.hidden ? '–' : 'V'}
+          {track.hidden ? <IconEyeOff /> : <IconEye />}
         </button>
       )}
       <button
         className={`icon${track.locked ? ' on' : ''}`}
-        title="Lock"
+        title={track.locked ? 'Unlock track' : 'Lock track'}
         onClick={() => toggle({ locked: !track.locked }, 'Lock track')}
       >
-        L
+        {track.locked ? <IconLock /> : <IconUnlocked />}
       </button>
       {removable && (
-        <button
-          className="icon"
-          title="Delete this track and its clips"
-          onClick={() => onCommand({ type: 'removeTrack', trackId: track.id }, 'Remove track')}
-        >
-          ×
+        <button className="icon" title="Delete this track and its clips" onClick={remove}>
+          <IconClose />
         </button>
       )}
     </div>
@@ -403,6 +619,7 @@ function ClipView({
   preview,
   onSelect,
   onDragStart,
+  onContextMenu,
 }: {
   clip: Clip;
   pxPerSecond: number;
@@ -410,6 +627,7 @@ function ClipView({
   preview: React.CSSProperties | undefined;
   onSelect: (additive: boolean) => void;
   onDragStart: (event: React.PointerEvent, kind: DragKind) => void;
+  onContextMenu: (event: React.MouseEvent) => void;
 }): React.JSX.Element {
   const left = T.toSeconds(clip.start) * pxPerSecond;
   const width = Math.max(2, T.toSeconds(clip.duration) * pxPerSecond);
@@ -420,6 +638,7 @@ function ClipView({
       className={`clip ${kindClass}${selected ? ' selected' : ''}${clip.enabled ? '' : ' disabled'}${preview ? ' has-preview' : ''}`}
       style={{ left, width, ...preview }}
       title={`${clip.name} · ${T.formatDuration(clip.duration, { decimals: 2 })}`}
+      onContextMenu={onContextMenu}
       onPointerDown={(event) => {
         onSelect(event.shiftKey || event.metaKey || event.ctrlKey);
         onDragStart(event, 'move');

@@ -166,6 +166,10 @@ export type Command =
     }
   | { readonly type: 'setClipBlendMode'; readonly clipId: ClipId; readonly blendMode: BlendMode }
   | { readonly type: 'setClipSpeed'; readonly clipId: ClipId; readonly speed: number }
+  /** Break the video/audio link on every clip in these clips' groups. */
+  | { readonly type: 'unlinkClips'; readonly clipIds: readonly ClipId[] }
+  /** Put these clips into one link group so they move and trim together. */
+  | { readonly type: 'linkClips'; readonly clipIds: readonly ClipId[] }
 
   // -- effects --------------------------------------------------------------
   | {

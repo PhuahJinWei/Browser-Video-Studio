@@ -408,6 +408,55 @@ describe('splitClips', () => {
     expect(describeTrack(runFrom(f, p1, { type: 'splitClips', trackIds: [f.v1], at: sec(0) }), f.v1)).toBe('A[0..2)');
   });
 
+  it('gives each side of the cut its own link group', () => {
+    // A video clip and its own audio are linked so they drag together. After a
+    // split, the halves on each side of the cut must be independent, or dragging
+    // one half drags the other and the cut is useless.
+    const p1 = run(
+      f,
+      insertCommand(f, { trackId: f.v1, start: sec(0), duration: sec(6), name: 'V' }),
+      insertCommand(f, { trackId: f.a1, start: sec(0), duration: sec(6), kind: 'audio', name: 'A' }),
+    );
+    const link = 'lg_original';
+    const linked: Project = {
+      ...p1,
+      clips: Object.fromEntries(
+        Object.entries(p1.clips).map(([id, clip]) => [id, { ...clip, linkGroupId: link }]),
+      ) as Project['clips'],
+    };
+
+    const p2 = runFrom(f, linked, { type: 'splitClips', trackIds: [f.v1, f.a1], at: sec(3) });
+    const [leftV, rightV] = clipsOf(p2, f.v1).map((id) => getClip(p2, id));
+    const [leftA, rightA] = clipsOf(p2, f.a1).map((id) => getClip(p2, id));
+
+    // Left halves keep the original group; right halves share a new one.
+    expect(leftV!.linkGroupId).toBe(link);
+    expect(leftA!.linkGroupId).toBe(link);
+    expect(rightV!.linkGroupId).not.toBe(link);
+    expect(rightV!.linkGroupId).not.toBeNull();
+    // Video and audio on the right of the cut stay linked to each other.
+    expect(rightA!.linkGroupId).toBe(rightV!.linkGroupId);
+  });
+
+  it('unlinks and relinks clips', () => {
+    const p1 = run(
+      f,
+      insertCommand(f, { trackId: f.v1, start: sec(0), duration: sec(4), name: 'V' }),
+      insertCommand(f, { trackId: f.a1, start: sec(0), duration: sec(4), kind: 'audio', name: 'A' }),
+    );
+    const v = clipsOf(p1, f.v1)[0]!;
+    const a = clipsOf(p1, f.a1)[0]!;
+
+    const linked = runFrom(f, p1, { type: 'linkClips', clipIds: [v, a] });
+    expect(getClip(linked, v).linkGroupId).toBe(getClip(linked, a).linkGroupId);
+    expect(getClip(linked, v).linkGroupId).not.toBeNull();
+
+    // Detaching one end detaches everything in that group.
+    const detached = runFrom(f, linked, { type: 'unlinkClips', clipIds: [v] });
+    expect(getClip(detached, v).linkGroupId).toBeNull();
+    expect(getClip(detached, a).linkGroupId).toBeNull();
+  });
+
   it('splits across several tracks at once', () => {
     const p1 = run(
       f,

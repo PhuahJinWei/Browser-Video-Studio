@@ -1,11 +1,12 @@
 import { useEffect, useRef } from 'react';
-import * as T from '../model/time';
 import { useStudio } from './store';
+import { Transport } from './Transport';
 
-/** The program monitor. Owns the canvas the compositor draws into. */
+/** The program monitor: canvas, telemetry overlay, and the transport bar beneath. */
 export function Preview(): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const attachEngine = useStudio((s) => s.attachEngine);
+  const restoreLastProject = useStudio((s) => s.restoreLastProject);
   const showTelemetry = useStudio((s) => s.showTelemetry);
   const telemetry = useStudio((s) => s.telemetry);
   const exportProgress = useStudio((s) => s.exportProgress);
@@ -15,8 +16,6 @@ export function Preview(): React.JSX.Element {
   const sequence = history.present.project.sequences[sequenceId]!;
   const hasClips = Object.keys(history.present.project.clips).length > 0;
 
-  const restoreLastProject = useStudio((s) => s.restoreLastProject);
-
   useEffect(() => {
     if (!canvasRef.current) return;
     // Attach first so restored media can be opened straight into the engine.
@@ -24,14 +23,17 @@ export function Preview(): React.JSX.Element {
   }, [attachEngine, restoreLastProject]);
 
   return (
-    <div className="preview">
-      <canvas ref={canvasRef} width={sequence.size.width} height={sequence.size.height} />
-      {!hasClips && (
-        <div className="empty" style={{ position: 'absolute' }}>
-          Import a file, then click <strong>Add</strong> to place it on the timeline.
-        </div>
-      )}
-      {showTelemetry && <TelemetryPanel telemetry={telemetry} exportProgress={exportProgress} />}
+    <div className="preview-panel">
+      <div className="preview">
+        <canvas ref={canvasRef} width={sequence.size.width} height={sequence.size.height} />
+        {!hasClips && (
+          <div className="empty">
+            Import a file, then click <strong>Add to timeline</strong>.
+          </div>
+        )}
+        {showTelemetry && <TelemetryPanel telemetry={telemetry} exportProgress={exportProgress} />}
+      </div>
+      <Transport />
     </div>
   );
 }
@@ -119,17 +121,5 @@ function Bar({ label, value }: { label: string; value: number }): React.JSX.Elem
         <div style={{ width: `${Math.max(0, Math.min(1, value)) * 100}%` }} />
       </div>
     </>
-  );
-}
-
-/** Timecode readout for the header. */
-export function Timecode(): React.JSX.Element {
-  const history = useStudio((s) => s.history);
-  const sequenceId = useStudio((s) => s.sequenceId);
-  const sequence = history.present.project.sequences[sequenceId]!;
-  return (
-    <span className="timecode">
-      {T.toTimecode(sequence.view.playhead, sequence.frameRate)}
-    </span>
   );
 }
