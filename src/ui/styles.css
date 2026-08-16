@@ -2300,18 +2300,23 @@ body.resizing {
 
 
 /*
- * The strips that open above and below the lanes while a clip is dragged.
+ * The strips above and below the lanes that make a new track when something lands
+ * in them.
  *
- * They are ordinary rows, so they occupy real space and the pointer can rest in
- * them — which is the whole point. A line drawn at the boundary marked where the
- * new track would go but gave you nothing to aim for, so you had to overshoot the
- * lanes entirely to find it.
+ * Always present. They are quiet enough to ignore when nothing is happening, and
+ * only announce themselves once a drag is in flight — a target that appears only
+ * mid-gesture cannot be found by looking, and one that opens on approach shifts the
+ * lanes under the pointer.
  */
 .insert-gap {
   display: flex;
   flex: none;
-  height: 26px;
+  height: 18px;
   overflow: hidden;
+  transition: height 90ms ease;
+}
+.insert-gap.dragging {
+  height: 28px;
 }
 .insert-gap-header {
   flex: none;
@@ -2326,12 +2331,18 @@ body.resizing {
   display: flex;
   align-items: center;
   padding-left: 10px;
-  border: 1px dashed var(--line-strong);
-  border-radius: 4px;
   margin: 2px 2px 2px 0;
-  color: var(--muted);
+  border: 1px dashed var(--line);
+  border-radius: 4px;
+  color: transparent;
   font-size: 10.5px;
   font-weight: 600;
+  white-space: nowrap;
+}
+/* Idle it is a hairline; the label only earns its space once you are carrying something. */
+.insert-gap.dragging .insert-gap-lane {
+  border-color: var(--line-strong);
+  color: var(--muted);
 }
 .insert-gap.active .insert-gap-lane {
   border-color: var(--accent);
@@ -2339,3 +2350,4 @@ body.resizing {
   background: var(--accent-wash);
   color: var(--text);
 }
+

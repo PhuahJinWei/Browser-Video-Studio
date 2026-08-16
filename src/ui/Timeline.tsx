@@ -1649,7 +1649,21 @@ export function Timeline(): React.JSX.Element {
             a gap that appears on approach moves the lanes, which moves the pointer
             into a different row, which closes the gap again.
           */}
-          {clipDragging && <InsertGap side="top" active={insertion?.where === 'above'} />}
+          <InsertGap
+            side="top"
+            dragging={clipDragging || Boolean(draggingAssetId)}
+            active={insertion?.where === 'above' || assetInsertion?.where === 'top'}
+            onAssetOver={() => {
+              setDropTrackId(null);
+              setAssetInsertion(assetInsertionFor('top'));
+            }}
+            onAssetLeave={() => setAssetInsertion(null)}
+            onAssetDrop={(assetId) => {
+              setAssetInsertion(null);
+              const target = assetInsertionFor('top');
+              if (target) dropAssetOnNewTrack(assetId as never, target.trackKind, target.index);
+            }}
+          />
           {trackIds.map((trackId) => {
             const track = getTrack(project, trackId);
             const height = Math.max(MIN_TRACK_HEIGHT, track.height);
@@ -1872,7 +1886,21 @@ export function Timeline(): React.JSX.Element {
             fill the pane — which is also what lets the playhead run to the floor —
             and it is the natural place to drop something to give it a track of its own.
           */}
-          {clipDragging && <InsertGap side="bottom" active={insertion?.where === 'below'} />}
+          <InsertGap
+            side="bottom"
+            dragging={clipDragging || Boolean(draggingAssetId)}
+            active={insertion?.where === 'below' || assetInsertion?.where === 'bottom'}
+            onAssetOver={() => {
+              setDropTrackId(null);
+              setAssetInsertion(assetInsertionFor('bottom'));
+            }}
+            onAssetLeave={() => setAssetInsertion(null)}
+            onAssetDrop={(assetId) => {
+              setAssetInsertion(null);
+              const target = assetInsertionFor('bottom');
+              if (target) dropAssetOnNewTrack(assetId as never, target.trackKind, target.index);
+            }}
+          />
 
           <div
             className={`timeline-tail${draggingAssetId ? ' insert-ready' : ''}${
@@ -2653,16 +2681,57 @@ function minorDivisions(step: number): number {
  * so the ruler gets denser by adding minors, not by crowding the numbers.
  */
 /**
- * The strip that opens above and below the lanes while a clip is being dragged, so
- * "drop here for a new track" is somewhere you can see rather than a boundary you
- * have to guess at.
+ * The strip above and below the lanes that makes a new track when something is
+ * dropped in it.
+ *
+ * Always there rather than opening on a drag. It costs a little height, but a target
+ * that only exists once you are already dragging cannot be discovered — and a strip
+ * that appears mid-gesture shifts the lanes under the pointer, which was the reason
+ * to keep it out of the way in the first place.
+ *
+ * Clips arrive through pointer events and are handled by `insertionAt`, which keys
+ * off this strip occupying the space above the first lane. Library media arrives
+ * through native drag events, which do not move the pointer, so those are wired up
+ * here instead.
  */
-function InsertGap({ side, active }: { side: 'top' | 'bottom'; active: boolean }): React.JSX.Element {
+function InsertGap({
+  side,
+  dragging,
+  active,
+  onAssetOver,
+  onAssetLeave,
+  onAssetDrop,
+}: {
+  side: 'top' | 'bottom';
+  dragging: boolean;
+  active: boolean;
+  onAssetOver: () => void;
+  onAssetLeave: () => void;
+  onAssetDrop: (assetId: string) => void;
+}): React.JSX.Element {
   return (
-    <div className={`insert-gap ${side}${active ? ' active' : ''}`}>
+    <div className={`insert-gap ${side}${dragging ? ' dragging' : ''}${active ? ' active' : ''}`}>
       <div className="insert-gap-header" style={{ width: HEADER_WIDTH }} />
-      <div className="insert-gap-lane">
-        <span>Drop here for a new track</span>
+      <div
+        className="insert-gap-lane"
+        onDragOver={(event) => {
+          if (!event.dataTransfer.types.includes(ASSET_DRAG_TYPE)) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'copy';
+          onAssetOver();
+        }}
+        onDragLeave={(event) => {
+          if (event.currentTarget.contains(event.relatedTarget as Node)) return;
+          onAssetLeave();
+        }}
+        onDrop={(event) => {
+          const assetId = event.dataTransfer.getData(ASSET_DRAG_TYPE);
+          if (!assetId) return;
+          event.preventDefault();
+          onAssetDrop(assetId);
+        }}
+      >
+        <span>New track</span>
       </div>
     </div>
   );
