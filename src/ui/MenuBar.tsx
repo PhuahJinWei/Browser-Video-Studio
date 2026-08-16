@@ -19,6 +19,7 @@ import {
   IconFullscreen,
   IconGauge,
   IconGroup,
+  IconInspector,
   IconLink,
   IconLock,
   IconMarker,
@@ -38,6 +39,7 @@ import {
   IconVideo,
 } from './Icons';
 import * as T from '../model/time';
+import { useLayout } from './layout';
 import { useStudio } from './store';
 
 /**
@@ -124,6 +126,8 @@ export function MenuBar({ onExport }: { onExport: () => void }): React.JSX.Eleme
   const addTitle = useStudio((s) => s.addTitle);
   const addSolid = useStudio((s) => s.addSolid);
   const splitAtPlayhead = useStudio((s) => s.splitAtPlayhead);
+  const inspectorOpen = useLayout((s) => s.inspectorOpen);
+  const toggleInspector = useLayout((s) => s.toggleInspector);
   const importViaPicker = useStudio((s) => s.importViaPicker);
   const toggleTelemetry = useStudio((s) => s.toggleTelemetry);
   const setPlayhead = useStudio((s) => s.setPlayhead);
@@ -304,6 +308,13 @@ export function MenuBar({ onExport }: { onExport: () => void }): React.JSX.Eleme
     {
       title: 'View',
       entries: [
+        {
+          label: 'Inspector',
+          icon: <IconInspector />,
+          hint: 'Ctrl+4',
+          checked: inspectorOpen,
+          onSelect: toggleInspector,
+        },
         {
           label: 'Pipeline panel',
           icon: <IconGauge />,

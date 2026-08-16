@@ -1361,3 +1361,81 @@ body.focus-mode .preview-panel .preview {
   background: rgb(88 166 255 / 16%);
   border-radius: 2px;
 }
+
+/* ------------------------------------------------------------- panel layout */
+
+/*
+ * The seam between two panels. Wider than it looks: a 5px target is miserable to
+ * hit, so the hit area is padded and only the centre line is painted.
+ */
+.panel-divider {
+  flex: none;
+  width: 7px;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+  z-index: 8;
+}
+.panel-divider::before {
+  content: '';
+  position: absolute;
+  inset: 0 3px;
+  background: var(--line);
+}
+.panel-divider:hover::before,
+.panel-divider.dragging::before {
+  background: var(--accent);
+}
+/* While a divider is being dragged, nothing else should select or take the cursor. */
+body.resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+/* ----------------------------------------------------------------- library */
+
+/*
+ * Cards reflow to fill the panel, so widening it actually shows more media rather
+ * than the same column stretched. A narrow panel resolves to a single column on its
+ * own, which is what it always used to be.
+ */
+.bin-list.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+  gap: 6px;
+  align-content: start;
+}
+.bin-list.grid .bin-item {
+  margin-bottom: 0;
+}
+.bin-list.grid .bin-empty,
+.bin-list.grid .hint {
+  grid-column: 1 / -1;
+}
+
+/* Compact rows, for when there are more clips than a grid can show at once. */
+.bin-list.list .bin-item {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 8px;
+  align-items: center;
+  margin-bottom: 4px;
+  padding: 5px 7px;
+}
+.bin-list.list .bin-thumb {
+  grid-row: 1 / span 2;
+  margin-bottom: 0;
+}
+.bin-list.list .name,
+.bin-list.list .meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  word-break: normal;
+}
+/* The per-card action row only makes sense once the card is wide enough for it. */
+.bin-list.list .bin-item .row {
+  display: none;
+}

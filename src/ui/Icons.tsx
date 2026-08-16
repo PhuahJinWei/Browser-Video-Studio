@@ -237,6 +237,28 @@ export const IconText = (p: IconProps): React.JSX.Element => (
   </Svg>
 );
 
+export const IconGrid = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <rect x="3" y="3" width="7" height="7" rx="1" />
+    <rect x="14" y="3" width="7" height="7" rx="1" />
+    <rect x="3" y="14" width="7" height="7" rx="1" />
+    <rect x="14" y="14" width="7" height="7" rx="1" />
+  </Svg>
+);
+
+export const IconList = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <path d="M4 6h16M4 12h16M4 18h16" />
+  </Svg>
+);
+
+export const IconInspector = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M14 4v16M17 9h1M17 13h1" />
+  </Svg>
+);
+
 export const IconTransition = (p: IconProps): React.JSX.Element => (
   <Svg {...p}>
     <path d="M4 5v14M20 5v14M4 5l16 14M20 5L4 19" />

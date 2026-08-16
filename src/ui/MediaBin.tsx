@@ -3,7 +3,17 @@ import * as T from '../model/time';
 import { TRANSITION_TYPES } from '../model/types';
 import type { Asset } from '../model/types';
 import { useContextMenu } from './ContextMenu';
-import { IconAudio, IconFile, IconPlus, IconTransition, IconTrash, IconVideo } from './Icons';
+import {
+  IconAudio,
+  IconFile,
+  IconGrid,
+  IconList,
+  IconPlus,
+  IconTransition,
+  IconTrash,
+  IconVideo,
+} from './Icons';
+import { useLayout } from './layout';
 import { useStudio } from './store';
 import { ASSET_DRAG_TYPE } from './Timeline';
 import { TRANSITION_DRAG_TYPE, TRANSITION_LABELS } from './transitions';
@@ -39,6 +49,8 @@ export function MediaBin(): React.JSX.Element {
   const [dragOver, setDragOver] = useState(false);
   const [tab, setTab] = useState<'media' | 'transitions'>('media');
   const [filter, setFilter] = useState<MediaFilterId>('all');
+  const libraryView = useLayout((s) => s.libraryView);
+  const setLibraryView = useLayout((s) => s.setLibraryView);
   // Drag events fire for every child crossed, so a plain leave handler flickers.
   // Counting enters and leaves is what keeps the highlight steady.
   const dragDepth = useRef(0);
@@ -92,6 +104,13 @@ export function MediaBin(): React.JSX.Element {
       <div className="panel-head">
         <span>Library</span>
         <span className="spacer" style={{ flex: 1 }} />
+        <button
+          className="icon"
+          title={libraryView === 'grid' ? 'Show as a list' : 'Show as a grid'}
+          onClick={() => setLibraryView(libraryView === 'grid' ? 'list' : 'grid')}
+        >
+          {libraryView === 'grid' ? <IconList /> : <IconGrid />}
+        </button>
         <button className="icon" title="Import media…" onClick={() => void importViaPicker()}>
           <IconPlus />
         </button>
@@ -136,7 +155,7 @@ export function MediaBin(): React.JSX.Element {
       )}
 
       {tab === 'media' ? (
-        <div className="panel-body">
+        <div className={`panel-body bin-list ${libraryView}`}>
           {assets.length === 0 ? (
             <button className="bin-empty" onClick={() => void importViaPicker()}>
               <IconFile size={22} />

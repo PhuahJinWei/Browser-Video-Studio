@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { canRun, detectCapabilities, type CapabilityResult } from '../capabilities';
+import { useLayout } from './layout';
+import { PanelDivider } from './PanelDivider';
 import { staticParam } from '../model/params';
 import * as T from '../model/time';
 import { ContextMenuProvider } from './ContextMenu';
@@ -7,6 +9,7 @@ import { ExportDialog } from './ExportDialog';
 import {
   IconExport,
   IconGauge,
+  IconInspector,
   IconRedo,
   IconSplit,
   IconTrash,
@@ -70,6 +73,13 @@ function Studio(): React.JSX.Element {
   const run = useStudio((s) => s.run);
   const addTransitionNearPlayhead = useStudio((s) => s.addTransitionNearPlayhead);
   const splitAtPlayhead = useStudio((s) => s.splitAtPlayhead);
+  const binWidth = useLayout((s) => s.binWidth);
+  const inspectorWidth = useLayout((s) => s.inspectorWidth);
+  const inspectorOpen = useLayout((s) => s.inspectorOpen);
+  const setBinWidth = useLayout((s) => s.setBinWidth);
+  const setInspectorWidth = useLayout((s) => s.setInspectorWidth);
+  const toggleInspector = useLayout((s) => s.toggleInspector);
+  const middleRef = useRef<HTMLDivElement>(null);
   const endGesture = useStudio((s) => s.endGesture);
   const undoEdit = useStudio((s) => s.undoEdit);
   const redoEdit = useStudio((s) => s.redoEdit);
@@ -137,6 +147,13 @@ function Studio(): React.JSX.Element {
         return;
       }
 
+      // Final Cut's inspector key, and nothing else here claims a digit.
+      if (mod && event.key === '4') {
+        event.preventDefault();
+        toggleInspector();
+        return;
+      }
+
       // The way most transitions actually get added, in every other editor.
       if (mod && event.key.toLowerCase() === 'd') {
         event.preventDefault();
@@ -185,6 +202,7 @@ function Studio(): React.JSX.Element {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [
+    toggleInspector,
     addTransitionNearPlayhead,
     duration,
     importViaPicker,
@@ -272,6 +290,13 @@ function Studio(): React.JSX.Element {
         </span>
 
         <button
+          className={`icon${inspectorOpen ? ' on' : ''}`}
+          onClick={toggleInspector}
+          title="Toggle the inspector (Ctrl+4)"
+        >
+          <IconInspector />
+        </button>
+        <button
           className={`icon${showTelemetry ? ' on' : ''}`}
           onClick={toggleTelemetry}
           title="Toggle the pipeline panel"
@@ -283,12 +308,41 @@ function Studio(): React.JSX.Element {
         </button>
       </header>
 
-      <div className="middle">
+      {/*
+        Columns come from the layout store rather than the stylesheet so the
+        dividers can move them. The centre keeps a floor of its own, so dragging
+        a side panel wide cannot squeeze the preview away.
+      */}
+      <div
+        className="middle"
+        ref={middleRef}
+        style={{
+          gridTemplateColumns: inspectorOpen
+            ? `${binWidth}px auto minmax(300px, 1fr) auto ${inspectorWidth}px`
+            : `${binWidth}px auto minmax(300px, 1fr)`,
+        }}
+      >
         <MediaBin />
+        <PanelDivider
+          label="Resize the library"
+          onDrag={(clientX) => {
+            const left = middleRef.current?.getBoundingClientRect().left ?? 0;
+            setBinWidth(clientX - left);
+          }}
+        />
         <div className="panel">
           <Preview />
         </div>
-        <Inspector />
+        {inspectorOpen && (
+          <PanelDivider
+            label="Resize the inspector"
+            onDrag={(clientX) => {
+              const right = middleRef.current?.getBoundingClientRect().right ?? 0;
+              setInspectorWidth(right - clientX);
+            }}
+          />
+        )}
+        {inspectorOpen && <Inspector />}
       </div>
 
       <Timeline />

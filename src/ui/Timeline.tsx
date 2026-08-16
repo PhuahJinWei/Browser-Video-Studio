@@ -43,29 +43,31 @@ import type {
 import { useContextMenu, type MenuEntry } from './ContextMenu';
 import {
   IconAudio,
-  IconLink,
-  IconMarker,
-  IconNextEdit,
-  IconPlus,
-  IconSkipStart,
   IconClose,
   IconEye,
-  IconGroup,
-  IconUngroup,
   IconEyeOff,
+  IconGroup,
+  IconInspector,
+  IconLink,
   IconLock,
+  IconMarker,
   IconMuted,
+  IconNextEdit,
+  IconPlus,
   IconRipple,
+  IconSkipStart,
   IconSolo,
   IconSplit,
   IconText,
   IconTransition,
   IconTrash,
+  IconUngroup,
   IconUnlink,
   IconUnlocked,
   IconVideo,
   IconVolume,
 } from './Icons';
+import { useLayout } from './layout';
 import { appendPointFor, counterpartTrackId, orderedTrackIds, useStudio } from './store';
 import {
   DEFAULT_TRANSITION_SECONDS,
@@ -213,6 +215,7 @@ export function Timeline(): React.JSX.Element {
   const splitAtPlayhead = useStudio((s) => s.splitAtPlayhead);
   const selectRangeTo = useStudio((s) => s.selectRangeTo);
   const selectWithin = useStudio((s) => s.selectWithin);
+  const setInspectorOpen = useLayout((s) => s.setInspectorOpen);
   const setError = useStudio((s) => s.setError);
   const selectedTransitionId = useStudio((s) => s.selectedTransitionId);
   const selectedTrackId = useStudio((s) => s.selectedTrackId);
@@ -751,6 +754,16 @@ export function Timeline(): React.JSX.Element {
       },
       'separator',
       {
+        label: 'Properties',
+        icon: <IconInspector />,
+        hint: 'Ctrl+4',
+        onSelect: () => {
+          select([clip.id]);
+          setInspectorOpen(true);
+        },
+      },
+      'separator',
+      {
         label: targets.length > 1 ? `Delete ${targets.length} clips` : 'Delete',
         icon: <IconTrash />,
         hint: 'Del',
@@ -854,6 +867,16 @@ export function Timeline(): React.JSX.Element {
             })),
             'Set transition length',
           );
+        },
+      },
+      'separator',
+      {
+        label: 'Properties',
+        icon: <IconInspector />,
+        hint: 'Ctrl+4',
+        onSelect: () => {
+          selectTransition(transition.id);
+          setInspectorOpen(true);
         },
       },
       'separator',
@@ -1227,6 +1250,7 @@ function TrackHeader({
   onSelect: () => void;
 }): React.JSX.Element {
   const menu = useContextMenu();
+  const setInspectorOpen = useLayout((s) => s.setInspectorOpen);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(track.name);
 
@@ -1251,6 +1275,15 @@ function TrackHeader({
   };
 
   const entries: MenuEntry[] = [
+    {
+      label: 'Properties',
+      icon: <IconInspector />,
+      hint: 'Ctrl+4',
+      onSelect: () => {
+        onSelect();
+        setInspectorOpen(true);
+      },
+    },
     { label: 'Rename track…', icon: <IconText />, onSelect: startRename },
     'separator',
     ...(track.kind === 'audio'
