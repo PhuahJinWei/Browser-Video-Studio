@@ -658,6 +658,33 @@ export function pairedCuts(
 }
 
 /**
+ * How far the cut between two adjacent clips can move without opening a gap.
+ *
+ * Rolling later spends the outgoing clip's tail handle and eats into the
+ * incoming clip; rolling earlier does the reverse. `minimum` is the smallest
+ * either clip may be left at — a frame, normally — since a zero-length clip is
+ * not a legal document.
+ */
+export function rollBounds(
+  p: AssetLookup,
+  from: Clip,
+  to: Clip,
+  minimum: Time = T.TIME_ZERO,
+): { readonly earliest: Time; readonly latest: Time } {
+  const cut = clipEnd(from);
+  const { tailroom } = clipTrimHandles(p, from);
+  const { headroom } = clipTrimHandles(p, to);
+
+  let later = T.max(T.sub(to.duration, minimum), T.TIME_ZERO);
+  if (tailroom !== null) later = T.min(later, tailroom);
+
+  let earlier = T.max(T.sub(from.duration, minimum), T.TIME_ZERO);
+  if (headroom !== null) earlier = T.min(earlier, headroom);
+
+  return { earliest: T.sub(cut, earlier), latest: T.add(cut, later) };
+}
+
+/**
  * The cut on a track closest to `at`, ignoring cuts that already carry a
  * transition. Cuts are exact joins, so a gap between two clips is not one.
  */

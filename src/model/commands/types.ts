@@ -220,6 +220,19 @@ export type Command =
       readonly transitionId: TransitionId;
       readonly alignment: Transition['alignment'];
     }
+  /**
+   * Move the cut between two adjacent clips without moving anything else.
+   *
+   * One clip gains exactly what the other gives up, so the pair covers the same
+   * span and nothing downstream shifts. `to` is clamped to what the two clips
+   * can actually supply.
+   */
+  | {
+      readonly type: 'rollEdit';
+      readonly fromClipId: ClipId;
+      readonly toClipId: ClipId;
+      readonly to: Time;
+    }
   /** Wipe edge feather, 0..0.5 as a fraction of the sweep. */
   | {
       readonly type: 'setTransitionSoftness';

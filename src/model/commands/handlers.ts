@@ -13,6 +13,7 @@ import {
   isSyntheticClip,
   maxTransitionDuration,
   ModelError,
+  rollBounds,
 } from '../selectors';
 import { staticParam } from '../params';
 import * as T from '../time';
@@ -746,6 +747,51 @@ function handleSetTransitionType(
   d.transitions[transition.id] = { ...transition, transitionType: cmd.transitionType };
 }
 
+function handleRollEdit(d: Draft, cmd: Extract<Command, { type: 'rollEdit' }>): void {
+  const from = draftClip(d, cmd.fromClipId);
+  const to = draftClip(d, cmd.toClipId);
+
+  if (from.trackId !== to.trackId) throw new ModelError('A rolling edit works on one track');
+  const track = draftTrack(d, from.trackId);
+  assertUnlocked(track);
+  if (from.locked || to.locked) {
+    throw new ModelError(`"${from.locked ? from.name : to.name}" is locked`);
+  }
+  if (!T.eq(clipEnd(from), to.start)) {
+    throw new ModelError(`"${from.name}" and "${to.name}" are not adjacent`);
+  }
+
+  // Never roll a clip out of existence: leave at least one frame either side.
+  const sequence = sequenceOfTrack(d, track.id);
+  const minimum = sequence ? T.frameDuration(sequence.frameRate) : T.TIME_ZERO;
+  const bounds = rollBounds(d, from, to, minimum);
+
+  const delta = T.sub(T.clamp(cmd.to, bounds.earliest, bounds.latest), clipEnd(from));
+  if (T.isZero(delta)) return;
+
+  // The outgoing clip keeps its start and moves its out point; the incoming clip
+  // gives up exactly the same at its head, so the pair still covers one span.
+  d.clips[from.id] = { ...from, duration: T.add(from.duration, delta) };
+  d.clips[to.id] = trimClipIn(to, delta);
+
+  // Both handles just changed, so a transition on this cut may no longer fit.
+  const transition = Object.values(d.transitions).find(
+    (t) => t.fromClipId === from.id && t.toClipId === to.id,
+  );
+  if (!transition) return;
+
+  const room = maxTransitionDuration(d, d.clips[from.id]!, d.clips[to.id]!, transition.alignment);
+  if (!T.isPositive(room)) {
+    // Rolled until there is nothing left to blend with.
+    deleteTransition(d, transition.id);
+    return;
+  }
+  d.transitions[transition.id] = {
+    ...transition,
+    duration: T.min(transition.duration, room),
+  };
+}
+
 function handleSetTransitionAlignment(
   d: Draft,
   cmd: Extract<Command, { type: 'setTransitionAlignment' }>,
@@ -842,6 +888,8 @@ export function runCommand(d: Draft, command: Command, ids: IdSource): void {
       return handleSetTransitionDuration(d, command);
     case 'setTransitionType':
       return handleSetTransitionType(d, command);
+    case 'rollEdit':
+      return handleRollEdit(d, command);
     case 'setTransitionAlignment':
       return handleSetTransitionAlignment(d, command);
     case 'setTransitionSoftness':

@@ -98,9 +98,13 @@ interface DragState {
  * pointer event cannot make the transition drift.
  */
 interface TransitionDragState {
+  /** `length` drags an edge; `roll` moves the cut itself, under the badge. */
+  readonly kind: 'length' | 'roll';
   readonly transitionId: TransitionId;
   /** Paired ids, so picture and sound stay the same length. */
   readonly ids: readonly TransitionId[];
+  /** Paired cuts, so a roll moves the sound's cut with the picture's. */
+  readonly cuts: readonly { readonly fromId: ClipId; readonly toId: ClipId }[];
   readonly cut: Time;
   readonly alignment: Transition['alignment'];
 }
@@ -385,9 +389,25 @@ export function Timeline(): React.JSX.Element {
     if (!transitionDrag) return;
 
     const move = (event: PointerEvent): void => {
-      const distance = Math.abs(
-        T.toSeconds(T.sub(timeAtClientX(event.clientX), transitionDrag.cut)),
-      );
+      const pointer = timeAtClientX(event.clientX);
+
+      if (transitionDrag.kind === 'roll') {
+        // The command clamps to what the two clips can supply, so the pointer can
+        // run past the end of the material without the gesture breaking.
+        runMany(
+          transitionDrag.cuts.map((cut) => ({
+            type: 'rollEdit' as const,
+            fromClipId: cut.fromId,
+            toClipId: cut.toId,
+            to: pointer,
+          })),
+          'Roll edit',
+          `roll:${transitionDrag.transitionId}`,
+        );
+        return;
+      }
+
+      const distance = Math.abs(T.toSeconds(T.sub(pointer, transitionDrag.cut)));
       // Centred transitions straddle the cut, so the pointer covers half the
       // length; the one-sided alignments cover all of it.
       const seconds = transitionDrag.alignment === 'centered' ? distance * 2 : distance;
@@ -446,17 +466,28 @@ export function Timeline(): React.JSX.Element {
     );
   };
 
-  const startTransitionDrag = (event: React.PointerEvent, transition: Transition): void => {
+  const startTransitionDrag = (
+    event: React.PointerEvent,
+    transition: Transition,
+    kind: TransitionDragState['kind'],
+  ): void => {
     event.stopPropagation();
     event.preventDefault();
     if (getTrack(project, transition.trackId).locked) return;
 
+    const from = project.clips[transition.fromClipId];
     const to = project.clips[transition.toClipId];
-    if (!to) return;
+    if (!from || !to) return;
+
     selectTransition(transition.id);
     setTransitionDrag({
+      kind,
       transitionId: transition.id,
       ids: pairedTransitions(project, transition).map((t) => t.id),
+      cuts: pairedCuts(project, from, to).map((cut) => ({
+        fromId: cut.from.id,
+        toId: cut.to.id,
+      })),
       cut: to.start,
       alignment: transition.alignment,
     });
@@ -918,9 +949,15 @@ export function Timeline(): React.JSX.Element {
                           selectedTransitionId === transition.id ? ' selected' : ''
                         }`}
                         style={{ left: T.toSeconds(span.start) * pxPerSecond, width }}
-                        title={`${transitionLabel(transition.transitionType)} · ${T.formatDuration(transition.duration, { decimals: 2 })}`}
+                        title={`${transitionLabel(transition.transitionType)} · ${T.formatDuration(transition.duration, { decimals: 2 })}\nDrag an edge to retime · Alt-drag to roll the cut`}
                         onContextMenu={(event) => openTransitionMenu(event, transition)}
                         onPointerDown={(event) => {
+                          // The badge covers the cut's own trim handles, so Alt on
+                          // the body is how the cut underneath stays reachable.
+                          if (event.altKey) {
+                            startTransitionDrag(event, transition, 'roll');
+                            return;
+                          }
                           event.stopPropagation();
                           selectTransition(transition.id);
                         }}
@@ -929,11 +966,11 @@ export function Timeline(): React.JSX.Element {
                         {width >= 56 && <span className="transition-label">{label}</span>}
                         <div
                           className="transition-handle left"
-                          onPointerDown={(event) => startTransitionDrag(event, transition)}
+                          onPointerDown={(event) => startTransitionDrag(event, transition, 'length')}
                         />
                         <div
                           className="transition-handle right"
-                          onPointerDown={(event) => startTransitionDrag(event, transition)}
+                          onPointerDown={(event) => startTransitionDrag(event, transition, 'length')}
                         />
                       </div>
                     );
