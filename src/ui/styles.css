@@ -528,9 +528,20 @@ input[type='range'] {
   position: relative;
 }
 
+/*
+ * Stretched to fill the pane, not merely to fit its tracks.
+ *
+ * Without the min-height the grid ended at the last lane, and the playhead — which
+ * spans its parent — stopped there too, halfway up an otherwise empty pane. The
+ * column layout hands the leftover height to the body, which is what gives the line
+ * something to run down and gives a drop somewhere to land.
+ */
 .timeline-grid {
   position: relative;
   min-width: 100%;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 .timeline-topbar {
@@ -558,11 +569,41 @@ input[type='range'] {
 
 .timeline-body {
   position: relative;
+  /* Takes the height the tracks do not, so the playhead reaches the floor. */
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
 }
 
 .timeline-row {
   display: flex;
   border-bottom: 1px solid var(--line);
+  flex: none;
+}
+
+/* The empty space past the last track — a drop target, not just padding. */
+.timeline-tail {
+  flex: 1 1 auto;
+  min-height: 24px;
+  position: relative;
+}
+.timeline-tail.insert-active,
+.ruler.insert-active {
+  box-shadow: inset 0 0 0 1px var(--accent);
+  background-color: rgba(76, 141, 255, 0.1);
+}
+.timeline-tail .insert-note {
+  position: sticky;
+  left: calc(216px + 10px);
+  display: inline-block;
+  margin-top: 6px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #071018;
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .ruler {
@@ -680,39 +721,141 @@ input[type='range'] {
 }
 
 /*
- * Runs the whole height of the grid, ruler included. Above the sticky topbar's own
- * stacking so the line is not cut off where it crosses it.
+ * The playhead is two elements, not one.
+ *
+ * A single full-height overlay had to sit above the sticky ruler to be visible over
+ * it, which also put it above the sticky track headers — so scrolling right painted
+ * the line straight across the header column. Splitting it lets each half take the
+ * stacking order its own neighbours need: the head sits inside the ruler and is
+ * covered by the sticky corner, the line sits inside the lanes and is covered by the
+ * sticky headers, and neither needs to outrank anything it should not.
  */
-.playhead {
+.playhead-line {
   position: absolute;
   top: 0;
   bottom: 0;
-  width: 1px;
+  width: 2px;
+  margin-left: -1px;
   background: var(--danger);
+  /* A dark rim, so the line reads over a bright filmstrip as well as a dark lane.
+     Two pixels of red alone disappear into a pale frame. */
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55);
   pointer-events: none;
-  z-index: 7;
+  /* Above the clips and the drop ghost, below the sticky track headers at 5. */
+  z-index: 4;
 }
-/* The grab handle, sized to the ruler it sits in. */
+
+/* The grab handle: a flag in the ruler, wide enough to hit without aiming. */
 .playhead-head {
   position: absolute;
   top: 0;
-  left: -6px;
-  width: 13px;
+  width: 17px;
   height: var(--ruler-h);
+  margin-left: -8.5px;
   pointer-events: auto;
   cursor: ew-resize;
+  z-index: 2;
 }
 .playhead-head::before {
   content: '';
   position: absolute;
-  top: 0;
+  top: 2px;
   left: 1px;
-  border-left: 5px solid transparent;
-  border-right: 5px solid transparent;
-  border-top: 8px solid var(--danger);
+  width: 15px;
+  height: 12px;
+  background: var(--danger);
+  border-radius: 2px 2px 0 0;
+  /* A pentagon: square shoulders for something to grab, a point for the frame. */
+  clip-path: polygon(0 0, 100% 0, 100% 58%, 50% 100%, 0 58%);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
 }
 .playhead-head:hover::before {
-  border-top-color: #ff8080;
+  background: #ff8080;
+}
+
+/*
+ * What a drag locked onto. Snapping is silent otherwise, which makes a snap that
+ * landed and a drag that missed look identical at exactly the moment it matters.
+ */
+.snap-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--warn);
+  opacity: 0.9;
+  pointer-events: none;
+  z-index: 4;
+}
+
+/*
+ * The seam a clip would be dropped into to give it a track of its own. Fixed, since
+ * it is placed from pointer coordinates rather than from the scrolled content.
+ */
+.insert-line {
+  position: fixed;
+  left: 0;
+  right: 0;
+  height: 2px;
+  margin-top: -1px;
+  background: var(--accent);
+  pointer-events: none;
+  z-index: 21;
+}
+.insert-line .insert-note {
+  position: absolute;
+  left: 232px;
+  top: -9px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #071018;
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/*
+ * The timecode that follows the pointer through a drag.
+ *
+ * Reports the value after snapping and after being clamped off a neighbour, so it
+ * always agrees with where the clip actually went.
+ */
+.drag-hint {
+  position: fixed;
+  z-index: 22;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--line-strong);
+  background: rgba(10, 12, 16, 0.94);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  font-family: ui-monospace, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.drag-hint.snapped {
+  border-color: var(--warn);
+}
+.drag-hint .primary {
+  font-size: 12px;
+  color: var(--text);
+}
+.drag-hint .secondary {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.drag-hint.snapped .secondary {
+  color: var(--warn);
+}
+
+/* The razor replaces the pointer, so the whole surface says what a click will do. */
+.timeline.tool-razor .track-lane,
+.timeline.tool-razor .clip {
+  cursor: crosshair;
 }
 
 .clip {
@@ -819,8 +962,26 @@ input[type='range'] {
   padding: 0 4px;
 }
 /* Grouped clips carry a dotted top edge, so it is visible why they move as one. */
+/*
+ * Grouped clips carry a ring and a badge rather than the dotted top edge they used
+ * to: a 2px line along one side is invisible against a filmstrip, and grouping is
+ * the one state where you need to know a clip is not alone before you drag it.
+ *
+ * An inset shadow rather than an outline, so it survives alongside the selection
+ * outline instead of being replaced by it.
+ */
 .clip.grouped {
-  border-top: 2px dotted var(--warn);
+  box-shadow: inset 0 0 0 1.5px var(--warn);
+}
+.clip-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 3px;
+  padding: 1px;
+  border-radius: 2px;
+  background: var(--warn);
+  color: #14100a;
+  vertical-align: -1px;
 }
 .clip.selected {
   outline: 2px solid var(--accent);
@@ -1438,4 +1599,240 @@ body.resizing {
 /* The per-card action row only makes sense once the card is wide enough for it. */
 .bin-list.list .bin-item .row {
   display: none;
+}
+
+/* ------------------------------------------------- loading and missing media */
+
+/*
+ * A clip whose filmstrip or waveform has not been decoded yet.
+ *
+ * Previews are built one asset at a time, so importing a handful leaves the last of
+ * them blank for several seconds. A sweep says the decoder is still coming rather
+ * than that the clip is empty.
+ */
+.clip.loading::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    100deg,
+    transparent 20%,
+    rgba(255, 255, 255, 0.11) 45%,
+    transparent 70%
+  );
+  background-size: 220% 100%;
+  animation: clip-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes clip-shimmer {
+  from {
+    background-position: 140% 0;
+  }
+  to {
+    background-position: -40% 0;
+  }
+}
+/* Nothing should pulse for someone who asked the system not to animate. */
+@media (prefers-reduced-motion: reduce) {
+  .clip.loading::after {
+    animation: none;
+    background: rgba(255, 255, 255, 0.06);
+  }
+}
+
+/*
+ * Media that could not be found when the project reopened. Hatched rather than
+ * merely dimmed: a disabled clip is already dim, and these mean different things.
+ */
+.clip.missing {
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(248, 81, 73, 0.3) 0,
+    rgba(248, 81, 73, 0.3) 6px,
+    transparent 6px,
+    transparent 12px
+  );
+  border-color: var(--danger);
+}
+.clip-badge.missing {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* ------------------------------------------------------------ library extras */
+
+.bin-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 8px 10px 0;
+  flex: 0 0 auto;
+}
+.bin-search svg {
+  position: absolute;
+  left: 17px;
+  color: var(--muted);
+  pointer-events: none;
+}
+.bin-search input {
+  padding-left: 25px;
+}
+.bin-search .clear {
+  position: absolute;
+  right: 15px;
+  padding: 2px;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+}
+
+/* The action row under the tabs: import, delete, new folder, view. */
+.bin-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px 0;
+  flex: 0 0 auto;
+}
+.bin-actions .spacer {
+  flex: 1;
+}
+.bin-actions .count {
+  font-size: 11px;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Breadcrumbs. The root is always reachable in one click, however deep you are. */
+.bin-crumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 8px 10px 0;
+  font-size: 11px;
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+.bin-crumb {
+  padding: 2px 5px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+}
+.bin-crumb:hover:not(:disabled) {
+  background: var(--panel-2);
+  color: var(--text);
+}
+.bin-crumb.on {
+  color: var(--text);
+  font-weight: 600;
+}
+.bin-crumbs .sep {
+  opacity: 0.5;
+}
+
+.bin-folder {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  min-width: 0;
+}
+.bin-folder:hover {
+  border-color: var(--line-strong);
+}
+/* While something is being dragged over it, so a drop reads as landing somewhere. */
+.bin-folder.drop-target {
+  border-color: var(--accent);
+  background: #2b3f63;
+}
+.bin-folder .name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bin-folder .count {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+/* Folders span the grid: a row of them above the cards reads as a hierarchy. */
+.bin-list.grid .bin-folder {
+  grid-column: 1 / -1;
+}
+
+.bin-item.selected {
+  border-color: var(--accent);
+  background: #21304a;
+}
+
+/*
+ * Preview progress on a card. Sits along the bottom edge of the thumbnail rather
+ * than over it, so the poster is not obscured the moment it arrives.
+ */
+.bin-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: rgba(0, 0, 0, 0.55);
+}
+.bin-progress > div {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s linear;
+}
+/* Queued but not started: previews run one asset at a time, and the wait is real. */
+.bin-thumb-placeholder.pending {
+  animation: pending-pulse 1.6s ease-in-out infinite;
+}
+@keyframes pending-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bin-thumb-placeholder.pending {
+    animation: none;
+  }
+}
+
+.bin-badge-missing {
+  position: absolute;
+  left: 4px;
+  bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------- tool switcher */
+
+.toolgroup {
+  display: flex;
+  gap: 2px;
 }

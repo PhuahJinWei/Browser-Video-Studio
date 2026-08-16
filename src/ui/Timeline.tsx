@@ -37,11 +37,13 @@ import type {
   Time,
   Track,
   TrackId,
+  TrackKind,
   Transition,
   TransitionId,
 } from '../model/types';
 import { useContextMenu, type MenuEntry } from './ContextMenu';
 import {
+  IconAlert,
   IconAudio,
   IconClose,
   IconEye,
@@ -90,6 +92,58 @@ const SNAP_PIXELS = 8;
 type DragKind = 'move' | 'trim-in' | 'trim-out';
 
 /**
+ * A time after snapping, and what it snapped to.
+ *
+ * The readout has to show the snapped value rather than the raw pointer time: a
+ * number that disagrees with where the clip actually lands is worse than none,
+ * and it disagrees precisely when accuracy is being relied on.
+ */
+interface Snapped {
+  readonly at: Time;
+  /** The point it locked onto, or null when it moved freely. */
+  readonly hit: Time | null;
+}
+
+/**
+ * The timecode that follows the pointer through a drag.
+ *
+ * Placed from client coordinates and rendered fixed, so it does not drift when the
+ * timeline is scrolled mid-gesture.
+ */
+interface DragHint {
+  readonly clientX: number;
+  readonly clientY: number;
+  readonly primary: string;
+  readonly secondary: string | null;
+  readonly snapped: boolean;
+}
+
+/**
+ * Where a new track would go, worked out from a pointer that has left the block of
+ * lanes its clip can live on.
+ *
+ * Deliberately triggered by leaving the block rather than by hovering near a seam:
+ * a proximity band inside the lanes fires on the small vertical drift of an ordinary
+ * horizontal drag, and offering to restructure the timeline by accident is worse
+ * than making the gesture slightly more deliberate.
+ */
+interface Insertion {
+  readonly trackKind: TrackKind;
+  /** Insertion index within that kind's list in the document. */
+  readonly index: number;
+  /** Client Y of the edge to draw the line along. */
+  readonly clientY: number;
+  readonly label: string;
+}
+
+/** The same idea for media dragged out of the library, which uses native drag events. */
+interface AssetInsertion {
+  readonly where: 'top' | 'bottom';
+  readonly trackKind: TrackKind;
+  readonly index: number;
+}
+
+/**
  * What a click on a clip means.
  *
  * Ctrl/Cmd and Shift used to do the same thing. They are the two halves of
@@ -97,6 +151,18 @@ type DragKind = 'move' | 'trim-in' | 'trim-out';
  * takes everything between.
  */
 type SelectModifier = 'replace' | 'toggle' | 'range' | 'isolate';
+
+/**
+ * Whether a pointerdown should start a gesture at all.
+ *
+ * `pointerdown` fires for the right button too, and it fires *before* `contextmenu`.
+ * Without this, right-clicking one of several selected clips ran the plain-click
+ * path first and collapsed the selection to that clip — so by the time the menu
+ * opened, "Group" saw a single clip and was disabled.
+ */
+function isPrimaryButton(event: React.PointerEvent): boolean {
+  return event.button === 0;
+}
 
 function selectModifier(event: React.PointerEvent | React.MouseEvent): SelectModifier {
   // Alt first: isolating one clip out of its unit beats any of the others.
@@ -217,6 +283,7 @@ export function Timeline(): React.JSX.Element {
   const selectWithin = useStudio((s) => s.selectWithin);
   const setInspectorOpen = useLayout((s) => s.setInspectorOpen);
   const inspectorOpen = useLayout((s) => s.inspectorOpen);
+  const setStatus = useStudio((s) => s.setStatus);
   const setError = useStudio((s) => s.setError);
   const selectedTransitionId = useStudio((s) => s.selectedTransitionId);
   const selectedTrackId = useStudio((s) => s.selectedTrackId);
@@ -226,6 +293,10 @@ export function Timeline(): React.JSX.Element {
   const duration = useStudio((s) => s.duration);
   const previews = useStudio((s) => s.previews);
   const dropAssetOnTrack = useStudio((s) => s.dropAssetOnTrack);
+  const dropAssetOnNewTrack = useStudio((s) => s.dropAssetOnNewTrack);
+  const moveClipsToNewTrack = useStudio((s) => s.moveClipsToNewTrack);
+  const splitTracksAt = useStudio((s) => s.splitTracksAt);
+  const tool = useStudio((s) => s.tool);
   const draggingAssetId = useStudio((s) => s.draggingAssetId);
   const menu = useContextMenu();
   // Previews arrive asynchronously; this re-renders the lanes when one lands.
@@ -249,6 +320,63 @@ export function Timeline(): React.JSX.Element {
   const [dropTrackId, setDropTrackId] = useState<TrackId | null>(null);
   /** Time+offset to restore after a zoom, so the pointer stays over the same frame. */
   const pendingAnchor = useRef<{ seconds: number; offset: number } | null>(null);
+
+  /** The readout following the pointer, and the edge a drag has caught. */
+  const [hint, setHint] = useState<DragHint | null>(null);
+  const [snapMark, setSnapMark] = useState<Time | null>(null);
+  const [insertion, setInsertion] = useState<Insertion | null>(null);
+  /**
+   * The live insertion, for the pointer-up handler.
+   *
+   * `up` closes over the render that registered it, and the last pointer move may
+   * have arrived after that — a ref is what makes the drop see the newest answer.
+   */
+  const insertionRef = useRef<Insertion | null>(null);
+  /**
+   * A media drop aimed above or below every lane.
+   *
+   * The clip-drag path works this out from the pointer on each move; a native
+   * drag cannot, because `dragover` fires on whatever element is under the cursor
+   * and the space above the lanes belongs to the ruler.
+   */
+  const [assetInsertion, setAssetInsertion] = useState<AssetInsertion | null>(null);
+
+  const frameRate = sequence.frameRate;
+
+  /** Clear everything a gesture puts on screen. */
+  const clearGestureHints = useCallback((): void => {
+    setHint(null);
+    setSnapMark(null);
+    setInsertion(null);
+    insertionRef.current = null;
+  }, []);
+
+  /**
+   * Where a media drop above or below every lane would put its new track.
+   *
+   * Null when the asset has no stream for that kind of track — dragging a music file
+   * up over the video stack should not offer to make a video track it cannot fill.
+   */
+  const assetInsertionFor = useCallback(
+    (where: 'top' | 'bottom'): AssetInsertion | null => {
+      const asset = draggingAssetId ? project.assets[draggingAssetId] : null;
+      if (!asset) return null;
+      if (where === 'top') {
+        return asset.video
+          ? { where, trackKind: 'video', index: sequence.videoTrackIds.length }
+          : null;
+      }
+      return asset.audio ? { where, trackKind: 'audio', index: sequence.audioTrackIds.length } : null;
+    },
+    [draggingAssetId, project, sequence.videoTrackIds.length, sequence.audioTrackIds.length],
+  );
+
+  const showHint = useCallback(
+    (event: { clientX: number; clientY: number }, primary: string, secondary: string | null, snapped: boolean): void => {
+      setHint({ clientX: event.clientX, clientY: event.clientY, primary, secondary, snapped });
+    },
+    [],
+  );
 
   /**
    * Where a dropped asset would land, as a pixel rect, keyed by track.
@@ -335,9 +463,15 @@ export function Timeline(): React.JSX.Element {
     [pxPerSecond],
   );
 
-  /** Snap a time to nearby clip edges and the playhead, within a pixel tolerance. */
+  /**
+   * Snap a time to nearby clip edges and the playhead, within a pixel tolerance.
+   *
+   * Reports what it locked onto as well as the result, so the readout can show the
+   * value the clip will actually take and the lane can draw a line on the edge it
+   * caught — an invisible snap is indistinguishable from a mis-drag.
+   */
   const snap = useCallback(
-    (at: Time, exclude: ReadonlySet<ClipId>): Time => {
+    (at: Time, exclude: ReadonlySet<ClipId>): Snapped => {
       const tolerance = SNAP_PIXELS / pxPerSecond;
       let best: Time | null = null;
       let bestDistance = Infinity;
@@ -359,9 +493,58 @@ export function Timeline(): React.JSX.Element {
           consider(clipEnd(clip));
         }
       }
-      return best ?? at;
+      return best === null ? { at, hit: null } : { at: best, hit: best };
     },
     [pxPerSecond, playhead, project, trackIds],
+  );
+
+  /**
+   * Where a new track would go for a clip of this kind, or null to drop normally.
+   *
+   * Armed by the pointer leaving the block of lanes the clip can live on at all —
+   * above the video stack, or below it into the audio lanes where a video clip
+   * cannot land anyway. That makes the gesture unambiguous without a proximity band
+   * that would fire on the ordinary vertical drift of a horizontal drag.
+   */
+  const insertionAt = useCallback(
+    (clientY: number, clipKind: Clip['kind']): Insertion | null => {
+      const lanes = [...(lanesRef.current?.querySelectorAll<HTMLElement>('[data-track-id]') ?? [])];
+      if (lanes.length === 0) return null;
+
+      const rects = lanes.map((lane) => lane.getBoundingClientRect());
+      const videoCount = sequence.videoTrackIds.length;
+      const trackKind: TrackKind = clipFitsTrack(clipKind, 'video') ? 'video' : 'audio';
+
+      // The span of display rows this kind occupies. Video is listed top-down, so
+      // the video block always runs from row 0 to row videoCount - 1.
+      const first = trackKind === 'video' ? 0 : videoCount;
+      const last = (trackKind === 'video' ? videoCount : rects.length) - 1;
+      const empty = first > last;
+
+      const label = `New ${trackKind} track`;
+      // Above the block: the new track goes on top of that kind's stack. For video
+      // that is the end of `videoTrackIds`, since display order reverses it.
+      if (!empty && clientY < rects[first]!.top) {
+        return {
+          trackKind,
+          index: trackKind === 'video' ? videoCount : 0,
+          clientY: rects[first]!.top,
+          label,
+        };
+      }
+      // Below the block: the bottom of that kind's stack.
+      const bottom = empty ? rects[rects.length - 1]!.bottom : rects[last]!.bottom;
+      if (clientY > bottom) {
+        return {
+          trackKind,
+          index: trackKind === 'video' ? 0 : sequence.audioTrackIds.length,
+          clientY: bottom,
+          label,
+        };
+      }
+      return null;
+    },
+    [sequence.videoTrackIds.length, sequence.audioTrackIds.length],
   );
 
   // ---------------------------------------------------------------- dragging
@@ -378,17 +561,36 @@ export function Timeline(): React.JSX.Element {
       const excluded = new Set(drag.groupIds);
 
       if (drag.kind === 'move') {
+        // Leaving the block of lanes this clip can live on means a new track rather
+        // than a failed drop. The clip keeps its own lane meanwhile — the line shows
+        // where it is going, and the track itself is not made until the pointer is
+        // released, so a drag across the gap cannot leave a trail of empty tracks.
+        const wantsNewTrack = insertionAt(event.clientY, clip.kind);
+        insertionRef.current = wantsNewTrack;
+        setInsertion(wantsNewTrack);
+
         // The lane under the pointer is the destination, so a clip can change track.
-        const hovered = trackAtClientY(event.clientY);
+        const hovered = wantsNewTrack ? null : trackAtClientY(event.clientY);
         const destination =
           hovered && clipFitsTrack(clip.kind, getTrack(project, hovered).kind) && !getTrack(project, hovered).locked
             ? hovered
             : drag.originTrackId;
 
-        const wanted = snap(T.max(T.TIME_ZERO, T.add(drag.originStart, delta)), excluded);
+        const snapped = snap(T.max(T.TIME_ZERO, T.add(drag.originStart, delta)), excluded);
+        const wanted = snapped.at;
         // Butt up against whatever is already on the destination track rather than
         // overwriting it.
         const target = clampToFreeSpace(project, destination, wanted, clip.duration, excluded);
+
+        // The readout reports the position actually taken — after snapping and after
+        // being clamped off a neighbour — not where the pointer happens to be.
+        showHint(
+          event,
+          T.toTimecode(target, frameRate),
+          formatDelta(T.sub(target, drag.originStart), frameRate),
+          snapped.hit !== null && T.eq(target, snapped.at),
+        );
+        setSnapMark(snapped.hit !== null && T.eq(target, snapped.at) ? snapped.hit : null);
 
         // Recompute from the drag origin each time so the gesture is not cumulative.
         const moves = drag.groupIds
@@ -425,7 +627,7 @@ export function Timeline(): React.JSX.Element {
       const edge: 'in' | 'out' = drag.kind === 'trim-in' ? 'in' : 'out';
       const anchor = edge === 'in' ? drag.originStart : T.add(drag.originStart, drag.originDuration);
       const snapped = snap(T.add(anchor, delta), excluded);
-      const shift = T.sub(snapped, anchor);
+      const shift = T.sub(snapped.at, anchor);
 
       const commands: Command[] = drag.groupIds
         .map((id) => project.clips[id])
@@ -437,10 +639,49 @@ export function Timeline(): React.JSX.Element {
           to: T.add(edge === 'in' ? c.start : clipEnd(c), shift),
         }));
       runMany(commands, 'Trim clip', `trim-${edge}:${drag.clipId}`);
+
+      // A trim is about length, so the length leads and the edge's own move follows.
+      // The duration is read back from the document, since the command clamps a trim
+      // to the material the source can supply and the pointer routinely asks for more.
+      const trimmed = useStudio.getState().project().clips[drag.clipId];
+      const duration = trimmed?.duration ?? drag.originDuration;
+      showHint(
+        event,
+        T.formatDuration(duration, { decimals: 2 }),
+        formatDelta(T.sub(duration, drag.originDuration), frameRate),
+        snapped.hit !== null,
+      );
+      setSnapMark(snapped.hit);
     };
 
     const up = (): void => {
+      const pending = insertionRef.current;
+      if (pending) {
+        // Read the document back rather than using this render's copy: the drag has
+        // been moving clips through it on every pointer event.
+        const state = useStudio.getState();
+        const latest = state.project();
+        const primary = latest.clips[drag.clipId];
+
+        if (primary) {
+          const moves = drag.groupIds
+            .map((id) => latest.clips[id])
+            .filter((c): c is Clip => c !== undefined)
+            .map((c) => ({
+              clipId: c.id,
+              // null lands on the track about to be made; a linked partner stays on
+              // its own, exactly as it does for an ordinary cross-track drag.
+              toTrackId: c.id === primary.id ? null : c.trackId,
+              toStart: c.start,
+            }));
+          // Same coalesce key as the drag, so the new track and the move it came
+          // from collapse into the one undo step the whole gesture deserves.
+          moveClipsToNewTrack(pending.trackKind, pending.index, moves, `drag:${drag.clipId}`);
+        }
+      }
+
       setDrag(null);
+      clearGestureHints();
       endGesture();
     };
 
@@ -450,7 +691,20 @@ export function Timeline(): React.JSX.Element {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
     };
-  }, [drag, project, pxPerSecond, runMany, snap, endGesture, trackAtClientY]);
+  }, [
+    drag,
+    project,
+    pxPerSecond,
+    runMany,
+    snap,
+    endGesture,
+    trackAtClientY,
+    insertionAt,
+    moveClipsToNewTrack,
+    clearGestureHints,
+    showHint,
+    frameRate,
+  ]);
 
   useEffect(() => {
     if (!transitionDrag) return;
@@ -471,6 +725,15 @@ export function Timeline(): React.JSX.Element {
           'Slide transition',
           `slide:${transitionDrag.transitionId}`,
         );
+        // Where the span actually settled, since the command clamps it to the
+        // handles the two clips can spare.
+        const settled = useStudio.getState().project().transitions[transitionDrag.transitionId];
+        showHint(
+          event,
+          T.formatDuration(transitionDrag.duration, { decimals: 2 }),
+          settled?.offset ? `offset ${formatDelta(settled.offset, frameRate)}` : 'centred on the cut',
+          false,
+        );
         return;
       }
 
@@ -487,6 +750,12 @@ export function Timeline(): React.JSX.Element {
           'Roll edit',
           `roll:${transitionDrag.transitionId}`,
         );
+        // A roll moves the cut, so the cut's new position is the number that matters —
+        // read back from the document, which clamps it to the available material.
+        const first = transitionDrag.cuts[0];
+        const moved = first ? useStudio.getState().project().clips[first.toId] : undefined;
+        const cut = moved?.start ?? pointer;
+        showHint(event, T.toTimecode(cut, frameRate), formatDelta(T.sub(cut, transitionDrag.cut), frameRate), false);
         return;
       }
 
@@ -505,10 +774,20 @@ export function Timeline(): React.JSX.Element {
         'Set transition length',
         `transition-drag:${transitionDrag.transitionId}`,
       );
+      showHint(
+        event,
+        T.formatDuration(T.fromSeconds(seconds, 1000), { decimals: 2 }),
+        transitionLabel(
+          useStudio.getState().project().transitions[transitionDrag.transitionId]?.transitionType ??
+            'dissolve',
+        ),
+        false,
+      );
     };
 
     const up = (): void => {
       setTransitionDrag(null);
+      clearGestureHints();
       endGesture();
     };
 
@@ -518,7 +797,7 @@ export function Timeline(): React.JSX.Element {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
     };
-  }, [transitionDrag, runMany, endGesture, timeAtClientX]);
+  }, [transitionDrag, runMany, endGesture, timeAtClientX, showHint, clearGestureHints, frameRate]);
 
   /**
    * Drop a transition style onto a track: it lands on the cut closest to where
@@ -725,14 +1004,20 @@ export function Timeline(): React.JSX.Element {
         icon: <IconGroup />,
         hint: 'Ctrl+G',
         disabled: selection.length < 2,
-        onSelect: () => run({ type: 'groupClips', clipIds: selection }, 'Group clips'),
+        onSelect: () => {
+          run({ type: 'groupClips', clipIds: selection }, 'Group clips');
+          setStatus(`Grouped ${selection.length} clips — they now move and trim together.`);
+        },
       },
       {
         label: 'Ungroup',
         icon: <IconUngroup />,
         hint: 'Ctrl+Shift+G',
         disabled: !selection.some((id) => project.clips[id]?.groupId),
-        onSelect: () => run({ type: 'ungroupClips', clipIds: selection }, 'Ungroup clips'),
+        onSelect: () => {
+          run({ type: 'ungroupClips', clipIds: selection }, 'Ungroup clips');
+          setStatus('Ungrouped — those clips move independently again.');
+        },
       },
       'separator',
       {
@@ -972,7 +1257,11 @@ export function Timeline(): React.JSX.Element {
   // ------------------------------------------------------------- interaction
 
   const scrubFromEvent = (event: React.PointerEvent): void => {
-    setPlayhead(timeAtClientX(event.clientX));
+    const at = timeAtClientX(event.clientX);
+    setPlayhead(at);
+    // Scrubbing gets the same readout as a clip drag: the ruler's own ticks thin
+    // out as you zoom out, so the nearest label can be half a minute away.
+    showHint(event, T.toTimecode(at, frameRate), null, false);
   };
 
   const onRulerPointerDown = (event: React.PointerEvent): void => {
@@ -981,6 +1270,37 @@ export function Timeline(): React.JSX.Element {
   };
   const onRulerPointerMove = (event: React.PointerEvent): void => {
     if (event.buttons === 1) scrubFromEvent(event);
+  };
+  const onRulerPointerUp = (): void => clearGestureHints();
+
+  /**
+   * Cut a clip where the razor was clicked.
+   *
+   * The whole unit is cut by default, so a linked pair comes apart together and its
+   * halves stay the same length; Alt cuts only the track under the pointer, for the
+   * times you want the sound to run under the new picture.
+   */
+  const razorCut = (event: React.PointerEvent, clip: Clip): void => {
+    event.stopPropagation();
+    event.preventDefault();
+    const at = timeAtClientX(event.clientX);
+
+    // A cut exactly on an edge splits nothing and would silently do nothing at all.
+    if (!T.gt(at, clip.start) || !T.lt(at, clipEnd(clip))) {
+      setError('Click inside a clip to cut it');
+      return;
+    }
+
+    const tracks = event.altKey
+      ? [clip.trackId]
+      : [
+          ...new Set(
+            selectionUnit(project, clip.id)
+              .map((id) => project.clips[id]?.trackId)
+              .filter((id): id is TrackId => id !== undefined),
+          ),
+        ];
+    splitTracksAt(at, tracks);
   };
 
   /**
@@ -1031,8 +1351,12 @@ export function Timeline(): React.JSX.Element {
     [totalSeconds, pxPerSecond, sequence.frameRate],
   );
 
+  // Rounded, because the line is drawn from this and a fractional left edge makes a
+  // 2px rule antialias across three columns and read as a soft grey smear.
+  const playheadX = Math.round(T.toSeconds(playhead) * pxPerSecond);
+
   return (
-    <div className="timeline" ref={scrollRef}>
+    <div className={`timeline tool-${tool}`} ref={scrollRef}>
       {/*
         One scroll container for the headers, the ruler and the lanes. The header
         column is sticky-left and the ruler sticky-top, so both stay put while the
@@ -1058,17 +1382,61 @@ export function Timeline(): React.JSX.Element {
             </button>
           </div>
           <div
-            className="ruler"
+            className={`ruler${assetInsertion?.where === 'top' ? ' insert-active' : ''}`}
             style={{ width: contentWidth }}
             onPointerDown={onRulerPointerDown}
             onPointerMove={onRulerPointerMove}
+            onPointerUp={onRulerPointerUp}
             onContextMenu={openRulerMenu}
+            // Media dragged up above every lane means a new track on top, the same
+            // as it does for a clip. Handled here because the ruler is what actually
+            // occupies that space — there is no lane above the first one to catch it.
+            onDragOver={(event) => {
+              if (!event.dataTransfer.types.includes(ASSET_DRAG_TYPE)) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = 'copy';
+              setDropTrackId(null);
+              setAssetInsertion(assetInsertionFor('top'));
+            }}
+            onDragLeave={() => setAssetInsertion(null)}
+            onDrop={(event) => {
+              const assetId = event.dataTransfer.getData(ASSET_DRAG_TYPE);
+              setAssetInsertion(null);
+              if (!assetId) return;
+              event.preventDefault();
+              const target = assetInsertionFor('top');
+              if (target) dropAssetOnNewTrack(assetId as never, target.trackKind, target.index);
+            }}
           >
             {ticks.map((tick) => (
               <div key={tick.seconds} className="tick" style={{ left: tick.x }}>
                 {tick.label}
               </div>
             ))}
+            {/*
+              The grab handle lives inside the ruler rather than in a full-height
+              overlay, so the sticky corner covers it when the timeline is scrolled
+              right instead of it floating over the track headers.
+            */}
+            <div
+              className="playhead-head"
+              style={{ left: playheadX }}
+              title={`Playhead ${T.toTimecode(playhead, frameRate)} — drag to scrub`}
+              onPointerDown={(event) => {
+                if (!isPrimaryButton(event)) return;
+                event.stopPropagation();
+                event.preventDefault();
+                (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+                showHint(event, T.toTimecode(playhead, frameRate), null, false);
+              }}
+              onPointerMove={(event) => {
+                if (event.buttons !== 1) return;
+                const at = timeAtClientX(event.clientX);
+                setPlayhead(at);
+                showHint(event, T.toTimecode(at, frameRate), null, false);
+              }}
+              onPointerUp={() => clearGestureHints()}
+            />
           </div>
         </div>
 
@@ -1126,6 +1494,7 @@ export function Timeline(): React.JSX.Element {
                   onPointerDown={(event) => {
                     // Only from bare lane: a clip or a badge handles its own.
                     if (event.target !== event.currentTarget) return;
+                    if (!isPrimaryButton(event)) return;
                     if (!event.ctrlKey && !event.metaKey) select([]);
                     setMarquee({
                       originClientX: event.clientX,
@@ -1165,6 +1534,7 @@ export function Timeline(): React.JSX.Element {
                         title={`${transitionLabel(transition.transitionType)} · ${T.formatDuration(transition.duration, { decimals: 2 })}\nDrag to slide · drag an edge to retime · Alt-drag to roll the cut`}
                         onContextMenu={(event) => openTransitionMenu(event, transition)}
                         onPointerDown={(event) => {
+                          if (!isPrimaryButton(event)) return;
                           // The badge covers the cut's own trim handles, so Alt on
                           // the body is how the cut underneath stays reachable.
                           startTransitionDrag(
@@ -1178,11 +1548,15 @@ export function Timeline(): React.JSX.Element {
                         {width >= 56 && <span className="transition-label">{label}</span>}
                         <div
                           className="transition-handle left"
-                          onPointerDown={(event) => startTransitionDrag(event, transition, 'length')}
+                          onPointerDown={(event) =>
+                            isPrimaryButton(event) && startTransitionDrag(event, transition, 'length')
+                          }
                         />
                         <div
                           className="transition-handle right"
-                          onPointerDown={(event) => startTransitionDrag(event, transition, 'length')}
+                          onPointerDown={(event) =>
+                            isPrimaryButton(event) && startTransitionDrag(event, transition, 'length')
+                          }
                         />
                       </div>
                     );
@@ -1194,12 +1568,19 @@ export function Timeline(): React.JSX.Element {
                       pxPerSecond={pxPerSecond}
                       selected={selection.includes(clip.id)}
                       preview={previewStyle(clip, pxPerSecond, previews)}
+                      loading={isMediaClip(clip) && previews?.getFilmstrip(clip.assetId) === undefined
+                        && previews?.getWaveform(clip.assetId) === undefined}
+                      missing={
+                        isMediaClip(clip) && project.assets[clip.assetId]?.status.state === 'missing'
+                      }
+                      razor={tool === 'razor'}
                       onSelect={(modifier) => {
                         if (modifier === 'isolate') selectExact([clip.id]);
                         else if (modifier === 'toggle') toggleSelect(clip.id);
                         else if (modifier === 'range') selectRangeTo(clip.id);
                         else select([clip.id]);
                       }}
+                      onRazor={(event) => razorCut(event, clip)}
                       onDragStart={(event, kind, modifier) => startDrag(event, clip, kind, modifier)}
                       onContextMenu={(event) => openClipMenu(event, clip)}
                     />
@@ -1209,34 +1590,72 @@ export function Timeline(): React.JSX.Element {
             );
           })}
 
+          {/*
+            The space under the last lane. It exists because the grid is stretched to
+            fill the pane — which is also what lets the playhead run to the floor —
+            and it is the natural place to drop something to give it a track of its own.
+          */}
+          <div
+            className={`timeline-tail${assetInsertion?.where === 'bottom' ? ' insert-active' : ''}`}
+            onDragOver={(event) => {
+              if (!event.dataTransfer.types.includes(ASSET_DRAG_TYPE)) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = 'copy';
+              setDropTrackId(null);
+              setAssetInsertion(assetInsertionFor('bottom'));
+            }}
+            onDragLeave={() => setAssetInsertion(null)}
+            onDrop={(event) => {
+              const assetId = event.dataTransfer.getData(ASSET_DRAG_TYPE);
+              setAssetInsertion(null);
+              if (!assetId) return;
+              event.preventDefault();
+              const target = assetInsertionFor('bottom');
+              if (target) dropAssetOnNewTrack(assetId as never, target.trackKind, target.index);
+            }}
+            onPointerDown={(event) => {
+              // Clicking past the end of the tracks clears the selection, the same as
+              // clicking bare lane does.
+              if (event.target !== event.currentTarget) return;
+              if (!event.ctrlKey && !event.metaKey) select([]);
+            }}
+          >
+            {assetInsertion?.where === 'bottom' && (
+              <span className="insert-note">New {assetInsertion.trackKind} track</span>
+            )}
+          </div>
+
+          {/*
+            Below the lanes in the stacking order but above the clips, so the sticky
+            track headers cover it when the timeline is scrolled right. It used to sit
+            over the whole grid at a higher z-index and painted straight across them.
+          */}
+          <div className="playhead-line" style={{ left: HEADER_WIDTH + playheadX }} />
+
+          {snapMark !== null && (
+            <div
+              className="snap-line"
+              style={{
+                left: HEADER_WIDTH + Math.round(T.toSeconds(snapMark) * pxPerSecond),
+              }}
+            />
+          )}
         </div>
 
         {marquee && <MarqueeBox marquee={marquee} />}
-
-        {/*
-          A sibling of the topbar and the lanes rather than a child of either, so the
-          line runs from the ruler right down through the tracks. Its head sits in
-          the ruler and takes pointer events, so the playhead can be dragged directly
-          instead of only by clicking the ruler behind it.
-        */}
-        <div
-          className="playhead"
-          style={{ left: HEADER_WIDTH + T.toSeconds(playhead) * pxPerSecond }}
-        >
-          <div
-            className="playhead-head"
-            onPointerDown={(event) => {
-              event.stopPropagation();
-              event.preventDefault();
-              (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-            }}
-            onPointerMove={(event) => {
-              if (event.buttons !== 1) return;
-              setPlayhead(timeAtClientX(event.clientX));
-            }}
-          />
-        </div>
       </div>
+
+      {/*
+        Both of these are placed straight from pointer coordinates, so they are fixed
+        rather than absolute — inside the scrolling grid they would drift the moment
+        the timeline scrolled under them.
+      */}
+      {insertion && (
+        <div className="insert-line" style={{ top: insertion.clientY }}>
+          <span className="insert-note">{insertion.label}</span>
+        </div>
+      )}
+      {hint && <DragHintBox hint={hint} />}
     </div>
   );
 }
@@ -1342,6 +1761,7 @@ function TrackHeader({
       onPointerDown={(event) => {
         // Buttons and the rename field handle their own clicks.
         if ((event.target as HTMLElement).closest('button, input')) return;
+        if (!isPrimaryButton(event)) return;
         onSelect();
       }}
       onContextMenu={(event) => {
@@ -1465,7 +1885,11 @@ function ClipView({
   pxPerSecond,
   selected,
   preview,
+  loading,
+  missing,
+  razor,
   onSelect,
+  onRazor,
   onDragStart,
   onContextMenu,
 }: {
@@ -1473,7 +1897,13 @@ function ClipView({
   pxPerSecond: number;
   selected: boolean;
   preview: React.CSSProperties | undefined;
+  /** No preview has landed yet, and none has failed — it is still being decoded. */
+  loading: boolean;
+  /** The asset's bytes could not be found when the project was reopened. */
+  missing: boolean;
+  razor: boolean;
   onSelect: (modifier: SelectModifier) => void;
+  onRazor: (event: React.PointerEvent) => void;
   onDragStart: (event: React.PointerEvent, kind: DragKind, modifier: SelectModifier) => void;
   onContextMenu: (event: React.MouseEvent) => void;
 }): React.JSX.Element {
@@ -1490,35 +1920,98 @@ function ClipView({
   // A fill clip shows the colour it produces, so the timeline reads at a glance.
   const fillStyle = clip.kind === 'solid' ? { background: clip.fill } : undefined;
 
+  const title = missing
+    ? `${clip.name} — the file could not be found; re-import it to bring this clip back`
+    : `${clip.name} · ${T.formatDuration(clip.duration, { decimals: 2 })}`;
+
   return (
     <div
-      className={`clip ${kindClass}${selected ? ' selected' : ''}${clip.enabled ? '' : ' disabled'}${preview ? ' has-preview' : ''}${isGrouped(clip) ? ' grouped' : ''}`}
+      className={`clip ${kindClass}${selected ? ' selected' : ''}${clip.enabled ? '' : ' disabled'}${preview ? ' has-preview' : ''}${isGrouped(clip) ? ' grouped' : ''}${loading ? ' loading' : ''}${missing ? ' missing' : ''}`}
       style={{ left, width, ...preview, ...fillStyle }}
-      title={`${clip.name} · ${T.formatDuration(clip.duration, { decimals: 2 })}`}
+      title={title}
       onContextMenu={onContextMenu}
       onPointerDown={(event) => {
+        // Right-click is the context menu's business; selecting here would collapse
+        // a multi-selection before the menu could act on it.
+        if (!isPrimaryButton(event)) return;
+        // The razor cuts instead of selecting, so it never starts a drag — clicking
+        // a clip to slice it and accidentally nudging it sideways is the one thing
+        // that would make the tool not worth having.
+        if (razor) {
+          onRazor(event);
+          return;
+        }
         const modifier = selectModifier(event);
         onSelect(modifier);
         onDragStart(event, 'move', modifier);
       }}
     >
-      <div
-        className="handle left"
-        onPointerDown={(event) => {
-          const modifier = event.altKey ? 'isolate' : 'replace';
-          onSelect(modifier);
-          onDragStart(event, 'trim-in', modifier);
-        }}
-      />
-      <div className="clip-name">{clip.name}</div>
-      <div
-        className="handle right"
-        onPointerDown={(event) => {
-          const modifier = event.altKey ? 'isolate' : 'replace';
-          onSelect(modifier);
-          onDragStart(event, 'trim-out', modifier);
-        }}
-      />
+      {/* Trim handles would fight the blade for the clip's edges. */}
+      {!razor && (
+        <div
+          className="handle left"
+          onPointerDown={(event) => {
+            if (!isPrimaryButton(event)) return;
+            const modifier = event.altKey ? 'isolate' : 'replace';
+            onSelect(modifier);
+            onDragStart(event, 'trim-in', modifier);
+          }}
+        />
+      )}
+      <div className="clip-name">
+        {isGrouped(clip) && (
+          <span className="clip-badge" title="Grouped — moves and trims with its group">
+            <IconGroup size={9} />
+          </span>
+        )}
+        {missing && (
+          <span className="clip-badge missing" title="Media missing — re-import the file">
+            <IconAlert size={9} />
+          </span>
+        )}
+        {clip.name}
+      </div>
+      {!razor && (
+        <div
+          className="handle right"
+          onPointerDown={(event) => {
+            if (!isPrimaryButton(event)) return;
+            const modifier = event.altKey ? 'isolate' : 'replace';
+            onSelect(modifier);
+            onDragStart(event, 'trim-out', modifier);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * A signed offset, for the second line of a drag readout.
+ *
+ * The absolute position tells you where a clip landed; the delta tells you how far
+ * it travelled, which is the number you are actually holding in your head when
+ * nudging something into place against a cut somewhere off screen.
+ */
+function formatDelta(delta: Time, frameRate: FrameRate): string {
+  if (T.isZero(delta)) return '±0';
+  // A true minus sign rather than a hyphen: it sits on the digit baseline in the
+  // monospaced face the readout uses, where a hyphen rides high and reads as a dash.
+  const sign = T.isNegative(delta) ? '−' : '+';
+  return `${sign}${T.toTimecode(T.abs(delta), frameRate)}`;
+}
+
+/** The readout that follows the pointer through a drag. */
+function DragHintBox({ hint }: { hint: DragHint }): React.JSX.Element {
+  return (
+    <div
+      className={`drag-hint${hint.snapped ? ' snapped' : ''}`}
+      // Offset up and right of the pointer so the cursor never covers the digits,
+      // and fixed so it does not drift if the timeline scrolls mid-gesture.
+      style={{ left: hint.clientX + 14, top: hint.clientY - 34 }}
+    >
+      <span className="primary">{hint.primary}</span>
+      {hint.secondary && <span className="secondary">{hint.secondary}</span>}
     </div>
   );
 }
