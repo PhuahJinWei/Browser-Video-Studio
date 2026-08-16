@@ -31,8 +31,17 @@ import {
 } from './Icons';
 import { useLayout } from './layout';
 import { useStudio } from './store';
-import { ASSET_DRAG_TYPE } from './Timeline';
+import { ASSET_DRAG_TYPE, HOVER_DELAY_MS, HoverCard, type HoverCardState } from './Timeline';
 import { TRANSITION_DRAG_TYPE, TRANSITION_LABELS } from './transitions';
+
+/**
+ * Assets before the search field is worth a row of the panel.
+ *
+ * Below this everything is on screen already and a search box is just something
+ * else to look at; above it, searching across folders is the only way to find
+ * anything.
+ */
+const SEARCH_FROM = 8;
 
 type MediaFilterId = 'all' | 'video' | 'audio' | 'stills';
 
@@ -74,6 +83,7 @@ export function MediaBin(): React.JSX.Element {
   const assetUsage = useStudio((s) => s.assetUsage);
   const moveAssetsToFolder = useStudio((s) => s.moveAssetsToFolder);
   const renameAssetFolder = useStudio((s) => s.renameAssetFolder);
+  const addAssetToTimeline = useStudio((s) => s.addAssetToTimeline);
   const menu = useContextMenu();
 
   const [dragOver, setDragOver] = useState(false);
@@ -171,9 +181,99 @@ export function MediaBin(): React.JSX.Element {
 
   const crumbs = folder ? folder.split('/') : [];
 
+  /**
+   * The detail card, on the same delay the timeline uses.
+   *
+   * Dropped the moment a drag starts: a card following the pointer while media is
+   * being dragged onto a track would sit over the very lane being aimed at.
+   */
+  const [hoverCard, setHoverCard] = useState<HoverCardState | null>(null);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const cancelHover = (): void => {
+    if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
+    hoverTimer.current = null;
+    setHoverCard(null);
+  };
+
+  const startHover = (
+    event: React.PointerEvent,
+    asset: Asset,
+    rows: readonly { label: string; value: string }[],
+  ): void => {
+    if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
+    const { clientX, clientY } = event;
+    hoverTimer.current = setTimeout(() => {
+      if (useStudio.getState().draggingAssetId) return;
+      setHoverCard({
+        clientX,
+        clientY,
+        title: asset.name,
+        subtitle: asset.source?.fileName ?? null,
+        rows: [...rows],
+      });
+    }, HOVER_DELAY_MS);
+  };
+
+  /**
+   * Shortcuts, while this panel has focus.
+   *
+   * Handled here rather than in the global listener because only this component
+   * knows what is actually on screen — the folder, the type filter and the search box
+   * all narrow the list, and "select all" has to mean the visible ones. Selecting
+   * things you cannot see and then deleting them is how work gets lost.
+   *
+   * Stopping propagation matters as much as handling: Delete used to reach the window
+   * listener and remove timeline *clips* while media was selected here, which is the
+   * wrong target entirely. Keys this panel does not claim still bubble, so Space keeps
+   * playing and the arrows keep stepping.
+   */
+  const onPanelKeyDown = (event: React.KeyboardEvent): void => {
+    // The search field owns its own keys.
+    if ((event.target as HTMLElement).tagName === 'INPUT') return;
+    const mod = event.ctrlKey || event.metaKey;
+
+    if (mod && event.key.toLowerCase() === 'a') {
+      event.preventDefault();
+      event.stopPropagation();
+      selectAssets(visibleIds);
+      return;
+    }
+    if (event.key === 'Delete' || event.key === 'Backspace') {
+      if (selectedHere.length === 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      deleteSelected();
+      return;
+    }
+    if (event.key === 'Escape') {
+      if (search) setSearch('');
+      else if (selectedHere.length > 0) selectAssets([]);
+      else return;
+      event.stopPropagation();
+      return;
+    }
+    if (event.key === 'Enter' && selectedHere.length > 0) {
+      event.preventDefault();
+      event.stopPropagation();
+      for (const id of selectedHere) void addAssetToTimeline(id);
+    }
+  };
+
   return (
     <div
       className={`panel media-bin${dragOver ? ' drag-over' : ''}`}
+      // Focusable so its shortcuts can be scoped to it. -1 rather than 0: it should
+      // be reachable by clicking, not another stop on the way round the Tab order.
+      tabIndex={-1}
+      onKeyDown={onPanelKeyDown}
+      onPointerDownCapture={(event) => {
+        // Clicking anywhere in the panel makes it the keyboard target, except where
+        // a field wants the caret.
+        if ((event.target as HTMLElement).tagName !== 'INPUT') {
+          event.currentTarget.focus({ preventScroll: true });
+        }
+      }}
       onDragEnter={(event) => {
         if (!carriesFiles(event)) return;
         dragDepth.current += 1;
@@ -210,11 +310,10 @@ export function MediaBin(): React.JSX.Element {
         ]);
       }}
     >
-      <div className="panel-head">
-        <span>Library</span>
-        <span className="spacer" style={{ flex: 1 }} />
-      </div>
-
+      {/*
+        No panel head. It cost a row of height to repeat what the tabs below it
+        already say, and vertical space in this column is the scarce thing.
+      */}
       {/*
         Two tabs rather than one per media type: the panel is too narrow to keep
         five labels legible, and transitions are a library rather than something
@@ -243,11 +342,11 @@ export function MediaBin(): React.JSX.Element {
             <button className="icon" title="Import media… (Ctrl+I)" onClick={() => void importViaPicker()}>
               <IconPlus />
             </button>
-            <button className="icon" title="New folder…" onClick={newFolder}>
+            <button className="icon tint-folder" title="New folder…" onClick={newFolder}>
               <IconFolderPlus />
             </button>
             <button
-              className="icon"
+              className="icon tint-danger"
               title={
                 selectedHere.length > 0
                   ? `Remove ${selectedHere.length} selected from the project`
@@ -269,7 +368,9 @@ export function MediaBin(): React.JSX.Element {
             </button>
           </div>
 
-          {assets.length > 0 && (
+          {/* Kept while a search is live, or deleting assets would hide the field
+              with the list still filtered by it and no way to clear it. */}
+          {(assets.length >= SEARCH_FROM || search !== '') && (
             <div className="bin-search">
               <IconSearch size={12} />
               <input
@@ -411,8 +512,8 @@ export function MediaBin(): React.JSX.Element {
                     key={asset.id}
                     asset={asset}
                     selected={selectedAssetIds.includes(asset.id)}
-                    // Search results span folders, so the path is worth showing.
-                    showFolder={Boolean(query) && asset.folder !== ''}
+                    onHoverStart={startHover}
+                    onHoverEnd={cancelHover}
                     onSelect={(modifier) => {
                       if (modifier === 'toggle') toggleSelectAsset(asset.id);
                       else if (modifier === 'range') selectAssetRangeTo(asset.id, visibleIds);
@@ -437,6 +538,8 @@ export function MediaBin(): React.JSX.Element {
           Drop to import
         </div>
       )}
+
+      {hoverCard && <HoverCard state={hoverCard} />}
     </div>
   );
 }
@@ -538,18 +641,31 @@ function TransitionLibrary(): React.JSX.Element {
   );
 }
 
+const ASSET_KIND_LABELS: Record<string, string> = {
+  video: 'Video',
+  audio: 'Audio',
+  image: 'Still',
+  sequence: 'Sequence',
+};
+
 function AssetCard({
   asset,
   selected,
-  showFolder,
   onSelect,
   onDelete,
+  onHoverStart,
+  onHoverEnd,
 }: {
   asset: Asset;
   selected: boolean;
-  showFolder: boolean;
   onSelect: (modifier: 'replace' | 'toggle' | 'range') => void;
   onDelete: () => void;
+  onHoverStart: (
+    event: React.PointerEvent,
+    asset: Asset,
+    rows: readonly { label: string; value: string }[],
+  ) => void;
+  onHoverEnd: () => void;
 }): React.JSX.Element {
   const addAssetToTimeline = useStudio((s) => s.addAssetToTimeline);
   const setDraggingAsset = useStudio((s) => s.setDraggingAsset);
@@ -565,12 +681,36 @@ function AssetCard({
   const progress = previews?.getProgress(asset.id) ?? null;
   const missing = asset.status.state === 'missing';
 
-  const details: string[] = [];
-  if (asset.video) details.push(`${asset.video.size.width}×${asset.video.size.height}`);
-  if (asset.video?.frameRate) details.push(`${T.fpsToNumber(asset.video.frameRate).toFixed(2)} fps`);
-  if (asset.audio) details.push(`${asset.audio.channels}ch`);
-  if (asset.kind === 'image') details.push('still');
-  if (showFolder) details.push(asset.folder);
+  /*
+   * Every detail the meta line used to carry, and several it did not.
+   *
+   * The line under each card is gone — it repeated what the thumbnail already showed
+   * and cost a row on every card in the grid. Resting on the card gives all of it,
+   * with room for the things that never fitted.
+   */
+  const rows: { label: string; value: string }[] = [];
+  rows.push({ label: 'Kind', value: ASSET_KIND_LABELS[asset.kind] ?? asset.kind });
+  if (duration) rows.push({ label: 'Duration', value: T.formatDuration(duration, { decimals: 2 }) });
+  if (asset.video) {
+    rows.push({ label: 'Size', value: `${asset.video.size.width}×${asset.video.size.height}` });
+    if (asset.video.frameRate) {
+      rows.push({ label: 'Frame rate', value: `${T.fpsToNumber(asset.video.frameRate).toFixed(2)} fps` });
+    }
+    if (asset.video.codec) rows.push({ label: 'Codec', value: asset.video.codec });
+  }
+  if (asset.image) rows.push({ label: 'Size', value: `${asset.image.size.width}×${asset.image.size.height}` });
+  if (asset.audio) {
+    rows.push({
+      label: 'Audio',
+      value: `${asset.audio.channels} ch · ${asset.audio.sampleRate / 1000} kHz`,
+    });
+  }
+  if (asset.source) {
+    rows.push({ label: 'Size on disk', value: `${(asset.source.byteLength / 1e6).toFixed(1)} MB` });
+  }
+  rows.push({ label: 'Folder', value: asset.folder || 'Library' });
+  if (missing) rows.push({ label: 'Media', value: 'Missing — re-import it' });
+  if (progress !== null) rows.push({ label: 'Preview', value: `${Math.round(progress * 100)}%` });
 
   const onContextMenu = (event: React.MouseEvent): void => {
     // Right-clicking outside the selection acts on what was clicked, which is what
@@ -609,19 +749,21 @@ function AssetCard({
         // know the asset's duration while the drag is in flight.
         setDraggingAsset(asset.id);
       }}
-      onDragEnd={() => setDraggingAsset(null)}
+      onDragEnd={() => {
+        setDraggingAsset(null);
+        onHoverEnd();
+      }}
       onPointerDown={(event) =>
         onSelect(
           event.shiftKey ? 'range' : event.ctrlKey || event.metaKey ? 'toggle' : 'replace',
         )
       }
+      onPointerEnter={(event) => onHoverStart(event, asset, rows)}
+      onPointerLeave={onHoverEnd}
       onContextMenu={onContextMenu}
       onDoubleClick={() => void addAssetToTimeline(asset.id)}
-      title={
-        missing
-          ? `${asset.name}\nThe file could not be found — re-import it`
-          : `${asset.name}\nDrag onto a track, or double-click to append`
-      }
+      // No `title`: the hover card replaces it, and both at once shows a styled card
+      // with the browser's own tooltip appearing on top a moment later.
     >
       <div className="bin-thumb">
         {film ? (
@@ -656,10 +798,8 @@ function AssetCard({
         )}
       </div>
 
-      <span className="name" title={asset.name}>
-        {asset.name}
-      </span>
-      <span className="meta">{details.join(' · ')}</span>
+      {/* The meta line is gone; resting on the card gives all of it and more. */}
+      <span className="name">{asset.name}</span>
     </div>
   );
 }

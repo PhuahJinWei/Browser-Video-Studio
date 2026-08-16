@@ -323,7 +323,10 @@ export const useStudio = create<StudioState>((set, get) => ({
   draggingAssetId: null,
   status: 'Import media to begin.',
   error: null,
-  showTelemetry: true,
+  // Off to begin with. The panel is worth having — it is the only window onto
+  // where a frame's time actually goes — but it sits over the picture, and the
+  // picture is what you open the app to look at.
+  showTelemetry: false,
 
   project: () => current(get().history),
   playhead: () => getSequence(get().project(), get().sequenceId).view.playhead,
