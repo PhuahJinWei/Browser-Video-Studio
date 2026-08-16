@@ -211,7 +211,37 @@ describe('removeClips', () => {
 });
 
 describe('moveClips', () => {
-  it('moves within a track and overwrites what it lands on', () => {
+  it('refuses by default to drop a clip on top of another', () => {
+    // Landing on a clip must not silently resize it — resizing is a trim, and
+    // trims are an explicit gesture.
+    const p1 = run(
+      f,
+      insertCommand(f, { trackId: f.v1, start: sec(0), duration: sec(2), name: 'A' }),
+      insertCommand(f, { trackId: f.v1, start: sec(4), duration: sec(2), name: 'B' }),
+    );
+    const [a] = clipsOf(p1, f.v1);
+    expect(() =>
+      apply(p1, { type: 'moveClips', moves: [{ clipId: a!, toTrackId: f.v1, toStart: sec(5) }] }, f.ids),
+    ).toThrow(/would overlap/);
+    // The document is untouched by the rejected move.
+    expect(describeTrack(p1, f.v1)).toBe('A[0..2) B[4..6)');
+  });
+
+  it('allows a move into a clear gap', () => {
+    const p1 = run(
+      f,
+      insertCommand(f, { trackId: f.v1, start: sec(0), duration: sec(2), name: 'A' }),
+      insertCommand(f, { trackId: f.v1, start: sec(6), duration: sec(2), name: 'B' }),
+    );
+    const [a] = clipsOf(p1, f.v1);
+    const p2 = runFrom(f, p1, {
+      type: 'moveClips',
+      moves: [{ clipId: a!, toTrackId: f.v1, toStart: sec(3) }],
+    });
+    expect(describeTrack(p2, f.v1)).toBe('A[3..5) B[6..8)');
+  });
+
+  it('still overwrites when asked explicitly', () => {
     const p1 = run(
       f,
       insertCommand(f, { trackId: f.v1, start: sec(0), duration: sec(2), name: 'A' }),
@@ -220,6 +250,7 @@ describe('moveClips', () => {
     const [a] = clipsOf(p1, f.v1);
     const p2 = runFrom(f, p1, {
       type: 'moveClips',
+      mode: 'overwrite',
       moves: [{ clipId: a!, toTrackId: f.v1, toStart: sec(5) }],
     });
     expect(describeTrack(p2, f.v1)).toBe('B[4..5) A[5..7)');

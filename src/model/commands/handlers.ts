@@ -262,22 +262,28 @@ function handleMoveClips(d: Draft, cmd: Extract<Command, { type: 'moveClips' }>,
 
   const movedIds = new Set<ClipId>(moving.map(({ clip }) => clip.id));
   const linkRemap: LinkRemap = new Map();
+  const overwrite = (cmd.mode ?? 'block') === 'overwrite';
+
   for (const { move, clip } of moving) {
     // A drag can overshoot the start of the timeline; clamp rather than reject.
     const start = T.max(move.toStart, T.TIME_ZERO);
     const placed: Clip = { ...clip, trackId: move.toTrackId, start };
-    clearRangeOnTrack(d, move.toTrackId, clipRange(placed), ids, movedIds, linkRemap);
+    if (overwrite) {
+      clearRangeOnTrack(d, move.toTrackId, clipRange(placed), ids, movedIds, linkRemap);
+    }
     d.clips[placed.id] = placed;
     putClip(d, placed);
   }
 
-  // Moved clips are excluded from clearing, so they can still land on each other.
+  // In 'block' mode nothing was cleared, so any landing on an existing clip shows
+  // up here. In 'overwrite' mode this still catches moved clips hitting each other,
+  // since those are excluded from clearing.
   for (const trackId of new Set(moving.map(({ move }) => move.toTrackId))) {
     const clips = draftTrack(d, trackId).clipIds.map((id) => draftClip(d, id));
     for (let i = 1; i < clips.length; i++) {
       if (T.gt(clipEnd(clips[i - 1]!), clips[i]!.start)) {
         throw new ModelError(
-          `Move would overlap "${clips[i - 1]!.name}" and "${clips[i]!.name}" on the same track`,
+          `"${clips[i - 1]!.name}" and "${clips[i]!.name}" would overlap. Move it somewhere clear, or trim it first.`,
         );
       }
     }

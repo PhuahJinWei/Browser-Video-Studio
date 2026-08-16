@@ -89,6 +89,7 @@ export interface StudioState {
   importFiles: (files: readonly File[]) => Promise<void>;
   addAssetToTimeline: (assetId: AssetId) => Promise<void>;
   addTitle: (text: string) => void;
+  dropAssetOnTrack: (assetId: AssetId, trackId: TrackId, at: Time) => void;
   newProject: () => void;
   togglePlay: () => Promise<void>;
   runExport: (settings: ExportSettings) => Promise<void>;
@@ -214,7 +215,9 @@ export const useStudio = create<StudioState>((set, get) => ({
   setPlayhead: (at) => {
     const clamped = T.max(T.TIME_ZERO, at);
     get().runTransient({ type: 'setView', sequenceId: get().sequenceId, view: { playhead: clamped } });
-    get().engine?.requestRender(clamped);
+    // Goes through the engine rather than requestRender so that seeking while
+    // playing re-bases the transport instead of being dragged straight back.
+    void get().engine?.seek(clamped);
   },
 
   setZoom: (pixelsPerSecond) => {
@@ -351,6 +354,65 @@ export const useStudio = create<StudioState>((set, get) => ({
       },
       'Add title',
     );
+  },
+
+  /**
+   * Place an asset at an exact track and time — the drop half of dragging from the
+   * media bin. Dropping onto a video track brings the asset's audio along on the
+   * first audio track, linked, the same as the bin's add action.
+   */
+  dropAssetOnTrack: (assetId, trackId, at) => {
+    const state = get();
+    const project = state.project();
+    const asset = project.assets[assetId];
+    const track = project.tracks[trackId];
+    if (!asset || !track) return;
+
+    const duration = asset.video?.duration ?? asset.audio?.duration;
+    if (!duration || !T.isPositive(duration)) {
+      set({ error: `"${asset.name}" has no usable duration` });
+      return;
+    }
+
+    const sequence = getSequence(project, state.sequenceId);
+    const start = T.max(T.TIME_ZERO, at);
+    const linkGroupId = `lg_${assetId}_${Date.now()}`;
+    const commands: Command[] = [];
+
+    if (track.kind === 'video') {
+      if (!asset.video) {
+        set({ error: `"${asset.name}" has no video track` });
+        return;
+      }
+      commands.push({
+        type: 'insertClip',
+        trackId,
+        mode: 'overwrite',
+        clip: { kind: 'video', assetId, start, duration, name: asset.name, linkGroupId },
+      });
+      const audioTrackId = sequence.audioTrackIds[0];
+      if (asset.audio && audioTrackId) {
+        commands.push({
+          type: 'insertClip',
+          trackId: audioTrackId,
+          mode: 'overwrite',
+          clip: { kind: 'audio', assetId, start, duration, name: asset.name, linkGroupId },
+        });
+      }
+    } else {
+      if (!asset.audio) {
+        set({ error: `"${asset.name}" has no audio track` });
+        return;
+      }
+      commands.push({
+        type: 'insertClip',
+        trackId,
+        mode: 'overwrite',
+        clip: { kind: 'audio', assetId, start, duration, name: asset.name },
+      });
+    }
+
+    get().runMany(commands, `Add "${asset.name}"`);
   },
 
   newProject: () => {

@@ -135,7 +135,17 @@ export type Command =
       /** 'lift' leaves a gap; 'ripple' closes it. */
       readonly mode?: 'lift' | 'ripple';
     }
-  | { readonly type: 'moveClips'; readonly moves: readonly ClipMove[] }
+  | {
+      readonly type: 'moveClips';
+      readonly moves: readonly ClipMove[];
+      /**
+       * 'overwrite' trims or splits whatever the clips land on (the old behaviour).
+       * 'block' refuses the move instead — dropping a clip on top of another must
+       * not silently resize it; resizing is a trim, and trims are explicit.
+       * Defaults to 'block'.
+       */
+      readonly mode?: 'overwrite' | 'block';
+    }
   | {
       readonly type: 'trimClip';
       readonly clipId: ClipId;

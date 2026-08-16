@@ -22,6 +22,15 @@ export interface Filmstrip {
   readonly frameCount: number;
   /** Total source duration the strip spans, in seconds. */
   readonly sourceSeconds: number;
+  /**
+   * A single frame at usable resolution, for the media bin.
+   *
+   * The strip's own frames are ~78x44, so scaling one up to fill a 220px-wide bin
+   * card looks soft. This is rendered from the same decode pass at POSTER_WIDTH.
+   */
+  readonly posterUrl: string;
+  readonly posterWidth: number;
+  readonly posterHeight: number;
 }
 
 export interface Waveform {
@@ -33,6 +42,8 @@ export interface Waveform {
 
 const FILMSTRIP_HEIGHT = 44;
 const MAX_FILMSTRIP_FRAMES = 40;
+/** Bin cards are ~220 CSS px wide; 2x that stays crisp on a HiDPI display. */
+const POSTER_WIDTH = 440;
 const WAVEFORM_HEIGHT = 44;
 const WAVEFORM_COLUMNS = 900;
 
@@ -66,6 +77,14 @@ export async function generateFilmstrip(
   ctx.fillStyle = '#11141b';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
+  const posterHeight = Math.max(2, Math.round(POSTER_WIDTH / aspect));
+  const poster = new OffscreenCanvas(POSTER_WIDTH, posterHeight);
+  const posterCtx = poster.getContext('2d');
+  if (posterCtx) {
+    posterCtx.fillStyle = '#11141b';
+    posterCtx.fillRect(0, 0, POSTER_WIDTH, posterHeight);
+  }
+
   for (let i = 0; i < frameCount; i++) {
     if (signal?.aborted) return null;
     // Sample from the middle of each slot rather than its edge, so the first frame
@@ -77,19 +96,28 @@ export async function generateFilmstrip(
     const frame = sample.toVideoFrame();
     try {
       ctx.drawImage(frame, i * frameWidth, 0, frameWidth, FILMSTRIP_HEIGHT);
+      // The first sampled frame doubles as the poster, at full size.
+      if (i === 0 && posterCtx) posterCtx.drawImage(frame, 0, 0, POSTER_WIDTH, posterHeight);
     } finally {
       frame.close();
       sample.close();
     }
   }
 
-  const blob = await canvas.convertToBlob({ type: 'image/webp', quality: 0.7 });
+  const [stripBlob, posterBlob] = await Promise.all([
+    canvas.convertToBlob({ type: 'image/webp', quality: 0.72 }),
+    poster.convertToBlob({ type: 'image/webp', quality: 0.85 }),
+  ]);
+
   return {
-    url: URL.createObjectURL(blob),
+    url: URL.createObjectURL(stripBlob),
     frameWidth,
     frameHeight: FILMSTRIP_HEIGHT,
     frameCount,
     sourceSeconds,
+    posterUrl: URL.createObjectURL(posterBlob),
+    posterWidth: POSTER_WIDTH,
+    posterHeight,
   };
 }
 
@@ -201,7 +229,11 @@ export class PreviewCache {
   }
 
   dispose(): void {
-    for (const strip of this.filmstrips.values()) if (strip) URL.revokeObjectURL(strip.url);
+    for (const strip of this.filmstrips.values()) {
+      if (!strip) continue;
+      URL.revokeObjectURL(strip.url);
+      URL.revokeObjectURL(strip.posterUrl);
+    }
     for (const wave of this.waveforms.values()) if (wave) URL.revokeObjectURL(wave.url);
     this.filmstrips.clear();
     this.waveforms.clear();

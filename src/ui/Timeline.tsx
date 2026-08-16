@@ -9,9 +9,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Command } from '../model/commands';
 import type { PreviewCache } from '../engine/previews';
-import { clipEnd, getTrack, isMediaClip, trackClips } from '../model/selectors';
+import { clipEnd, clipFitsTrack, getTrack, isMediaClip, trackClips } from '../model/selectors';
 import * as T from '../model/time';
-import type { Clip, ClipId, Time, Track, TrackId } from '../model/types';
+import type { Clip, ClipId, Project, Time, Track, TrackId } from '../model/types';
 import { useContextMenu, type MenuEntry } from './ContextMenu';
 import {
   IconAudio,
@@ -53,6 +53,51 @@ interface DragState {
   readonly groupIds: readonly ClipId[];
 }
 
+/** MIME type carrying an assetId when dragging from the media bin. */
+export const ASSET_DRAG_TYPE = 'application/x-bvs-asset';
+
+/**
+ * Nearest start position at or near `desired` where a clip of `duration` fits on a
+ * track without overlapping anything.
+ *
+ * Moving a clip onto another must not resize the other one — resizing is a trim, and
+ * trims are an explicit gesture — so a drag butts up against its neighbour and stops.
+ */
+function clampToFreeSpace(
+  project: Project,
+  trackId: TrackId,
+  desired: Time,
+  duration: Time,
+  exclude: ReadonlySet<ClipId>,
+): Time {
+  const others = trackClips(project, trackId).filter((c) => !exclude.has(c.id));
+  const wanted = T.max(desired, T.TIME_ZERO);
+
+  const collides = (start: Time): boolean => {
+    const end = T.add(start, duration);
+    return others.some((c) => T.lt(start, clipEnd(c)) && T.lt(c.start, end));
+  };
+  if (!collides(wanted)) return wanted;
+
+  // Walk the gaps between neighbours and keep the legal start closest to `wanted`.
+  const edges: Time[] = [T.TIME_ZERO];
+  for (const c of others) edges.push(c.start, clipEnd(c));
+
+  let best: Time | null = null;
+  let bestDistance = Infinity;
+  for (const edge of edges) {
+    for (const candidate of [edge, T.sub(edge, duration)]) {
+      if (T.isNegative(candidate) || collides(candidate)) continue;
+      const distance = Math.abs(T.toSeconds(T.sub(candidate, wanted)));
+      if (distance < bestDistance) {
+        best = candidate;
+        bestDistance = distance;
+      }
+    }
+  }
+  return best ?? wanted;
+}
+
 export function Timeline(): React.JSX.Element {
   const history = useStudio((s) => s.history);
   const sequenceId = useStudio((s) => s.sequenceId);
@@ -69,6 +114,7 @@ export function Timeline(): React.JSX.Element {
   const setZoom = useStudio((s) => s.setZoom);
   const duration = useStudio((s) => s.duration);
   const previews = useStudio((s) => s.previews);
+  const dropAssetOnTrack = useStudio((s) => s.dropAssetOnTrack);
   const menu = useContextMenu();
   // Previews arrive asynchronously; this re-renders the lanes when one lands.
   useStudio((s) => s.previewVersion);
@@ -81,7 +127,22 @@ export function Timeline(): React.JSX.Element {
   const contentWidth = Math.ceil(totalSeconds * pxPerSecond);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const lanesRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
+  const [dropTarget, setDropTarget] = useState<{ trackId: TrackId; at: Time } | null>(null);
+
+  /** Which track lane sits under a viewport Y coordinate. */
+  const trackAtClientY = useCallback((clientY: number): TrackId | null => {
+    const lanes = lanesRef.current?.querySelectorAll<HTMLElement>('[data-track-id]');
+    if (!lanes) return null;
+    for (const lane of lanes) {
+      const rect = lane.getBoundingClientRect();
+      if (clientY >= rect.top && clientY <= rect.bottom) {
+        return (lane.dataset.trackId ?? null) as TrackId | null;
+      }
+    }
+    return null;
+  }, []);
 
   const timeAtClientX = useCallback(
     (clientX: number): Time => {
@@ -137,23 +198,43 @@ export function Timeline(): React.JSX.Element {
       const excluded = new Set(drag.groupIds);
 
       if (drag.kind === 'move') {
-        const target = snap(T.max(T.TIME_ZERO, T.add(drag.originStart, delta)), excluded);
-        const shift = T.sub(target, drag.originStart);
+        // The lane under the pointer is the destination, so a clip can change track.
+        const hovered = trackAtClientY(event.clientY);
+        const destination =
+          hovered && clipFitsTrack(clip.kind, getTrack(project, hovered).kind) && !getTrack(project, hovered).locked
+            ? hovered
+            : drag.originTrackId;
+
+        const wanted = snap(T.max(T.TIME_ZERO, T.add(drag.originStart, delta)), excluded);
+        // Butt up against whatever is already on the destination track rather than
+        // overwriting it.
+        const target = clampToFreeSpace(project, destination, wanted, clip.duration, excluded);
+
+        // Recompute from the drag origin each time so the gesture is not cumulative.
         const moves = drag.groupIds
           .map((id) => project.clips[id])
           .filter((c): c is Clip => c !== undefined)
           .map((c) => ({
             clipId: c.id,
-            toTrackId: c.trackId,
-            toStart: T.max(T.TIME_ZERO, T.add(c.start, shift)),
+            // Only the clip under the pointer changes track; its linked partner
+            // stays on its own, since audio cannot live on a video track anyway.
+            toTrackId: c.id === clip.id ? destination : c.trackId,
+            toStart: T.max(T.TIME_ZERO, T.add(target, T.sub(c.start, clip.start))),
           }));
-        // Recompute from the drag origin each time so the gesture is not cumulative.
-        const originMoves = moves.map((m) => {
-          const c = project.clips[m.clipId]!;
-          const offset = T.sub(c.start, clip.start);
-          return { ...m, toStart: T.max(T.TIME_ZERO, T.add(target, offset)) };
+
+        // A group member may not fit even though the dragged clip does; in that case
+        // hold the last good position instead of throwing an error at every pixel.
+        const blocked = moves.some((m) => {
+          const moving = project.clips[m.clipId];
+          if (!moving) return false;
+          return !T.eq(
+            clampToFreeSpace(project, m.toTrackId, m.toStart, moving.duration, excluded),
+            m.toStart,
+          );
         });
-        runMany([{ type: 'moveClips', moves: originMoves }], 'Move clip', `drag:${drag.clipId}`);
+        if (blocked) return;
+
+        runMany([{ type: 'moveClips', moves }], 'Move clip', `drag:${drag.clipId}`);
         return;
       }
 
@@ -191,7 +272,7 @@ export function Timeline(): React.JSX.Element {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
     };
-  }, [drag, project, pxPerSecond, runMany, snap, endGesture]);
+  }, [drag, project, pxPerSecond, runMany, snap, endGesture, trackAtClientY]);
 
   const startDrag = (event: React.PointerEvent, clip: Clip, kind: DragKind): void => {
     event.stopPropagation();
@@ -431,13 +512,34 @@ export function Timeline(): React.JSX.Element {
             ))}
           </div>
 
+          <div ref={lanesRef}>
           {trackIds.map((trackId) => {
             const track = getTrack(project, trackId);
             return (
               <div
                 key={trackId}
-                className={`track-lane${track.locked ? ' locked' : ''}`}
+                data-track-id={trackId}
+                className={`track-lane${track.locked ? ' locked' : ''}${
+                  dropTarget?.trackId === trackId ? ' drop-active' : ''
+                }`}
                 style={{ height: TRACK_HEIGHT }}
+                onDragOver={(event) => {
+                  if (!event.dataTransfer.types.includes(ASSET_DRAG_TYPE)) return;
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = 'copy';
+                  setDropTarget({ trackId, at: timeAtClientX(event.clientX) });
+                }}
+                onDragLeave={(event) => {
+                  if (event.currentTarget.contains(event.relatedTarget as Node)) return;
+                  setDropTarget((current) => (current?.trackId === trackId ? null : current));
+                }}
+                onDrop={(event) => {
+                  const assetId = event.dataTransfer.getData(ASSET_DRAG_TYPE);
+                  setDropTarget(null);
+                  if (!assetId) return;
+                  event.preventDefault();
+                  dropAssetOnTrack(assetId as never, trackId, timeAtClientX(event.clientX));
+                }}
                 onPointerDown={(event) => {
                   if (event.target === event.currentTarget) select([]);
                 }}
@@ -462,6 +564,7 @@ export function Timeline(): React.JSX.Element {
               </div>
             );
           })}
+          </div>
 
           <div
             className="playhead"

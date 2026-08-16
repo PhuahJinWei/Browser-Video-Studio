@@ -818,3 +818,43 @@ input[type='range'] {
   background: var(--line);
   margin: 0 2px;
 }
+
+/* ------------------------------------------------------- fullscreen preview */
+
+/* In fullscreen the panel is the whole screen, so the canvas takes all of it and
+   the transport sits over the bottom edge. */
+.preview-panel:fullscreen {
+  background: #000;
+}
+.preview-panel:fullscreen .preview {
+  background: #000;
+}
+.preview-panel:fullscreen .transport {
+  background: rgba(15, 17, 21, 0.9);
+  border-top: 1px solid var(--line);
+}
+
+/* Focus mode: the fallback when native fullscreen is unavailable (for example in
+   an embedded frame). The preview fills the window; Escape returns. */
+body.focus-mode .preview-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: #000;
+}
+body.focus-mode .preview-panel .preview {
+  background: #000;
+}
+
+/* Drop target highlight when dragging media from the bin. */
+.track-lane.drop-active {
+  background-color: rgba(76, 141, 255, 0.14);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.bin-item[draggable='true'] {
+  cursor: grab;
+}
+.bin-item[draggable='true']:active {
+  cursor: grabbing;
+}

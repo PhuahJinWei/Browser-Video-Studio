@@ -42,6 +42,10 @@ export class Engine {
   private rafHandle: number | null = null;
   private clockTimer: ReturnType<typeof setInterval> | null = null;
   private playbackPosition: Time = T.TIME_ZERO;
+  /** Timeline position playback is measured from, and the wall clock at that point. */
+  private playOrigin: Time = T.TIME_ZERO;
+  private playOriginWall = 0;
+  private playUntil: Time = T.TIME_ZERO;
   private rendering = false;
   private pendingSeek: Time | null = null;
   private lastRenderedAt: Time | null = null;
@@ -266,10 +270,11 @@ export class Engine {
 
     this.player ??= new AudioPlayer(this.media, this.getProject, this.sequenceId);
     this.telemetry.playing = true;
-    await this.player.start(from);
-
-    const startedWall = performance.now();
+    this.playUntil = until;
     this.playbackPosition = from;
+    this.playOrigin = from;
+    this.playOriginWall = performance.now();
+    await this.player.start(from);
 
     const advance = (): void => {
       if (!this.telemetry.playing || !this.player) return;
@@ -277,13 +282,13 @@ export class Engine {
       // The audio clock is authoritative; wall time covers a silent or blocked
       // AudioContext (autoplay policy) so the picture still runs at the right rate.
       const audioTime = this.player.currentTime();
-      const wallElapsed = (performance.now() - startedWall) / 1000;
-      const fallback = T.add(from, T.fromSeconds(wallElapsed, 1_000_000));
-      const position = T.gt(audioTime, from) ? audioTime : fallback;
+      const wallElapsed = (performance.now() - this.playOriginWall) / 1000;
+      const fallback = T.add(this.playOrigin, T.fromSeconds(wallElapsed, 1_000_000));
+      const position = T.gt(audioTime, this.playOrigin) ? audioTime : fallback;
 
-      if (T.gte(position, until)) {
-        this.playbackPosition = until;
-        onPosition(until);
+      if (T.gte(position, this.playUntil)) {
+        this.playbackPosition = this.playUntil;
+        onPosition(this.playUntil);
         void this.pause();
         return;
       }
@@ -301,6 +306,24 @@ export class Engine {
     this.clockTimer = setInterval(advance, CLOCK_INTERVAL_MS);
     this.rafHandle = requestAnimationFrame(draw);
     this.emitTelemetry();
+  }
+
+  /**
+   * Move the play head, during playback as well as when stopped.
+   *
+   * Seeking mid-playback has to re-base the transport and restart the audio from
+   * the new position; otherwise the clock keeps counting from where playback began
+   * and immediately drags the picture back to where it was.
+   */
+  async seek(at: Time): Promise<void> {
+    this.playbackPosition = at;
+
+    if (this.telemetry.playing && this.player) {
+      this.playOrigin = at;
+      this.playOriginWall = performance.now();
+      await this.player.start(at);
+    }
+    this.requestRender(at);
   }
 
   async pause(): Promise<void> {

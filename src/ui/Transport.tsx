@@ -3,9 +3,12 @@
  * belong in every editor.
  */
 
+import { useEffect, useState } from 'react';
 import { snapPoints } from '../model/selectors';
 import * as T from '../model/time';
 import {
+  IconExitFullscreen,
+  IconFullscreen,
   IconNextEdit,
   IconPause,
   IconPlay,
@@ -26,6 +29,66 @@ export function Transport(): React.JSX.Element {
   const setPlayhead = useStudio((s) => s.setPlayhead);
   const duration = useStudio((s) => s.duration);
   const run = useStudio((s) => s.run);
+  const [expanded, setExpanded] = useState(false);
+
+  // The browser owns native fullscreen state (Escape, F11, the window chrome), so
+  // mirror it from the event rather than assuming our button is the only way out.
+  useEffect(() => {
+    const sync = (): void => {
+      if (document.fullscreenElement) setExpanded(true);
+      else if (!document.body.classList.contains('focus-mode')) setExpanded(false);
+    };
+    document.addEventListener('fullscreenchange', sync);
+    return () => document.removeEventListener('fullscreenchange', sync);
+  }, []);
+
+  // Escape leaves focus mode, matching what Escape does in native fullscreen.
+  useEffect(() => {
+    if (!expanded) return;
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape' || document.fullscreenElement) return;
+      document.body.classList.remove('focus-mode');
+      setExpanded(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [expanded]);
+
+  /**
+   * Native fullscreen where it is allowed, otherwise a focus mode that expands the
+   * preview to fill the window. `requestFullscreen` throws in an embedded frame that
+   * was not granted the permission, so the fallback is what actually runs there.
+   */
+  const toggleFullscreen = (): void => {
+    const panel = document.querySelector<HTMLElement>('.preview-panel');
+    if (!panel) return;
+
+    const leaveFocusMode = (): void => {
+      document.body.classList.remove('focus-mode');
+      setExpanded(false);
+    };
+
+    if (document.fullscreenElement) {
+      void document.exitFullscreen();
+      return;
+    }
+    if (document.body.classList.contains('focus-mode')) {
+      leaveFocusMode();
+      return;
+    }
+
+    try {
+      const request = panel.requestFullscreen();
+      setExpanded(true);
+      void request.catch(() => {
+        document.body.classList.add('focus-mode');
+        setExpanded(true);
+      });
+    } catch {
+      document.body.classList.add('focus-mode');
+      setExpanded(true);
+    }
+  };
 
   const project = history.present.project;
   const sequence = project.sequences[sequenceId]!;
@@ -109,6 +172,13 @@ export function Transport(): React.JSX.Element {
 
         <button className="icon" title="Split at playhead (S)" onClick={splitHere}>
           <IconSplit />
+        </button>
+        <button
+          className="icon"
+          title={expanded ? 'Exit fullscreen (Esc)' : 'Fullscreen preview'}
+          onClick={toggleFullscreen}
+        >
+          {expanded ? <IconExitFullscreen /> : <IconFullscreen />}
         </button>
 
         <span className="transport-time">

@@ -11,11 +11,12 @@ Built on **WebCodecs** (hardware decode/encode), **WebGPU** (effects and composi
 Import → edit → play → export, end to end, entirely on your machine.
 
 - **Import** MP4, MOV, MKV, WebM, MP3, WAV, FLAC, OGG. Probed for codec, resolution, frame rate and audio layout.
-- **Timeline** with any number of video and audio tracks. Drag, trim, split, ripple delete, snapping to clip edges and the playhead. Linked video/audio move together. Per-track mute, solo, lock, hide.
+- **Timeline** with any number of video and audio tracks. Drag media in from the bin, move clips between tracks, trim, split, ripple delete, snap to clip edges and the playhead. Moving a clip onto another stops at its edge rather than resizing it. Linked video/audio move together. Per-track mute, solo, lock, hide.
 - **Filmstrips and waveforms** on clips, rasterised once per asset and positioned by CSS, so trimming and moving cost nothing.
 - **Preview** composited on the GPU — transform, opacity, crop, eight blend modes, colour adjustment and gaussian blur.
 - **Titles** rendered to a canvas and composited like any other layer.
-- **Playback** with A/V sync driven by the audio clock.
+- **Playback** with A/V sync driven by the audio clock. Seeking mid-playback re-bases the transport and keeps rolling.
+- **Fullscreen preview**, falling back to an in-page focus mode where the browser disallows fullscreen.
 - **Export** to MP4 (H.264 + AAC) or WebM (VP9 + Opus) at any resolution and bitrate.
 - **Undo/redo** where a whole drag collapses into one step.
 - **Autosave** to OPFS — reload the page and your project comes back, media included.
