@@ -97,6 +97,7 @@ export function MediaBin(): React.JSX.Element {
 
 function AssetCard({ asset }: { asset: Asset }): React.JSX.Element {
   const addAssetToTimeline = useStudio((s) => s.addAssetToTimeline);
+  const setDraggingAsset = useStudio((s) => s.setDraggingAsset);
   const run = useStudio((s) => s.run);
   const previews = useStudio((s) => s.previews);
   // Previews land asynchronously; this re-renders the card when one does.
@@ -138,7 +139,11 @@ function AssetCard({ asset }: { asset: Asset }): React.JSX.Element {
       onDragStart={(event) => {
         event.dataTransfer.setData(ASSET_DRAG_TYPE, asset.id);
         event.dataTransfer.effectAllowed = 'copy';
+        // dragover cannot read dataTransfer, so the timeline ghost needs this to
+        // know the asset's duration while the drag is in flight.
+        setDraggingAsset(asset.id);
       }}
+      onDragEnd={() => setDraggingAsset(null)}
       onContextMenu={onContextMenu}
       onDoubleClick={() => void addAssetToTimeline(asset.id)}
       title={`${asset.name}\nDrag onto a track, or double-click to append`}

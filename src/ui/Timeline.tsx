@@ -34,7 +34,7 @@ import {
   IconVideo,
   IconVolume,
 } from './Icons';
-import { orderedTrackIds, useStudio } from './store';
+import { counterpartTrackId, orderedTrackIds, useStudio } from './store';
 
 const TRACK_HEIGHT = 56;
 const MIN_TAIL_SECONDS = 10;
@@ -115,6 +115,7 @@ export function Timeline(): React.JSX.Element {
   const duration = useStudio((s) => s.duration);
   const previews = useStudio((s) => s.previews);
   const dropAssetOnTrack = useStudio((s) => s.dropAssetOnTrack);
+  const draggingAssetId = useStudio((s) => s.draggingAssetId);
   const menu = useContextMenu();
   // Previews arrive asynchronously; this re-renders the lanes when one lands.
   useStudio((s) => s.previewVersion);
@@ -130,6 +131,43 @@ export function Timeline(): React.JSX.Element {
   const lanesRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [dropTarget, setDropTarget] = useState<{ trackId: TrackId; at: Time } | null>(null);
+
+  /**
+   * Where a dropped asset would land, as a pixel rect, keyed by track.
+   *
+   * Both the hovered track and its paired one get a ghost, because a clip with
+   * video and audio is placed on both — showing only the hovered lane implies the
+   * partner stream is being dropped somewhere unknown.
+   */
+  const dropGhosts = useMemo(() => {
+    if (!dropTarget || !draggingAssetId) return null;
+    const asset = project.assets[draggingAssetId];
+    if (!asset) return null;
+
+    const duration = asset.video?.duration ?? asset.audio?.duration;
+    if (!duration || !T.isPositive(duration)) return null;
+
+    const hovered = project.tracks[dropTarget.trackId];
+    if (!hovered) return null;
+
+    const partnerId = counterpartTrackId(project, sequenceId, dropTarget.trackId);
+    const partner = partnerId ? project.tracks[partnerId] : null;
+    // Only show the partner ghost when the asset actually has that stream.
+    const partnerCarries =
+      partner && (partner.kind === 'video' ? Boolean(asset.video) : Boolean(asset.audio));
+    const hoveredCarries = hovered.kind === 'video' ? Boolean(asset.video) : Boolean(asset.audio);
+
+    const trackIdsWithGhost: TrackId[] = [];
+    if (hoveredCarries) trackIdsWithGhost.push(dropTarget.trackId);
+    if (partnerCarries && partnerId) trackIdsWithGhost.push(partnerId);
+
+    return {
+      trackIds: trackIdsWithGhost,
+      left: T.toSeconds(dropTarget.at) * pxPerSecond,
+      width: Math.max(2, T.toSeconds(duration) * pxPerSecond),
+      label: asset.name,
+    };
+  }, [dropTarget, draggingAssetId, project, sequenceId, pxPerSecond]);
 
   /** Which track lane sits under a viewport Y coordinate. */
   const trackAtClientY = useCallback((clientY: number): TrackId | null => {
@@ -520,7 +558,7 @@ export function Timeline(): React.JSX.Element {
                 key={trackId}
                 data-track-id={trackId}
                 className={`track-lane${track.locked ? ' locked' : ''}${
-                  dropTarget?.trackId === trackId ? ' drop-active' : ''
+                  dropGhosts?.trackIds.includes(trackId) ? ' drop-active' : ''
                 }`}
                 style={{ height: TRACK_HEIGHT }}
                 onDragOver={(event) => {
@@ -540,6 +578,7 @@ export function Timeline(): React.JSX.Element {
                   event.preventDefault();
                   dropAssetOnTrack(assetId as never, trackId, timeAtClientX(event.clientX));
                 }}
+                onDragEnd={() => setDropTarget(null)}
                 onPointerDown={(event) => {
                   if (event.target === event.currentTarget) select([]);
                 }}
@@ -547,6 +586,14 @@ export function Timeline(): React.JSX.Element {
                   if (event.target === event.currentTarget) openLaneMenu(event, trackId);
                 }}
               >
+                {dropGhosts?.trackIds.includes(trackId) && (
+                  <div
+                    className="drop-ghost"
+                    style={{ left: dropGhosts.left, width: dropGhosts.width }}
+                  >
+                    <span>{dropGhosts.label}</span>
+                  </div>
+                )}
                 {trackClips(project, trackId).map((clip) => (
                   <ClipView
                     key={clip.id}

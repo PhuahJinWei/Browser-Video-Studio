@@ -62,6 +62,13 @@ export interface StudioState {
   /** Bumped whenever a preview finishes, so the timeline re-renders. */
   previewVersion: number;
   exportProgress: ExportProgress | null;
+  /**
+   * Asset currently being dragged out of the media bin.
+   *
+   * `dataTransfer.getData` is blocked during dragover (only `drop` may read it), so
+   * the ghost cannot learn the asset's duration from the event — it comes from here.
+   */
+  draggingAssetId: AssetId | null;
   status: string;
   error: string | null;
   showTelemetry: boolean;
@@ -91,6 +98,7 @@ export interface StudioState {
   addAssetToTimeline: (assetId: AssetId) => Promise<void>;
   addTitle: (text: string) => void;
   dropAssetOnTrack: (assetId: AssetId, trackId: TrackId, at: Time) => void;
+  setDraggingAsset: (assetId: AssetId | null) => void;
   newProject: () => void;
   togglePlay: () => Promise<void>;
   runExport: (settings: ExportSettings) => Promise<void>;
@@ -134,6 +142,7 @@ export const useStudio = create<StudioState>((set, get) => ({
   previews: null,
   previewVersion: 0,
   exportProgress: null,
+  draggingAssetId: null,
   status: 'Import media to begin.',
   error: null,
   showTelemetry: true,
@@ -403,22 +412,33 @@ export const useStudio = create<StudioState>((set, get) => ({
     const linkGroupId = `lg_${assetId}_${Date.now()}`;
     const commands: Command[] = [];
 
+    // The partner stream goes on the track at the same index, so dropping on V2
+    // puts the audio on A2 rather than always on A1.
+    const partnerTrackId = counterpartTrackId(project, state.sequenceId, trackId);
+
     if (track.kind === 'video') {
       if (!asset.video) {
         set({ error: `"${asset.name}" has no video track` });
         return;
       }
+      const withAudio = Boolean(asset.audio && partnerTrackId);
       commands.push({
         type: 'insertClip',
         trackId,
         mode: 'overwrite',
-        clip: { kind: 'video', assetId, start, duration, name: asset.name, linkGroupId },
+        clip: {
+          kind: 'video',
+          assetId,
+          start,
+          duration,
+          name: asset.name,
+          ...(withAudio ? { linkGroupId } : {}),
+        },
       });
-      const audioTrackId = sequence.audioTrackIds[0];
-      if (asset.audio && audioTrackId) {
+      if (withAudio && partnerTrackId) {
         commands.push({
           type: 'insertClip',
-          trackId: audioTrackId,
+          trackId: partnerTrackId,
           mode: 'overwrite',
           clip: { kind: 'audio', assetId, start, duration, name: asset.name, linkGroupId },
         });
@@ -428,16 +448,35 @@ export const useStudio = create<StudioState>((set, get) => ({
         set({ error: `"${asset.name}" has no audio track` });
         return;
       }
+      const withVideo = Boolean(asset.video && partnerTrackId);
       commands.push({
         type: 'insertClip',
         trackId,
         mode: 'overwrite',
-        clip: { kind: 'audio', assetId, start, duration, name: asset.name },
+        clip: {
+          kind: 'audio',
+          assetId,
+          start,
+          duration,
+          name: asset.name,
+          ...(withVideo ? { linkGroupId } : {}),
+        },
       });
+      if (withVideo && partnerTrackId) {
+        commands.push({
+          type: 'insertClip',
+          trackId: partnerTrackId,
+          mode: 'overwrite',
+          clip: { kind: 'video', assetId, start, duration, name: asset.name, linkGroupId },
+        });
+      }
     }
+    void sequence;
 
     get().runMany(commands, `Add "${asset.name}"`);
   },
+
+  setDraggingAsset: (assetId) => set({ draggingAssetId: assetId }),
 
   newProject: () => {
     const { project, sequenceId } = starterProject();
@@ -596,6 +635,27 @@ export function defaultExportSettings(project: Project, sequenceId: SequenceId):
     bitrate: suggestBitrate(sequence.size, sequence.frameRate),
     includeAudio: true,
   };
+}
+
+/**
+ * The audio track paired with a video track, or vice versa — matched by position,
+ * so V2 pairs with A2.
+ *
+ * Dropping a clip with both streams puts each on its own track, and the pair the
+ * user means is the one at the same index, not simply the first audio track.
+ * Returns null when the other list is shorter.
+ */
+export function counterpartTrackId(
+  project: Project,
+  sequenceId: SequenceId,
+  trackId: TrackId,
+): TrackId | null {
+  const sequence = getSequence(project, sequenceId);
+  const videoIndex = sequence.videoTrackIds.indexOf(trackId);
+  if (videoIndex >= 0) return sequence.audioTrackIds[videoIndex] ?? null;
+  const audioIndex = sequence.audioTrackIds.indexOf(trackId);
+  if (audioIndex >= 0) return sequence.videoTrackIds[audioIndex] ?? null;
+  return null;
 }
 
 /** Tracks in display order: video top-down (so V2 is above V1), then audio. */
