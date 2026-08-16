@@ -153,10 +153,10 @@ input[type='range'] {
   border-color: var(--accent);
 }
 .menubar-dropdown {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  z-index: 40;
+  /* Fixed and portalled to <body>: see MenuBar.tsx for why it cannot live inside
+     the header. */
+  position: fixed;
+  z-index: 60;
   min-width: 232px;
   padding: 4px;
   background: var(--panel-2);
@@ -172,10 +172,10 @@ input[type='range'] {
   gap: 6px;
   flex: 1 1 auto;
   min-width: 0;
-  /* `visible` on the block axis lets dropdowns escape downward while the strip
-     still scrolls sideways. Plain `overflow-x: auto` would clip them. */
+  /* Scrolls sideways when squeezed. This also clips vertically — CSS computes a
+     `visible` value to `auto` when the other axis is not visible — which is why
+     the menu dropdowns are portalled out rather than nested here. */
   overflow-x: auto;
-  overflow-y: visible;
   scrollbar-width: none;
   padding: 6px 0;
 }

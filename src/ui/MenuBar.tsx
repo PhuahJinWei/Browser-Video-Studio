@@ -8,6 +8,7 @@
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { renderMenuEntries, type MenuEntry } from './ContextMenu';
 import {
   IconAudio,
@@ -37,33 +38,62 @@ import * as T from '../model/time';
 import { orderedTrackIds, useStudio } from './store';
 
 /**
- * A dropdown that stays on screen.
+ * A dropdown anchored under its title.
  *
- * Anchored under its title, but menus near the right edge would otherwise hang off
- * the window, so it shifts left by however much it overhangs once measured.
+ * Rendered into a portal on `document.body` rather than inside the bar. Ancestors
+ * clip it otherwise — `.app` and `body` are `overflow: hidden`, and the toolbar
+ * strip scrolls sideways, which silently forces its *vertical* overflow to `auto`
+ * too (CSS computes a `visible` value to `auto` when the other axis is not
+ * visible). The result was a menu hidden behind the panels below the header.
+ *
+ * A portal also escapes the header's stacking context, so no z-index race with the
+ * middle section.
  */
 function Dropdown({
+  anchor,
   entries,
   onClose,
 }: {
+  anchor: HTMLElement | null;
   entries: readonly MenuEntry[];
   onClose: () => void;
-}): React.JSX.Element {
+}): React.JSX.Element | null {
   const ref = useRef<HTMLDivElement>(null);
-  const [shift, setShift] = useState(0);
+  const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
 
   useLayoutEffect(() => {
     const el = ref.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const overhang = rect.right - (window.innerWidth - 6);
-    if (overhang > 0) setShift(-Math.min(overhang, rect.left - 6));
-  }, []);
+    if (!el || !anchor) return;
+    const button = anchor.getBoundingClientRect();
+    const menu = el.getBoundingClientRect();
 
-  return (
-    <div className="menubar-dropdown" role="menu" ref={ref} style={{ marginLeft: shift }}>
+    // Keep it inside the window: shift left if it overhangs, flip above if it
+    // would run off the bottom.
+    const left = Math.max(6, Math.min(button.left, window.innerWidth - menu.width - 6));
+    const below = button.bottom + 4;
+    const top = below + menu.height > window.innerHeight - 6
+      ? Math.max(6, button.top - menu.height - 4)
+      : below;
+    setPosition({ left, top });
+  }, [anchor]);
+
+  if (!anchor) return null;
+
+  return createPortal(
+    <div
+      className="menubar-dropdown"
+      role="menu"
+      ref={ref}
+      style={{
+        left: position?.left ?? -9999,
+        top: position?.top ?? -9999,
+        // Hidden for the first paint, before it has been measured and placed.
+        visibility: position ? 'visible' : 'hidden',
+      }}
+    >
       {renderMenuEntries(entries, onClose)}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -74,6 +104,7 @@ interface MenuDefinition {
 
 export function MenuBar({ onExport }: { onExport: () => void }): React.JSX.Element {
   const [open, setOpen] = useState<string | null>(null);
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
 
   const history = useStudio((s) => s.history);
@@ -110,7 +141,11 @@ export function MenuBar({ onExport }: { onExport: () => void }): React.JSX.Eleme
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (event: PointerEvent): void => {
-      if (!barRef.current?.contains(event.target as Node)) setOpen(null);
+      const target = event.target as HTMLElement | null;
+      // The dropdown is portalled out of the bar, so containment alone would treat
+      // a click on a menu item as "outside" and unmount it before the click landed.
+      if (barRef.current?.contains(target) || target?.closest('.menubar-dropdown')) return;
+      setOpen(null);
     };
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') setOpen(null);
@@ -317,14 +352,21 @@ export function MenuBar({ onExport }: { onExport: () => void }): React.JSX.Eleme
             className={`menubar-title${open === menu.title ? ' open' : ''}`}
             aria-haspopup="menu"
             aria-expanded={open === menu.title}
-            onClick={() => setOpen(open === menu.title ? null : menu.title)}
+            onClick={(event) => {
+              setAnchor(event.currentTarget);
+              setOpen(open === menu.title ? null : menu.title);
+            }}
             // Once a menu is open, sliding across the bar switches between them.
-            onPointerEnter={() => open && setOpen(menu.title)}
+            onPointerEnter={(event) => {
+              if (!open) return;
+              setAnchor(event.currentTarget);
+              setOpen(menu.title);
+            }}
           >
             {menu.title}
           </button>
           {open === menu.title && (
-            <Dropdown entries={menu.entries} onClose={() => setOpen(null)} />
+            <Dropdown anchor={anchor} entries={menu.entries} onClose={() => setOpen(null)} />
           )}
         </div>
       ))}
