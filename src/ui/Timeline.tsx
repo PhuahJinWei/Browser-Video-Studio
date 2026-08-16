@@ -152,24 +152,26 @@ export function Timeline(): React.JSX.Element {
     const duration = asset.video?.duration ?? asset.audio?.duration;
     if (!duration || !T.isPositive(duration)) return null;
 
-    const partnerId = counterpartTrackId(project, sequenceId, dropTrackId);
-    const partner = partnerId ? project.tracks[partnerId] : null;
-    // Only show the partner ghost when the asset actually has that stream.
-    const partnerCarries = Boolean(
-      partner && (partner.kind === 'video' ? asset.video : asset.audio),
-    );
     const hoveredCarries = Boolean(hovered.kind === 'video' ? asset.video : asset.audio);
     if (!hoveredCarries) return null;
 
-    const trackIdsWithGhost: TrackId[] = [dropTrackId];
-    if (partnerCarries && partnerId) trackIdsWithGhost.push(partnerId);
+    // The asset's other stream needs a track of its own; one may have to be created.
+    const needsPartner = Boolean(hovered.kind === 'video' ? asset.audio : asset.video);
+    const partnerId = needsPartner ? counterpartTrackId(project, sequenceId, dropTrackId) : null;
 
-    const start = appendPointFor(project, sequenceId, dropTrackId, partnerCarries);
+    const trackIdsWithGhost: TrackId[] = [dropTrackId];
+    if (partnerId) trackIdsWithGhost.push(partnerId);
+
+    const start = appendPointFor(project, sequenceId, dropTrackId, Boolean(partnerId));
     return {
       trackIds: trackIdsWithGhost,
       left: T.toSeconds(start) * pxPerSecond,
       width: Math.max(2, T.toSeconds(duration) * pxPerSecond),
       label: asset.name,
+      // Warn that a track will appear, since there is no lane to draw a ghost on.
+      newTrackNote: needsPartner && !partnerId
+        ? `+ new ${hovered.kind === 'video' ? 'audio' : 'video'} track`
+        : null,
     };
   }, [dropTrackId, draggingAssetId, project, sequenceId, pxPerSecond]);
 
@@ -596,6 +598,9 @@ export function Timeline(): React.JSX.Element {
                     style={{ left: dropGhosts.left, width: dropGhosts.width }}
                   >
                     <span>{dropGhosts.label}</span>
+                    {dropGhosts.newTrackNote && trackId === dropTrackId && (
+                      <span className="ghost-note">{dropGhosts.newTrackNote}</span>
+                    )}
                   </div>
                 )}
                 {trackClips(project, trackId).map((clip) => (

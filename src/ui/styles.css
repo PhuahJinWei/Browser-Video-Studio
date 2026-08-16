@@ -946,6 +946,15 @@ body.focus-mode .preview-panel .preview {
   align-items: flex-start;
   overflow: hidden;
 }
+.drop-ghost .ghost-note {
+  margin-left: auto;
+  padding: 2px 6px;
+  font-size: 10px;
+  color: var(--accent);
+  background: rgba(10, 12, 16, 0.75);
+  border-radius: 0 0 0 4px;
+  white-space: nowrap;
+}
 .drop-ghost span {
   padding: 2px 6px;
   font-size: 11px;

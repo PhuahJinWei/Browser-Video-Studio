@@ -12,7 +12,7 @@ import { Engine, type EngineTelemetry } from '../engine/engine';
 import { exportSequence, suggestBitrate, type ExportProgress, type ExportSettings } from '../engine/export';
 import { MediaLibrary } from '../engine/media';
 import { PreviewCache } from '../engine/previews';
-import { apply, type Command } from '../model/commands';
+import { apply, type Command, type NewClipSpec } from '../model/commands';
 import { randomIdSource } from '../model/ids';
 import { createProject } from '../model/factories';
 import {
@@ -29,7 +29,16 @@ import {
 } from '../model/history';
 import { getSequence, sequenceDuration, trackDuration } from '../model/selectors';
 import * as T from '../model/time';
-import type { AssetId, ClipId, Project, SequenceId, Time, TrackId } from '../model/types';
+import type {
+  Asset,
+  AssetId,
+  ClipId,
+  Project,
+  SequenceId,
+  Time,
+  TrackId,
+  TrackKind,
+} from '../model/types';
 import { Autosaver, loadMostRecent, saveMedia } from '../storage/projectStore';
 
 const ids = randomIdSource;
@@ -315,8 +324,9 @@ export const useStudio = create<StudioState>((set, get) => ({
   },
 
   /**
-   * Append an asset to the first compatible track, after whatever is already there.
-   * Same placement rule as dropping, so both routes agree.
+   * Append an asset to the first compatible track. Goes through the same planner as
+   * dropping, so both routes place clips identically and both create a counterpart
+   * track when the asset needs one.
    */
   addAssetToTimeline: async (assetId) => {
     const state = get();
@@ -325,9 +335,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     if (!asset) return;
 
     const sequence = getSequence(project, state.sequenceId);
-    const videoTrackId = asset.video ? sequence.videoTrackIds[0] : undefined;
-    const audioTrackId = asset.audio ? sequence.audioTrackIds[0] : undefined;
-    const anchorTrackId = videoTrackId ?? audioTrackId;
+    const anchorTrackId = asset.video ? sequence.videoTrackIds[0] : sequence.audioTrackIds[0];
     if (!anchorTrackId) {
       set({ error: 'No compatible track for this asset' });
       return;
@@ -339,47 +347,16 @@ export const useStudio = create<StudioState>((set, get) => ({
       return;
     }
 
-    const usesBoth = Boolean(videoTrackId && audioTrackId);
-    const start = appendPointFor(project, state.sequenceId, anchorTrackId, usesBoth);
-    const linkGroupId = `lg_${assetId}_${Date.now()}`;
-    const commands: Command[] = [];
-
-    if (videoTrackId) {
-      commands.push({
-        type: 'insertClip',
-        trackId: videoTrackId,
-        mode: 'overwrite',
-        clip: {
-          kind: 'video',
-          assetId,
-          start,
-          duration,
-          name: asset.name,
-          ...(usesBoth ? { linkGroupId } : {}),
-        },
-      });
-    }
-    if (audioTrackId) {
-      commands.push({
-        type: 'insertClip',
-        trackId: audioTrackId,
-        mode: 'overwrite',
-        clip: {
-          kind: 'audio',
-          assetId,
-          start,
-          duration,
-          name: asset.name,
-          ...(usesBoth ? { linkGroupId } : {}),
-        },
-      });
-    }
-
-    get().runMany(commands, `Add "${asset.name}"`);
-    get().engine?.requestRender(start);
+    const placement = planPlacement(project, state.sequenceId, asset, anchorTrackId);
+    get().runMany(placement.commands, `Add "${asset.name}"`);
+    set({
+      status: placement.createdTrackName
+        ? `Added "${asset.name}" — created ${placement.createdTrackName} for its other stream.`
+        : `Added "${asset.name}".`,
+    });
+    get().engine?.requestRender(placement.start);
   },
 
-  /** Drop a 3-second title on the topmost video track at the playhead. */
   addTitle: (text) => {
     const state = get();
     const sequence = getSequence(state.project(), state.sequenceId);
@@ -425,74 +402,24 @@ export const useStudio = create<StudioState>((set, get) => ({
       return;
     }
 
-    const linkGroupId = `lg_${assetId}_${Date.now()}`;
-    const commands: Command[] = [];
-
-    // The partner stream goes on the track at the same index, so dropping on V2
-    // puts the audio on A2 rather than always on A1.
-    const partnerTrackId = counterpartTrackId(project, state.sequenceId, trackId);
-    const usesPartner =
-      Boolean(partnerTrackId) &&
-      (track.kind === 'video' ? Boolean(asset.audio) : Boolean(asset.video));
-    const start = appendPointFor(project, state.sequenceId, trackId, usesPartner);
-
-    if (track.kind === 'video') {
-      if (!asset.video) {
-        set({ error: `"${asset.name}" has no video track` });
-        return;
-      }
-      const withAudio = Boolean(asset.audio && partnerTrackId);
-      commands.push({
-        type: 'insertClip',
-        trackId,
-        mode: 'overwrite',
-        clip: {
-          kind: 'video',
-          assetId,
-          start,
-          duration,
-          name: asset.name,
-          ...(withAudio ? { linkGroupId } : {}),
-        },
-      });
-      if (withAudio && partnerTrackId) {
-        commands.push({
-          type: 'insertClip',
-          trackId: partnerTrackId,
-          mode: 'overwrite',
-          clip: { kind: 'audio', assetId, start, duration, name: asset.name, linkGroupId },
-        });
-      }
-    } else {
-      if (!asset.audio) {
-        set({ error: `"${asset.name}" has no audio track` });
-        return;
-      }
-      const withVideo = Boolean(asset.video && partnerTrackId);
-      commands.push({
-        type: 'insertClip',
-        trackId,
-        mode: 'overwrite',
-        clip: {
-          kind: 'audio',
-          assetId,
-          start,
-          duration,
-          name: asset.name,
-          ...(withVideo ? { linkGroupId } : {}),
-        },
-      });
-      if (withVideo && partnerTrackId) {
-        commands.push({
-          type: 'insertClip',
-          trackId: partnerTrackId,
-          mode: 'overwrite',
-          clip: { kind: 'video', assetId, start, duration, name: asset.name, linkGroupId },
-        });
-      }
+    if (track.kind === 'video' && !asset.video) {
+      set({ error: `"${asset.name}" has no video to place on ${track.name}` });
+      return;
+    }
+    if (track.kind === 'audio' && !asset.audio) {
+      set({ error: `"${asset.name}" has no audio to place on ${track.name}` });
+      return;
     }
 
-    get().runMany(commands, `Add "${asset.name}"`);
+    const placement = planPlacement(project, state.sequenceId, asset, trackId);
+    get().runMany(placement.commands, `Add "${asset.name}"`);
+    set({
+      status: placement.createdTrackName
+        ? `Added "${asset.name}" — created ${placement.createdTrackName} for its ${
+            track.kind === 'video' ? 'audio' : 'video'
+          }.`
+        : `Added "${asset.name}".`,
+    });
   },
 
   setDraggingAsset: (assetId) => set({ draggingAssetId: assetId }),
@@ -697,6 +624,86 @@ export function appendPointFor(
     if (partnerId) end = T.max(end, trackDuration(project, partnerId));
   }
   return end;
+}
+
+export interface PlacementPlan {
+  readonly commands: readonly Command[];
+  readonly start: Time;
+  /** Name of a track that had to be created, for the status line. */
+  readonly createdTrackName: string | null;
+}
+
+/**
+ * Work out how to place an asset on a track: where it starts, and whether a track
+ * has to be created for its other stream.
+ *
+ * An asset with both streams needs a track for each. If the counterpart is missing —
+ * dropping video on V2 when only A1 exists — the audio would otherwise be silently
+ * discarded, so the missing tracks are created instead. Shared by dropping and by
+ * "Add to timeline" so the two cannot disagree.
+ */
+export function planPlacement(
+  project: Project,
+  sequenceId: SequenceId,
+  asset: Asset,
+  trackId: TrackId,
+): PlacementPlan {
+  const sequence = getSequence(project, sequenceId);
+  const track = project.tracks[trackId]!;
+  const duration = (asset.video?.duration ?? asset.audio?.duration)!;
+
+  const partnerKind: TrackKind = track.kind === 'video' ? 'audio' : 'video';
+  const needsPartner = partnerKind === 'audio' ? Boolean(asset.audio) : Boolean(asset.video);
+
+  const ownList = track.kind === 'video' ? sequence.videoTrackIds : sequence.audioTrackIds;
+  const partnerList = partnerKind === 'video' ? sequence.videoTrackIds : sequence.audioTrackIds;
+  const index = ownList.indexOf(trackId);
+
+  const commands: Command[] = [];
+  let partnerTrackId = counterpartTrackId(project, sequenceId, trackId);
+  let createdTrackName: string | null = null;
+
+  if (needsPartner && !partnerTrackId && index >= 0) {
+    // Fill the counterpart list up to the same index, so V3 pairs with a new A3.
+    const prefix = partnerKind === 'video' ? 'V' : 'A';
+    for (let i = partnerList.length; i <= index; i++) {
+      const newTrackId = ids.track();
+      commands.push({ type: 'addTrack', sequenceId, kind: partnerKind, trackId: newTrackId });
+      partnerTrackId = newTrackId;
+      createdTrackName = `${prefix}${i + 1}`;
+    }
+  }
+
+  const usesPartner = needsPartner && Boolean(partnerTrackId);
+  // A track that is about to be created is empty, so it cannot move the start.
+  const start = appendPointFor(project, sequenceId, trackId, usesPartner && !createdTrackName);
+  const linkGroupId = `lg_${asset.id}_${start.num}_${start.den}`;
+
+  const clipFor = (kind: 'video' | 'audio'): NewClipSpec => ({
+    kind,
+    assetId: asset.id,
+    start,
+    duration,
+    name: asset.name,
+    ...(usesPartner ? { linkGroupId } : {}),
+  });
+
+  commands.push({
+    type: 'insertClip',
+    trackId,
+    mode: 'overwrite',
+    clip: clipFor(track.kind === 'video' ? 'video' : 'audio'),
+  });
+  if (usesPartner && partnerTrackId) {
+    commands.push({
+      type: 'insertClip',
+      trackId: partnerTrackId,
+      mode: 'overwrite',
+      clip: clipFor(partnerKind === 'video' ? 'video' : 'audio'),
+    });
+  }
+
+  return { commands, start, createdTrackName };
 }
 
 /** Tracks in display order: video top-down (so V2 is above V1), then audio. */
