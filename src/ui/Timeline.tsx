@@ -174,6 +174,7 @@ export function Timeline(): React.JSX.Element {
   const selectExact = useStudio((s) => s.selectExact);
   const selectTrack = useStudio((s) => s.selectTrack);
   const selectTransition = useStudio((s) => s.selectTransition);
+  const addTransitionOnCuts = useStudio((s) => s.addTransitionOnCuts);
   const setError = useStudio((s) => s.setError);
   const selectedTransitionId = useStudio((s) => s.selectedTransitionId);
   const selectedTrackId = useStudio((s) => s.selectedTrackId);
@@ -474,19 +475,10 @@ export function Timeline(): React.JSX.Element {
       setError('No bare cut on that track to drop a transition on');
       return;
     }
-    runMany(
-      pairedCuts(project, cut.from, cut.to).map((paired) => ({
-        type: 'addTransition' as const,
-        fromClipId: paired.from?.id ?? null,
-        toClipId: paired.to?.id ?? null,
-        duration: T.fromSeconds(DEFAULT_TRANSITION_SECONDS, 1000),
-        // Sound has no edge to wipe; it always crossfades.
-        transitionType:
-          getTrack(project, (paired.from ?? paired.to!).trackId).kind === 'audio'
-            ? 'dissolve'
-            : transitionType,
-      })),
-      'Add transition',
+    addTransitionOnCuts(
+      pairedCuts(project, cut.from, cut.to),
+      transitionType,
+      T.fromSeconds(DEFAULT_TRANSITION_SECONDS, 1000),
     );
   };
 
@@ -577,15 +569,12 @@ export function Timeline(): React.JSX.Element {
         disabled: (againstBlack ? !from && !to : !from || !to) || existing !== null,
         onSelect: () => {
           if (!from && !to) return;
-          // One command per cut so a linked A/V pair crossfades its sound too,
-          // batched into a single undo step.
-          runMany(
-            pairedCuts(project, from, to).map((cut) => ({
-              type: 'addTransition' as const,
-              fromClipId: cut.from?.id ?? null,
-              toClipId: cut.to?.id ?? null,
-              duration: T.time(1),
-            })),
+          // Every cut in one batch, so a linked A/V pair stays in step and the
+          // whole thing is one undo.
+          addTransitionOnCuts(
+            pairedCuts(project, from, to),
+            'dissolve',
+            T.time(1),
             label,
           );
         },

@@ -8,6 +8,7 @@
  */
 
 import { create } from 'zustand';
+import { planTransition, type PlannedCut } from '../model/planTransition';
 import { DEFAULT_TRANSITION_SECONDS } from './transitions';
 import { Engine, type EngineTelemetry } from '../engine/engine';
 import { exportSequence, suggestBitrate, type ExportProgress, type ExportSettings } from '../engine/export';
@@ -134,6 +135,16 @@ export interface StudioState {
    * there was no bare cut to use.
    */
   addTransitionNearPlayhead: (transitionType?: string, trackId?: TrackId) => boolean;
+  /**
+   * Put a transition on these cuts, shortening the clips when they have no
+   * handles to spare. Returns false when even that cannot make room.
+   */
+  addTransitionOnCuts: (
+    cuts: readonly PlannedCut[],
+    transitionType: string,
+    duration: Time,
+    label?: string,
+  ) => boolean;
   dropAssetOnTrack: (assetId: AssetId, trackId: TrackId) => void;
   setDraggingAsset: (assetId: AssetId | null) => void;
   newProject: () => void;
@@ -443,6 +454,45 @@ export const useStudio = create<StudioState>((set, get) => ({
     );
   },
 
+  addTransitionOnCuts: (cuts, transitionType, duration, label = 'Add transition') => {
+    const state = get();
+    const project = state.project();
+    const sequence = getSequence(project, state.sequenceId);
+
+    const plan = planTransition(project, cuts, {
+      duration,
+      transitionType,
+      minimumClip: T.frameDuration(sequence.frameRate),
+    });
+    if (plan.commands.length === 0) {
+      set({ error: 'Those clips are too short for a transition' });
+      return false;
+    }
+
+    // Sound has no edge to wipe, so a wipe on the picture still crossfades below.
+    const isOnAudio = (command: Command): boolean => {
+      if (command.type !== 'addTransition') return false;
+      const anchor = command.fromClipId ?? command.toClipId;
+      const clip = anchor === null ? undefined : project.clips[anchor];
+      return clip !== undefined && project.tracks[clip.trackId]?.kind === 'audio';
+    };
+    const commands = plan.commands.map((command) =>
+      isOnAudio(command) ? { ...command, transitionType: 'dissolve' } : command,
+    );
+
+    state.runMany(commands, label);
+
+    // Say so rather than silently eating frames: this shortens the edit.
+    if (T.isPositive(plan.shortenedBy)) {
+      set({
+        error:
+          `No spare frames at that cut, so the clips were shortened by ` +
+          `${T.formatDuration(plan.shortenedBy, { decimals: 2 })} to make room. Undo to put them back.`,
+      });
+    }
+    return true;
+  },
+
   addTransitionNearPlayhead: (transitionType, trackId) => {
     const state = get();
     const project = state.project();
@@ -467,22 +517,11 @@ export const useStudio = create<StudioState>((set, get) => ({
     }
 
     // Both halves of a linked pair, so the sound crossfades with the picture.
-    const cuts = pairedCuts(project, best.from, best.to);
-    state.runMany(
-      cuts.map((cut) => ({
-        type: 'addTransition' as const,
-        fromClipId: cut.from?.id ?? null,
-        toClipId: cut.to?.id ?? null,
-        duration: T.fromSeconds(DEFAULT_TRANSITION_SECONDS, 1000),
-        // Sound has no edge to wipe; it always crossfades.
-        transitionType:
-          project.tracks[(cut.from ?? cut.to!).trackId]?.kind === 'audio'
-            ? 'dissolve'
-            : (transitionType ?? 'dissolve'),
-      })),
-      'Add transition',
+    return state.addTransitionOnCuts(
+      pairedCuts(project, best.from, best.to),
+      transitionType ?? 'dissolve',
+      T.fromSeconds(DEFAULT_TRANSITION_SECONDS, 1000),
     );
-    return true;
   },
 
   addSolid: (fill) => {
