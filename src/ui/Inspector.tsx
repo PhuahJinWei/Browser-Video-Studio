@@ -9,7 +9,13 @@
 import { defaultParams, EFFECT_REGISTRY, effectDefinition, listEffects } from '../engine/effects';
 import type { ClipParamKey } from '../model/commands';
 import { staticParam } from '../model/params';
-import { isAudioClip, isMediaClip, isVisualClip, selectionUnit } from '../model/selectors';
+import {
+  isAudioClip,
+  isMediaClip,
+  isSyntheticClip,
+  isVisualClip,
+  selectionUnit,
+} from '../model/selectors';
 import * as T from '../model/time';
 import type {
   AudioClip,
@@ -19,6 +25,7 @@ import type {
   EffectInstance,
   Param,
   Project,
+  SolidClip,
   TitleClip,
   Track,
   VideoClip,
@@ -236,7 +243,7 @@ function TrackInspector({ track }: { track: Track }): React.JSX.Element {
 /** The clips of one link/group unit, split by the role each plays. */
 interface SelectedUnit {
   readonly clips: readonly Clip[];
-  readonly visual: VideoClip | TitleClip | null;
+  readonly visual: VideoClip | TitleClip | SolidClip | null;
   readonly audio: AudioClip | null;
   /** The clip that names the unit and owns its timing. */
   readonly primary: Clip;
@@ -448,11 +455,13 @@ function VisualControls({
   clip,
   setParam,
   onCommit,
-}: ControlProps & { clip: VideoClip | TitleClip }): React.JSX.Element {
+}: ControlProps & { clip: VideoClip | TitleClip | SolidClip }): React.JSX.Element {
   const run = useStudio((s) => s.run);
   const { transform } = clip;
-  // Titles are generated at sequence size, so cropping and blending do not apply.
-  const framed: VideoClip | null = clip.kind === 'title' ? null : clip;
+  // Generated layers already fill the frame, so there is no source to crop into.
+  const framed: VideoClip | null = isSyntheticClip(clip) ? null : clip;
+  // Blending, though, is the point of a fill: a colour over footage is a tint.
+  const blended: VideoClip | SolidClip | null = clip.kind === 'title' ? null : clip;
 
   return (
     <>
@@ -529,32 +538,68 @@ function VisualControls({
             onChange={(value) => setParam('crop.right', value, 'Crop')}
             onCommit={onCommit}
           />
-          <div className="field">
-            <label>Blend mode</label>
-            <select
-              value={framed.blendMode}
+        </>
+      )}
+
+      {clip.kind === 'solid' && (
+        <div className="field">
+          <label>Fill</label>
+          <div className="value-row">
+            <input
+              type="color"
+              value={cssHex(clip.fill)}
               onChange={(event) =>
                 run(
-                  {
-                    type: 'setClipBlendMode',
-                    clipId: framed.id,
-                    blendMode: event.target.value as BlendMode,
-                  },
-                  'Set blend mode',
+                  { type: 'setSolidFill', clipId: clip.id, fill: event.target.value },
+                  'Set fill',
                 )
               }
-            >
-              {BLEND_MODES.map((mode) => (
-                <option key={mode} value={mode}>
-                  {mode}
-                </option>
-              ))}
-            </select>
+            />
+            <span className="hint">{clip.fill}</span>
           </div>
-        </>
+        </div>
+      )}
+
+      {blended && (
+        <div className="field">
+          <label>Blend mode</label>
+          <select
+            value={blended.blendMode}
+            onChange={(event) =>
+              run(
+                {
+                  type: 'setClipBlendMode',
+                  clipId: blended.id,
+                  blendMode: event.target.value as BlendMode,
+                },
+                'Set blend mode',
+              )
+            }
+          >
+            {BLEND_MODES.map((mode) => (
+              <option key={mode} value={mode}>
+                {mode}
+              </option>
+            ))}
+          </select>
+        </div>
       )}
     </>
   );
+}
+
+/**
+ * Best-effort hex for `<input type="color">`, which accepts nothing else.
+ * The model keeps the author's original string, so `rebeccapurple` still renders.
+ */
+function cssHex(color: string): string {
+  if (/^#[0-9a-f]{6}$/i.test(color)) return color;
+  const ctx = document.createElement('canvas').getContext('2d');
+  if (!ctx) return '#000000';
+  ctx.fillStyle = '#000000';
+  ctx.fillStyle = color;
+  const resolved = ctx.fillStyle;
+  return typeof resolved === 'string' && resolved.startsWith('#') ? resolved : '#000000';
 }
 
 function AudioControls({

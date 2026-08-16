@@ -237,6 +237,13 @@ export const IconText = (p: IconProps): React.JSX.Element => (
   </Svg>
 );
 
+export const IconSwatch = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <rect x="3" y="3" width="18" height="18" rx="2" />
+    <path d="M3 14l5-5 6 6M14 10l3-3 4 4" />
+  </Svg>
+);
+
 export const IconExport = (p: IconProps): React.JSX.Element => (
   <Svg {...p}>
     <path d="M12 3v12M8 7l4-4 4 4" />

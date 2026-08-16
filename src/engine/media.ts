@@ -59,6 +59,13 @@ interface MediaHandle {
   readonly durationSeconds: number;
 }
 
+/** How long a still lasts when first placed. Stills stretch freely afterwards. */
+export const DEFAULT_STILL_DURATION_SECONDS = 5;
+
+export function isImageFile(file: File | Blob): boolean {
+  return file.type.startsWith('image/');
+}
+
 /**
  * Opens media and serves decoded frames and audio.
  *
@@ -68,6 +75,8 @@ interface MediaHandle {
 export class MediaLibrary {
   private readonly handles = new Map<AssetId, MediaHandle>();
   private readonly opening = new Map<AssetId, Promise<MediaHandle>>();
+  /** Decoded stills, which have no container and so no demuxer handle. */
+  private readonly stills = new Map<AssetId, ImageBitmap>();
 
   /** Inspect a file without registering it. Used by the import flow. */
   static async probe(blob: Blob): Promise<MediaProbe> {
@@ -150,6 +159,49 @@ export class MediaLibrary {
           ? { ...asset.audio, codec: probe.audio.codec, channels: probe.audio.channels }
           : asset.audio,
     };
+  }
+
+  /**
+   * Import a still.
+   *
+   * Images have no container for Mediabunny to demux, so they take their own
+   * path: decode once to an ImageBitmap and describe the asset from that. The
+   * asset carries a nominal video stream so placement, drop ghosts and the
+   * inspector can treat it like any other visual clip; `clipTrimHandles`
+   * already reports stills as unbounded, so it still stretches freely.
+   */
+  static async importImage(assetId: AssetId, file: File | Blob, name: string): Promise<Asset> {
+    const bitmap = await createImageBitmap(file);
+    const size = { width: bitmap.width, height: bitmap.height };
+    bitmap.close();
+
+    const duration = T.time(DEFAULT_STILL_DURATION_SECONDS);
+    const asset = createAsset({ id: assetId, name, kind: 'image', videoDuration: duration, size });
+    return {
+      ...asset,
+      source: {
+        fileName: name,
+        byteLength: file.size,
+        mimeType: file.type,
+        opfsPath: null,
+        hasFileHandle: false,
+        contentHash: null,
+      },
+      image: { size },
+      video: asset.video ? { ...asset.video, codec: file.type || 'image', frameRate: null } : null,
+      audio: null,
+    };
+  }
+
+  /** Register a decoded still so the compositor can draw it. */
+  async openImage(assetId: AssetId, file: Blob): Promise<void> {
+    if (this.stills.has(assetId)) return;
+    this.stills.set(assetId, await createImageBitmap(file));
+  }
+
+  /** The decoded still for an asset, or null when it is not an image. */
+  getStill(assetId: AssetId): ImageBitmap | null {
+    return this.stills.get(assetId) ?? null;
   }
 
   /** Register a blob for an asset so frames can be requested for it. */
@@ -262,6 +314,8 @@ export class MediaLibrary {
 
   closeAll(): void {
     for (const assetId of [...this.handles.keys()]) this.close(assetId);
+    for (const bitmap of this.stills.values()) bitmap.close();
+    this.stills.clear();
   }
 }
 

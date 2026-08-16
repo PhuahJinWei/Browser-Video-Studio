@@ -10,7 +10,7 @@
 import { create } from 'zustand';
 import { Engine, type EngineTelemetry } from '../engine/engine';
 import { exportSequence, suggestBitrate, type ExportProgress, type ExportSettings } from '../engine/export';
-import { MediaLibrary } from '../engine/media';
+import { isImageFile, MediaLibrary } from '../engine/media';
 import { PreviewCache } from '../engine/previews';
 import { apply, type Command, type NewClipSpec } from '../model/commands';
 import { randomIdSource } from '../model/ids';
@@ -112,6 +112,7 @@ export interface StudioState {
   importViaPicker: () => Promise<void>;
   addAssetToTimeline: (assetId: AssetId) => Promise<void>;
   addTitle: (text: string) => void;
+  addSolid: (fill: string) => void;
   dropAssetOnTrack: (assetId: AssetId, trackId: TrackId) => void;
   setDraggingAsset: (assetId: AssetId | null) => void;
   newProject: () => void;
@@ -303,7 +304,9 @@ export const useStudio = create<StudioState>((set, get) => ({
     for (const file of files) {
       const assetId = ids.asset();
       try {
-        const asset = await MediaLibrary.importFile(assetId, file, file.name);
+        const asset = isImageFile(file)
+          ? await MediaLibrary.importImage(assetId, file, file.name)
+          : await MediaLibrary.importFile(assetId, file, file.name);
         commands.push({ type: 'addAsset', asset });
         nextFiles.set(assetId, file);
         await get().engine?.openAsset(assetId, file);
@@ -337,7 +340,7 @@ export const useStudio = create<StudioState>((set, get) => ({
   importViaPicker: async () => {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = 'video/*,audio/*';
+    input.accept = 'video/*,audio/*,image/*';
     input.multiple = true;
 
     const files = await new Promise<readonly File[]>((resolve) => {
@@ -406,6 +409,25 @@ export const useStudio = create<StudioState>((set, get) => ({
         },
       },
       'Add title',
+    );
+  },
+
+  addSolid: (fill) => {
+    const state = get();
+    const sequence = getSequence(state.project(), state.sequenceId);
+    const trackId = sequence.videoTrackIds[sequence.videoTrackIds.length - 1];
+    if (!trackId) {
+      set({ error: 'Add a video track first' });
+      return;
+    }
+    state.run(
+      {
+        type: 'insertClip',
+        trackId,
+        mode: 'overwrite',
+        clip: { kind: 'solid', start: state.playhead(), duration: T.time(3), fill },
+      },
+      'Add colour',
     );
   },
 
@@ -559,6 +581,16 @@ export const useStudio = create<StudioState>((set, get) => ({
     const assets = Object.values(get().project().assets);
     for (const asset of assets) {
       if (asset.status.state !== 'ready') continue;
+
+      // Stills have no frames to walk; the file itself is the thumbnail.
+      if (asset.kind === 'image') {
+        const file = get().mediaFiles.get(asset.id);
+        const size = asset.image?.size;
+        if (file && size) cache.setStillPoster(asset.id, URL.createObjectURL(file), size);
+        set({ previewVersion: get().previewVersion + 1 });
+        continue;
+      }
+
       await cache.ensure(asset.id, asset.video?.duration ?? null, asset.audio?.duration ?? null);
       set({ previewVersion: get().previewVersion + 1 });
     }
@@ -706,7 +738,10 @@ export function planPlacement(
   const start = appendPointFor(project, sequenceId, trackId, usesPartner && !createdTrackName);
   const linkGroupId = `lg_${asset.id}_${start.num}_${start.den}`;
 
-  const clipFor = (kind: 'video' | 'audio'): NewClipSpec => ({
+  // A still becomes an image clip, which trims without a source bound.
+  const visualKind = asset.kind === 'image' ? 'image' : 'video';
+
+  const clipFor = (kind: 'video' | 'audio' | 'image'): NewClipSpec => ({
     kind,
     assetId: asset.id,
     start,
@@ -719,14 +754,14 @@ export function planPlacement(
     type: 'insertClip',
     trackId,
     mode: 'overwrite',
-    clip: clipFor(track.kind === 'video' ? 'video' : 'audio'),
+    clip: clipFor(track.kind === 'video' ? visualKind : 'audio'),
   });
   if (usesPartner && partnerTrackId) {
     commands.push({
       type: 'insertClip',
       trackId: partnerTrackId,
       mode: 'overwrite',
-      clip: clipFor(partnerKind === 'video' ? 'video' : 'audio'),
+      clip: clipFor(partnerKind === 'video' ? visualKind : 'audio'),
     });
   }
 

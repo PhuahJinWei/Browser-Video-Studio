@@ -112,6 +112,7 @@ function AssetCard({ asset }: { asset: Asset }): React.JSX.Element {
   if (asset.video) details.push(`${asset.video.size.width}×${asset.video.size.height}`);
   if (asset.video?.frameRate) details.push(`${T.fpsToNumber(asset.video.frameRate).toFixed(2)} fps`);
   if (asset.audio) details.push(`${asset.audio.channels}ch`);
+  if (asset.kind === 'image') details.push('still');
 
   const onContextMenu = (event: React.MouseEvent): void =>
     menu.open(event, [

@@ -28,6 +28,7 @@ import {
   IconSkipEnd,
   IconSkipStart,
   IconSplit,
+  IconSwatch,
   IconText,
   IconTrash,
   IconUndo,
@@ -121,6 +122,7 @@ export function MenuBar({ onExport }: { onExport: () => void }): React.JSX.Eleme
   const canRedoEdit = useStudio((s) => s.canRedoEdit);
   const newProject = useStudio((s) => s.newProject);
   const addTitle = useStudio((s) => s.addTitle);
+  const addSolid = useStudio((s) => s.addSolid);
   const importViaPicker = useStudio((s) => s.importViaPicker);
   const toggleTelemetry = useStudio((s) => s.toggleTelemetry);
   const setPlayhead = useStudio((s) => s.setPlayhead);
@@ -269,6 +271,14 @@ export function MenuBar({ onExport }: { onExport: () => void }): React.JSX.Eleme
           onSelect: () => {
             const text = prompt('Title text', 'Hello');
             if (text) addTitle(text);
+          },
+        },
+        {
+          label: 'Add colour at playhead',
+          icon: <IconSwatch />,
+          onSelect: () => {
+            const fill = prompt('Fill colour (any CSS colour)', '#1f6feb');
+            if (fill) addSolid(fill);
           },
         },
       ],

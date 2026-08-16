@@ -704,6 +704,16 @@ input[type='range'] {
 .clip.title {
   background: linear-gradient(var(--title), #8c5722);
 }
+.clip.solid {
+  /* Overridden inline with the clip's own colour; this is the fallback. */
+  background: #444c56;
+}
+.clip.solid .clip-name {
+  /* The label sits on an arbitrary user colour, so give it its own contrast. */
+  background: rgb(0 0 0 / 45%);
+  border-radius: 3px;
+  padding: 0 4px;
+}
 /* Grouped clips carry a dotted top edge, so it is visible why they move as one. */
 .clip.grouped {
   border-top: 2px dotted var(--warn);

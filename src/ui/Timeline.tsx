@@ -136,7 +136,10 @@ export function Timeline(): React.JSX.Element {
   // Previews arrive asynchronously; this re-renders the lanes when one lands.
   useStudio((s) => s.previewVersion);
 
+  /** Current zoom, for the native wheel listener that is not re-registered per render. */
+  const zoomRef = useRef(sequence.view.zoom);
   const pxPerSecond = sequence.view.zoom;
+  zoomRef.current = pxPerSecond;
   const playhead = sequence.view.playhead;
   const trackIds = useMemo(() => orderedTrackIds(project, sequenceId), [project, sequenceId]);
 
@@ -538,18 +541,28 @@ export function Timeline(): React.JSX.Element {
    * through the tracks, and Shift+wheel pans sideways. Zoom keeps whatever is under
    * the pointer under the pointer — rescaling around the left edge makes the clip
    * you are aiming at slide away.
+   *
+   * Registered natively with `passive: false`. React attaches wheel listeners
+   * passively, so `preventDefault` inside an `onWheel` prop is ignored and the
+   * browser zooms the whole page alongside the timeline.
    */
-  const onWheel = (event: React.WheelEvent): void => {
-    if (!event.ctrlKey && !event.metaKey) return;
+  useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    event.preventDefault();
 
-    const rect = el.getBoundingClientRect();
-    const offset = event.clientX - rect.left - HEADER_WIDTH;
-    pendingAnchor.current = { seconds: (offset + el.scrollLeft) / pxPerSecond, offset };
-    setZoom(pxPerSecond * (event.deltaY < 0 ? 1.15 : 1 / 1.15));
-  };
+    const onWheel = (event: WheelEvent): void => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+
+      const rect = el.getBoundingClientRect();
+      const offset = event.clientX - rect.left - HEADER_WIDTH;
+      pendingAnchor.current = { seconds: (offset + el.scrollLeft) / zoomRef.current, offset };
+      setZoom(zoomRef.current * (event.deltaY < 0 ? 1.15 : 1 / 1.15));
+    };
+
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [setZoom]);
 
   /**
    * Re-anchor after a zoom, once the DOM carries the new width.
@@ -569,7 +582,7 @@ export function Timeline(): React.JSX.Element {
   const ticks = useMemo(() => buildTicks(totalSeconds, pxPerSecond), [totalSeconds, pxPerSecond]);
 
   return (
-    <div className="timeline" ref={scrollRef} onWheel={onWheel}>
+    <div className="timeline" ref={scrollRef}>
       {/*
         One scroll container for the headers, the ruler and the lanes. The header
         column is sticky-left and the ruler sticky-top, so both stay put while the
@@ -875,6 +888,16 @@ function previewStyle(
     clip.kind === 'audio' ? previews.getWaveform(clip.assetId) : previews.getFilmstrip(clip.assetId);
   if (!preview) return undefined;
 
+  // A still has no timeline of frames to map onto: tile the poster instead.
+  if (preview.sourceSeconds <= 0) {
+    return {
+      backgroundImage: `url(${preview.url})`,
+      backgroundSize: 'auto 100%',
+      backgroundRepeat: 'repeat-x',
+      backgroundPosition: 'left center',
+    };
+  }
+
   const speed = Math.abs(clip.speed) || 1;
   // Pixels the whole source would occupy at this zoom and speed.
   const sourceWidth = (preview.sourceSeconds / speed) * pxPerSecond;
@@ -908,12 +931,21 @@ function ClipView({
 }): React.JSX.Element {
   const left = T.toSeconds(clip.start) * pxPerSecond;
   const width = Math.max(2, T.toSeconds(clip.duration) * pxPerSecond);
-  const kindClass = clip.kind === 'audio' ? 'audio' : clip.kind === 'title' ? 'title' : 'video';
+  const kindClass =
+    clip.kind === 'audio'
+      ? 'audio'
+      : clip.kind === 'title'
+        ? 'title'
+        : clip.kind === 'solid'
+          ? 'solid'
+          : 'video';
+  // A fill clip shows the colour it produces, so the timeline reads at a glance.
+  const fillStyle = clip.kind === 'solid' ? { background: clip.fill } : undefined;
 
   return (
     <div
       className={`clip ${kindClass}${selected ? ' selected' : ''}${clip.enabled ? '' : ' disabled'}${preview ? ' has-preview' : ''}${isGrouped(clip) ? ' grouped' : ''}`}
-      style={{ left, width, ...preview }}
+      style={{ left, width, ...preview, ...fillStyle }}
       title={`${clip.name} · ${T.formatDuration(clip.duration, { decimals: 2 })}`}
       onContextMenu={onContextMenu}
       onPointerDown={(event) => {

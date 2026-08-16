@@ -227,7 +227,14 @@ export interface Transition {
 // Clips
 // ---------------------------------------------------------------------------
 
-export type ClipKind = 'video' | 'audio' | 'image' | 'title' | 'nested' | 'gap' /* reserved */;
+export type ClipKind =
+  | 'video'
+  | 'audio'
+  | 'image'
+  | 'title'
+  | 'solid'
+  | 'nested'
+  | 'gap' /* reserved */;
 
 /**
  * A clip is a placement of a slice of a source on a track.
@@ -306,7 +313,23 @@ export interface TitleClip extends ClipBase {
   readonly opacity: Param<number>;
 }
 
-export type Clip = VideoClip | AudioClip | TitleClip;
+/**
+ * A flat colour filling the frame: backdrops, colour mattes, and — with a blend
+ * mode — tints and scrims over the footage below.
+ *
+ * Generated at sequence resolution like a title, so there is nothing to crop; the
+ * transform is what shrinks it into a lower-third bar or a side panel.
+ */
+export interface SolidClip extends ClipBase {
+  readonly kind: 'solid';
+  /** CSS colour. Alpha is honoured, so `#00000088` is a scrim. */
+  readonly fill: string;
+  readonly transform: AnimatableTransform2D;
+  readonly opacity: Param<number>;
+  readonly blendMode: BlendMode;
+}
+
+export type Clip = VideoClip | AudioClip | TitleClip | SolidClip;
 
 // ---------------------------------------------------------------------------
 // Tracks & sequences

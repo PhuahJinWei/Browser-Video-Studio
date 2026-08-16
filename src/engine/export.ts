@@ -27,6 +27,7 @@ import { renderAudioRange } from './audio';
 import { Compositor, type DrawLayer } from './compositor';
 import { foldEffects, NEUTRAL_EFFECTS } from './effects';
 import type { MediaLibrary } from './media';
+import { renderSolid } from './solids';
 import { renderTitle } from './titles';
 
 export class ExportError extends Error {
@@ -250,6 +251,35 @@ async function collectExportLayers(
       layers.push({
         image,
         imageSize: size,
+        transform: layer.transform,
+        opacity: layer.opacity,
+        crop: layer.crop,
+        blendMode: layer.blendMode,
+        effects,
+      });
+      continue;
+    }
+
+    if (layer.clip.kind === 'solid') {
+      const { image, size } = renderSolid(layer.clip.fill, sequenceSize);
+      layers.push({
+        image,
+        imageSize: size,
+        transform: layer.transform,
+        opacity: layer.opacity,
+        crop: layer.crop,
+        blendMode: layer.blendMode,
+        effects,
+      });
+      continue;
+    }
+
+    if (layer.clip.kind === 'image') {
+      const still = media.getStill(layer.clip.assetId);
+      if (!still) continue;
+      layers.push({
+        image: still,
+        imageSize: { width: still.width, height: still.height },
         transform: layer.transform,
         opacity: layer.opacity,
         crop: layer.crop,

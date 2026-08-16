@@ -24,6 +24,7 @@ import type {
   Project,
   Sequence,
   SequenceId,
+  SolidClip,
   Time,
   TimeRange,
   TitleClip,
@@ -76,13 +77,21 @@ export function findClip(p: Project, id: ClipId): Clip | undefined {
 // Clip kinds
 // ---------------------------------------------------------------------------
 
+/**
+ * Clips the engine generates from parameters rather than decoding from a source.
+ * They have no asset, no source time and no trim limits.
+ */
+export function isSyntheticClip(clip: Clip): clip is TitleClip | SolidClip {
+  return clip.kind === 'title' || clip.kind === 'solid';
+}
+
 /** Clips backed by an asset (have assetId / sourceIn / speed). */
 export function isMediaClip(clip: Clip): clip is VideoClip | AudioClip {
-  return clip.kind !== 'title';
+  return !isSyntheticClip(clip);
 }
 
 /** Clips that contribute pixels. */
-export function isVisualClip(clip: Clip): clip is VideoClip | TitleClip {
+export function isVisualClip(clip: Clip): clip is VideoClip | TitleClip | SolidClip {
   return clip.kind !== 'audio';
 }
 
@@ -314,7 +323,7 @@ export function visibleTrackIds(p: Project, sequenceId: SequenceId): readonly Tr
 // ---------------------------------------------------------------------------
 
 export interface RenderLayer {
-  readonly clip: VideoClip | TitleClip;
+  readonly clip: VideoClip | TitleClip | SolidClip;
   readonly trackId: TrackId;
   /** Source time to decode, for asset-backed clips. */
   readonly sourceTime: Time | null;
@@ -353,10 +362,11 @@ export function renderListAt(p: Project, sequenceId: SequenceId, at: Time): read
     layers.push({
       clip,
       trackId,
-      sourceTime: clip.kind === 'title' ? null : clipSourceTimeAt(clip, at),
+      sourceTime: isSyntheticClip(clip) ? null : clipSourceTimeAt(clip, at),
       transform: evalTransform(clip.transform, rel),
       opacity: evalNumber(clip.opacity, rel),
-      crop: clip.kind === 'title' ? NO_CROP : evalCrop(clip.crop, rel),
+      // Generated layers already fill the frame, so there is nothing to crop.
+      crop: isSyntheticClip(clip) ? NO_CROP : evalCrop(clip.crop, rel),
       blendMode: clip.kind === 'title' ? 'normal' : clip.blendMode,
       effects: resolveEffects(p, clip.effects),
       trackEffects: resolveEffects(p, getTrack(p, trackId).effects),

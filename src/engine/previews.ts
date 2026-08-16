@@ -197,6 +197,26 @@ export class PreviewCache {
     return this.waveforms.get(assetId);
   }
 
+  /**
+   * Register a still as its own poster.
+   *
+   * Images have no frames to walk, so there is no strip to build — but the media
+   * bin still wants a thumbnail, and the file itself is the best one available.
+   */
+  setStillPoster(assetId: AssetId, url: string, size: { width: number; height: number }): void {
+    if (this.filmstrips.get(assetId)) return;
+    this.filmstrips.set(assetId, {
+      url,
+      frameWidth: size.width,
+      frameHeight: size.height,
+      frameCount: 1,
+      sourceSeconds: 0,
+      posterUrl: url,
+      posterWidth: size.width,
+      posterHeight: size.height,
+    });
+  }
+
   /** Build both previews for an asset. Safe to call repeatedly. */
   async ensure(assetId: AssetId, videoDuration: Time | null, audioDuration: Time | null): Promise<void> {
     const jobs: Promise<unknown>[] = [];

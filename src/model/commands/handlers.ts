@@ -3,9 +3,16 @@
  * maintaining the track invariants (sorted, non-overlapping, kind-compatible).
  */
 
-import { createAudioClip, createEffect, createMarker, createTitleClip, createTrack, createVideoClip } from '../factories';
+import { createAudioClip, createEffect, createMarker, createSolidClip, createTitleClip, createTrack, createVideoClip } from '../factories';
 import type { IdSource } from '../ids';
-import { clipEnd, clipFitsTrack, clipRange, isMediaClip, ModelError } from '../selectors';
+import {
+  clipEnd,
+  clipFitsTrack,
+  clipRange,
+  isMediaClip,
+  isSyntheticClip,
+  ModelError,
+} from '../selectors';
 import * as T from '../time';
 import type { Clip, ClipId, Time, Track, TrackId } from '../types';
 import {
@@ -63,6 +70,17 @@ function buildClip(spec: NewClipSpec, trackId: TrackId, ids: IdSource): Clip {
   assertPositiveDuration(spec.duration, 'New clip');
   if (T.isNegative(spec.start)) {
     throw new ModelError(`A clip cannot start before zero (${T.debugTime(spec.start)})`);
+  }
+
+  if (spec.kind === 'solid') {
+    return createSolidClip({
+      id,
+      trackId,
+      start: spec.start,
+      duration: spec.duration,
+      fill: spec.fill,
+      ...(spec.name !== undefined ? { name: spec.name } : {}),
+    });
   }
 
   if (spec.kind === 'title') {
@@ -391,12 +409,19 @@ function handleSetClipParam(d: Draft, cmd: Extract<Command, { type: 'setClipPara
     return;
   }
   if (group === 'crop' && channel) {
-    if (clip.kind === 'audio' || clip.kind === 'title') reject();
+    if (clip.kind === 'audio' || isSyntheticClip(clip)) reject();
     const video = clip as Extract<Clip, { crop: unknown }>;
     d.clips[clip.id] = { ...video, crop: { ...video.crop, [channel]: cmd.param } } as Clip;
     return;
   }
   reject();
+}
+
+function handleSetSolidFill(d: Draft, cmd: Extract<Command, { type: 'setSolidFill' }>): void {
+  const clip = draftClip(d, cmd.clipId);
+  if (clip.kind !== 'solid') throw new ModelError(`"${clip.name}" is not a fill clip`);
+  if (!cmd.fill.trim()) throw new ModelError('A fill needs a colour');
+  d.clips[clip.id] = { ...clip, fill: cmd.fill };
 }
 
 function handleSetClipFade(d: Draft, cmd: Extract<Command, { type: 'setClipFade' }>): void {
@@ -413,6 +438,7 @@ function handleSetClipBlendMode(d: Draft, cmd: Extract<Command, { type: 'setClip
   if (clip.kind === 'audio' || clip.kind === 'title') {
     throw new ModelError(`"${clip.name}" has no blend mode`);
   }
+
   d.clips[clip.id] = { ...clip, blendMode: cmd.blendMode };
 }
 
@@ -638,6 +664,8 @@ export function runCommand(d: Draft, command: Command, ids: IdSource): void {
       return handleSetClipFade(d, command);
     case 'setClipBlendMode':
       return handleSetClipBlendMode(d, command);
+    case 'setSolidFill':
+      return handleSetSolidFill(d, command);
     case 'setClipSpeed':
       return handleSetClipSpeed(d, command);
     case 'unlinkClips':

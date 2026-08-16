@@ -14,6 +14,7 @@ import { AudioPlayer } from './audio';
 import { Compositor, type DrawLayer } from './compositor';
 import { foldEffects, NEUTRAL_EFFECTS } from './effects';
 import { MediaLibrary } from './media';
+import { renderSolid } from './solids';
 import { renderTitle } from './titles';
 
 export interface EngineTelemetry {
@@ -157,6 +158,36 @@ export class Engine {
         layers.push({
           image,
           imageSize: size,
+          transform: layer.transform,
+          opacity: layer.opacity,
+          crop: layer.crop,
+          blendMode: layer.blendMode,
+          effects,
+        });
+        continue;
+      }
+
+      if (layer.clip.kind === 'solid') {
+        const { image, size } = renderSolid(layer.clip.fill, sequence.size);
+        layers.push({
+          image,
+          imageSize: size,
+          transform: layer.transform,
+          opacity: layer.opacity,
+          crop: layer.crop,
+          blendMode: layer.blendMode,
+          effects,
+        });
+        continue;
+      }
+
+      // Stills are decoded once and drawn directly; there is nothing to seek.
+      if (layer.clip.kind === 'image') {
+        const still = this.media.getStill(layer.clip.assetId);
+        if (!still) continue;
+        layers.push({
+          image: still,
+          imageSize: { width: still.width, height: still.height },
           transform: layer.transform,
           opacity: layer.opacity,
           crop: layer.crop,
@@ -355,7 +386,8 @@ export class Engine {
   }
 
   async openAsset(assetId: AssetId, blob: Blob): Promise<void> {
-    await this.media.open(assetId, blob);
+    if (blob.type.startsWith('image/')) await this.media.openImage(assetId, blob);
+    else await this.media.open(assetId, blob);
   }
 
   async destroy(): Promise<void> {

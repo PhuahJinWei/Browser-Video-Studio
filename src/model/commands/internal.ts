@@ -266,6 +266,7 @@ export function shiftClipAnimation(clip: Clip, by: Time): Clip {
         pan: shiftParam(clip.pan, by),
       };
     case 'title':
+    case 'solid':
       return {
         ...clip,
         transform: shiftTransform(clip.transform, by),

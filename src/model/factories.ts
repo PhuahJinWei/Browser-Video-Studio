@@ -26,6 +26,7 @@ import type {
   Sequence,
   SequenceId,
   Size,
+  SolidClip,
   Time,
   TitleClip,
   Track,
@@ -175,6 +176,36 @@ export function createAudioClip(opts: CreateMediaClipOptions): AudioClip {
     fadeOut: T.TIME_ZERO,
     channelMap: 'stereo',
     streamIndex: opts.streamIndex ?? 0,
+  };
+}
+
+export interface CreateSolidClipOptions {
+  readonly id: ClipId;
+  readonly trackId: TrackId;
+  readonly start: Time;
+  readonly duration: Time;
+  readonly fill: string;
+  readonly name?: string;
+}
+
+export function createSolidClip(opts: CreateSolidClipOptions): SolidClip {
+  return {
+    id: opts.id,
+    kind: 'solid',
+    trackId: opts.trackId,
+    name: opts.name ?? 'Colour',
+    start: opts.start,
+    duration: opts.duration,
+    enabled: true,
+    locked: false,
+    color: null,
+    effects: [],
+    linkGroupId: null,
+    groupId: null,
+    fill: opts.fill,
+    transform: defaultTransform(),
+    opacity: staticParam(1),
+    blendMode: 'normal',
   };
 }
 

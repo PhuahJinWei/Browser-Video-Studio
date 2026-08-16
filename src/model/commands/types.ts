@@ -49,6 +49,14 @@ export type NewClipSpec =
       readonly text: string;
       readonly name?: string;
       readonly clipId?: ClipId;
+    }
+  | {
+      readonly kind: 'solid';
+      readonly start: Time;
+      readonly duration: Time;
+      readonly fill: string;
+      readonly name?: string;
+      readonly clipId?: ClipId;
     };
 
 export interface ClipMove {
@@ -182,6 +190,8 @@ export type Command =
       readonly duration: Time;
     }
   | { readonly type: 'setClipBlendMode'; readonly clipId: ClipId; readonly blendMode: BlendMode }
+  /** Recolour a fill clip. Any CSS colour; alpha is honoured. */
+  | { readonly type: 'setSolidFill'; readonly clipId: ClipId; readonly fill: string }
   | { readonly type: 'setClipSpeed'; readonly clipId: ClipId; readonly speed: number }
   /** Break the video/audio link on every clip in these clips' groups. */
   | { readonly type: 'unlinkClips'; readonly clipIds: readonly ClipId[] }
