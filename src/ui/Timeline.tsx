@@ -10,6 +10,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { Command } from '../model/commands';
 import type { PreviewCache } from '../engine/previews';
 import {
+  adjacentClips,
   clipEnd,
   clipFitsTrack,
   getTrack,
@@ -17,9 +18,20 @@ import {
   isMediaClip,
   selectionUnit,
   trackClips,
+  trackTransitions,
+  transitionBetween,
+  transitionSpan,
 } from '../model/selectors';
 import * as T from '../model/time';
-import type { Clip, ClipId, Project, Time, Track, TrackId } from '../model/types';
+import type {
+  Clip,
+  ClipId,
+  Project,
+  Time,
+  Track,
+  TrackId,
+  Transition,
+} from '../model/types';
 import { useContextMenu, type MenuEntry } from './ContextMenu';
 import {
   IconAudio,
@@ -39,6 +51,7 @@ import {
   IconSolo,
   IconSplit,
   IconText,
+  IconTransition,
   IconTrash,
   IconUnlink,
   IconUnlocked,
@@ -376,6 +389,28 @@ export function Timeline(): React.JSX.Element {
       ? Object.values(project.clips).filter((c) => c.linkGroupId === clip.linkGroupId)
       : [];
 
+    const { previous, next } = adjacentClips(project, clip);
+    const dissolveEntry = (
+      label: string,
+      from: Clip | null,
+      to: Clip | null,
+    ): MenuEntry => {
+      const existing = from && to ? transitionBetween(project, from.id, to.id) : null;
+      return {
+        label: existing ? `${label} (already there)` : label,
+        icon: <IconTransition />,
+        // Needs a neighbour sharing an exact cut, and nothing there already.
+        disabled: !from || !to || existing !== null,
+        onSelect: () =>
+          from &&
+          to &&
+          run(
+            { type: 'addTransition', fromClipId: from.id, toClipId: to.id, duration: T.time(1) },
+            'Add cross dissolve',
+          ),
+      };
+    };
+
     const entries: MenuEntry[] = [
       {
         label: 'Split at playhead',
@@ -390,6 +425,9 @@ export function Timeline(): React.JSX.Element {
         icon: <IconSplit />,
         onSelect: () => splitAt(playhead, trackIds),
       },
+      'separator',
+      dissolveEntry('Cross dissolve at start', previous, clip),
+      dissolveEntry('Cross dissolve at end', clip, next),
       'separator',
       {
         label: linked.length > 1 ? `Detach audio from video (${linked.length} clips)` : 'Detach audio from video',
@@ -453,6 +491,38 @@ export function Timeline(): React.JSX.Element {
       },
     ];
     menu.open(event, entries);
+  };
+
+  const openTransitionMenu = (event: React.MouseEvent, transition: Transition): void => {
+    event.stopPropagation();
+    const seconds = T.toSeconds(transition.duration);
+    menu.open(event, [
+      {
+        label: 'Set duration…',
+        icon: <IconTransition />,
+        onSelect: () => {
+          const answer = prompt('Transition length in seconds', String(seconds));
+          const value = answer === null ? NaN : Number(answer);
+          if (!Number.isFinite(value) || value <= 0) return;
+          run(
+            {
+              type: 'setTransitionDuration',
+              transitionId: transition.id,
+              duration: T.fromSeconds(value, 1000),
+            },
+            'Set transition length',
+          );
+        },
+      },
+      'separator',
+      {
+        label: 'Remove transition',
+        icon: <IconTrash />,
+        danger: true,
+        onSelect: () =>
+          run({ type: 'removeTransition', transitionId: transition.id }, 'Remove transition'),
+      },
+    ]);
   };
 
   const openLaneMenu = (event: React.MouseEvent, trackId: TrackId): void => {
@@ -678,6 +748,23 @@ export function Timeline(): React.JSX.Element {
                       )}
                     </div>
                   )}
+                  {trackTransitions(project, trackId).map((transition) => {
+                    const span = transitionSpan(project, transition);
+                    if (!span) return null;
+                    return (
+                      <div
+                        key={transition.id}
+                        className="clip-transition"
+                        style={{
+                          left: T.toSeconds(span.start) * pxPerSecond,
+                          width: Math.max(8, T.toSeconds(span.duration) * pxPerSecond),
+                        }}
+                        title={`${transition.transitionType} · ${T.formatDuration(transition.duration, { decimals: 2 })}`}
+                        onContextMenu={(event) => openTransitionMenu(event, transition)}
+                        onPointerDown={(event) => event.stopPropagation()}
+                      />
+                    );
+                  })}
                   {trackClips(project, trackId).map((clip) => (
                     <ClipView
                       key={clip.id}

@@ -11,21 +11,28 @@ import {
   clipRange,
   isMediaClip,
   isSyntheticClip,
+  maxTransitionDuration,
   ModelError,
 } from '../selectors';
 import * as T from '../time';
-import type { Clip, ClipId, Time, Track, TrackId } from '../types';
+import type {
+  Clip,
+  ClipId,
+  Time,
+  Track,
+  TrackId,
+  Transition,
+} from '../types';
 import {
   assertPositiveDuration,
   clearRangeOnTrack,
   commitDraft,
   deleteClip,
+  deleteTransition,
   draftClip,
   draftEffect,
   draftSequence,
   draftTrack,
-  type Draft,
-  type MembershipRemap,
   newMembershipRemap,
   ownerOfEffect,
   pruneBrokenTransitions,
@@ -36,6 +43,8 @@ import {
   sortTrack,
   splitClipAt,
   trimClipIn,
+  type Draft,
+  type MembershipRemap,
 } from './internal';
 import type { Command, NewClipSpec } from './types';
 
@@ -632,6 +641,108 @@ function handleSetView(d: Draft, cmd: Extract<Command, { type: 'setView' }>): vo
 // Dispatch
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Transitions
+// ---------------------------------------------------------------------------
+
+/**
+ * Clamp a requested transition length to what the cut can actually supply, and
+ * explain the refusal when it can supply nothing.
+ */
+function fitTransition(
+  d: Draft,
+  from: Clip,
+  to: Clip,
+  alignment: Transition['alignment'],
+  requested: Time,
+): Time {
+  if (!T.isPositive(requested)) throw new ModelError('A transition must be longer than zero');
+
+  const max = maxTransitionDuration(d, from, to, alignment);
+  if (!T.isPositive(max)) {
+    throw new ModelError(
+      `"${from.name}" and "${to.name}" have no spare frames for a transition — ` +
+        'trim one of them back to free some up',
+    );
+  }
+  return T.min(requested, max);
+}
+
+function handleAddTransition(
+  d: Draft,
+  cmd: Extract<Command, { type: 'addTransition' }>,
+  ids: IdSource,
+): void {
+  const from = draftClip(d, cmd.fromClipId);
+  const to = draftClip(d, cmd.toClipId);
+
+  if (from.trackId !== to.trackId) {
+    throw new ModelError('A transition joins two clips on the same track');
+  }
+  const track = draftTrack(d, from.trackId);
+  assertUnlocked(track);
+  if (track.kind !== 'video') {
+    throw new ModelError('Transitions are video-only for now');
+  }
+  if (!T.eq(clipEnd(from), to.start)) {
+    throw new ModelError(`"${from.name}" and "${to.name}" are not adjacent`);
+  }
+
+  // One transition per cut, or two overlapping mixes would fight over the same frames.
+  for (const existing of Object.values(d.transitions)) {
+    if (existing.fromClipId === from.id && existing.toClipId === to.id) {
+      throw new ModelError('That cut already has a transition');
+    }
+  }
+
+  const sequence = sequenceOfTrack(d, track.id);
+  if (!sequence) throw new ModelError('That track does not belong to a sequence');
+
+  const alignment = cmd.alignment ?? 'centered';
+  const id = ids.transition();
+  d.transitions[id] = {
+    id,
+    transitionType: cmd.transitionType ?? 'dissolve',
+    trackId: track.id,
+    fromClipId: from.id,
+    toClipId: to.id,
+    duration: fitTransition(d, from, to, alignment, cmd.duration),
+    alignment,
+    params: {},
+  };
+  d.sequences[sequence.id] = {
+    ...sequence,
+    transitionIds: [...sequence.transitionIds, id],
+  };
+}
+
+function handleRemoveTransition(
+  d: Draft,
+  cmd: Extract<Command, { type: 'removeTransition' }>,
+): void {
+  if (!d.transitions[cmd.transitionId]) {
+    throw new ModelError('That transition no longer exists');
+  }
+  deleteTransition(d, cmd.transitionId);
+}
+
+function handleSetTransitionDuration(
+  d: Draft,
+  cmd: Extract<Command, { type: 'setTransitionDuration' }>,
+): void {
+  const transition = d.transitions[cmd.transitionId];
+  if (!transition) throw new ModelError('That transition no longer exists');
+
+  const from = draftClip(d, transition.fromClipId);
+  const to = draftClip(d, transition.toClipId);
+  assertUnlocked(draftTrack(d, transition.trackId));
+
+  d.transitions[transition.id] = {
+    ...transition,
+    duration: fitTransition(d, from, to, transition.alignment, cmd.duration),
+  };
+}
+
 export function runCommand(d: Draft, command: Command, ids: IdSource): void {
   switch (command.type) {
     case 'addTrack':
@@ -666,6 +777,12 @@ export function runCommand(d: Draft, command: Command, ids: IdSource): void {
       return handleSetClipBlendMode(d, command);
     case 'setSolidFill':
       return handleSetSolidFill(d, command);
+    case 'addTransition':
+      return handleAddTransition(d, command, ids);
+    case 'removeTransition':
+      return handleRemoveTransition(d, command);
+    case 'setTransitionDuration':
+      return handleSetTransitionDuration(d, command);
     case 'setClipSpeed':
       return handleSetClipSpeed(d, command);
     case 'unlinkClips':

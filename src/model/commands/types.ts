@@ -26,6 +26,8 @@ import type {
   Time,
   TrackId,
   TrackKind,
+  Transition,
+  TransitionId,
 } from '../types';
 
 /** What a new clip should be made of. The clip's id comes from the `IdSource`. */
@@ -192,6 +194,27 @@ export type Command =
   | { readonly type: 'setClipBlendMode'; readonly clipId: ClipId; readonly blendMode: BlendMode }
   /** Recolour a fill clip. Any CSS colour; alpha is honoured. */
   | { readonly type: 'setSolidFill'; readonly clipId: ClipId; readonly fill: string }
+  /**
+   * Put a transition across the cut between two adjacent clips.
+   *
+   * `duration` is a request, not a demand: it is shortened to whatever the two
+   * clips can actually supply rather than refused outright.
+   */
+  | {
+      readonly type: 'addTransition';
+      readonly fromClipId: ClipId;
+      readonly toClipId: ClipId;
+      readonly duration: Time;
+      readonly transitionType?: string;
+      readonly alignment?: Transition['alignment'];
+    }
+  | { readonly type: 'removeTransition'; readonly transitionId: TransitionId }
+  /** Also shortened to fit. */
+  | {
+      readonly type: 'setTransitionDuration';
+      readonly transitionId: TransitionId;
+      readonly duration: Time;
+    }
   | { readonly type: 'setClipSpeed'; readonly clipId: ClipId; readonly speed: number }
   /** Break the video/audio link on every clip in these clips' groups. */
   | { readonly type: 'unlinkClips'; readonly clipIds: readonly ClipId[] }

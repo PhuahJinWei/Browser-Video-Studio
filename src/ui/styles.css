@@ -704,6 +704,30 @@ input[type='range'] {
 .clip.title {
   background: linear-gradient(var(--title), #8c5722);
 }
+/*
+ * A transition straddles the cut it spans. It sits in a band across the top of
+ * the lane rather than the full height, so the trim handles of the two clips it
+ * joins — which are directly underneath it — stay reachable.
+ */
+.clip-transition {
+  position: absolute;
+  top: 0;
+  height: 42%;
+  z-index: 3;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  background:
+    linear-gradient(to bottom right, transparent calc(50% - 1px), var(--accent) 50%, transparent calc(50% + 1px)),
+    linear-gradient(to top right, transparent calc(50% - 1px), var(--accent) 50%, transparent calc(50% + 1px)),
+    rgb(88 166 255 / 22%);
+  cursor: context-menu;
+}
+.clip-transition:hover {
+  background:
+    linear-gradient(to bottom right, transparent calc(50% - 1px), var(--accent) 50%, transparent calc(50% + 1px)),
+    linear-gradient(to top right, transparent calc(50% - 1px), var(--accent) 50%, transparent calc(50% + 1px)),
+    rgb(88 166 255 / 38%);
+}
 .clip.solid {
   /* Overridden inline with the clip's own colour; this is the fallback. */
   background: #444c56;

@@ -195,8 +195,16 @@ export function clipSourceSpan(clip: VideoClip | AudioClip): Time {
   return T.abs(clip.speed === 1 ? clip.duration : T.scale(clip.duration, clip.speed));
 }
 
+/**
+ * Just the part of a project the source maths needs. Command drafts satisfy it
+ * too, so handlers can ask about handles mid-edit without rebuilding a Project.
+ */
+export interface AssetLookup {
+  readonly assets: Readonly<Record<AssetId, Asset>>;
+}
+
 /** Duration of the asset stream a clip draws on, or null when unknown. */
-export function clipSourceDuration(p: Project, clip: Clip): Time | null {
+export function clipSourceDuration(p: AssetLookup, clip: Clip): Time | null {
   if (!isMediaClip(clip)) return null;
   const asset = p.assets[clip.assetId];
   if (!asset) return null;
@@ -216,7 +224,7 @@ export interface TrimHandles {
   readonly tailroom: Time | null;
 }
 
-export function clipTrimHandles(p: Project, clip: Clip): TrimHandles {
+export function clipTrimHandles(p: AssetLookup, clip: Clip): TrimHandles {
   const sourceDuration = clipSourceDuration(p, clip);
   if (!isMediaClip(clip) || sourceDuration === null) return { headroom: null, tailroom: null };
 
@@ -355,25 +363,52 @@ export function renderListAt(p: Project, sequenceId: SequenceId, at: Time): read
   const layers: RenderLayer[] = [];
 
   for (const trackId of visibleTrackIds(p, sequenceId)) {
-    const clip = clipAt(p, trackId, at);
-    if (!clip || !clip.enabled || !isVisualClip(clip)) continue;
+    for (const { clip, opacityScale } of trackLayersAt(p, trackId, at)) {
+      if (!clip.enabled || !isVisualClip(clip)) continue;
 
-    const rel = clipRelativeTime(clip, at);
-    layers.push({
-      clip,
-      trackId,
-      sourceTime: isSyntheticClip(clip) ? null : clipSourceTimeAt(clip, at),
-      transform: evalTransform(clip.transform, rel),
-      opacity: evalNumber(clip.opacity, rel),
-      // Generated layers already fill the frame, so there is nothing to crop.
-      crop: isSyntheticClip(clip) ? NO_CROP : evalCrop(clip.crop, rel),
-      blendMode: clip.kind === 'title' ? 'normal' : clip.blendMode,
-      effects: resolveEffects(p, clip.effects),
-      trackEffects: resolveEffects(p, getTrack(p, trackId).effects),
-    });
+      const rel = clipRelativeTime(clip, at);
+      layers.push({
+        clip,
+        trackId,
+        sourceTime: isSyntheticClip(clip) ? null : clipSourceTimeAt(clip, at),
+        transform: evalTransform(clip.transform, rel),
+        opacity: evalNumber(clip.opacity, rel) * opacityScale,
+        // Generated layers already fill the frame, so there is nothing to crop.
+        crop: isSyntheticClip(clip) ? NO_CROP : evalCrop(clip.crop, rel),
+        blendMode: clip.kind === 'title' ? 'normal' : clip.blendMode,
+        effects: resolveEffects(p, clip.effects),
+        trackEffects: resolveEffects(p, getTrack(p, trackId).effects),
+      });
+    }
   }
 
   return layers;
+}
+
+interface TrackLayer {
+  readonly clip: Clip;
+  /** Multiplied into the clip's own opacity. This is what mixes a dissolve. */
+  readonly opacityScale: number;
+}
+
+/**
+ * What one track contributes at an instant: normally a single clip, but two
+ * while a transition is running.
+ */
+function trackLayersAt(p: Project, trackId: TrackId, at: Time): readonly TrackLayer[] {
+  const active = activeTransitionAt(p, trackId, at);
+  if (active) {
+    // Only the incoming clip ramps. Fading both would darken the middle of the
+    // dissolve: compositing `over` twice gives A(1-p)² + Bp, where a cross
+    // dissolve is A(1-p) + Bp. Holding the outgoing clip opaque and letting the
+    // incoming one fade up over it produces exactly the latter.
+    return [
+      { clip: active.from, opacityScale: 1 },
+      { clip: active.to, opacityScale: active.progress },
+    ];
+  }
+  const clip = clipAt(p, trackId, at);
+  return clip ? [{ clip, opacityScale: 1 }] : [];
 }
 
 // ---------------------------------------------------------------------------
@@ -433,6 +468,139 @@ export function audioSegments(
 // ---------------------------------------------------------------------------
 // Transitions & markers
 // ---------------------------------------------------------------------------
+
+/**
+ * Timeline span a transition occupies, or null when its clips have gone.
+ *
+ * `centered` straddles the cut, so each clip must supply half the overlap;
+ * `start` and `end` put the whole overlap on one side of it.
+ */
+export function transitionSpan(p: Project, transition: Transition): TimeRange | null {
+  const to = p.clips[transition.toClipId];
+  if (!to || !p.clips[transition.fromClipId]) return null;
+
+  const cut = to.start;
+  switch (transition.alignment) {
+    case 'start':
+      return T.range(cut, transition.duration);
+    case 'end':
+      return T.range(T.sub(cut, transition.duration), transition.duration);
+    default: {
+      const half = T.scale(transition.duration, 0.5);
+      return T.range(T.sub(cut, half), transition.duration);
+    }
+  }
+}
+
+/** Transitions living on one track, in timeline order. */
+export function trackTransitions(p: Project, trackId: TrackId): readonly Transition[] {
+  return Object.values(p.transitions)
+    .filter((t) => t.trackId === trackId)
+    .sort((a, b) => {
+      const sa = transitionSpan(p, a);
+      const sb = transitionSpan(p, b);
+      if (!sa || !sb) return 0;
+      return T.cmp(sa.start, sb.start);
+    });
+}
+
+/** The clips butting straight up against this one, sharing an exact cut. */
+export function adjacentClips(
+  p: Project,
+  clip: Clip,
+): { readonly previous: Clip | null; readonly next: Clip | null } {
+  const clips = trackClips(p, clip.trackId);
+  const index = clips.findIndex((c) => c.id === clip.id);
+  if (index < 0) return { previous: null, next: null };
+
+  const previous = clips[index - 1];
+  const next = clips[index + 1];
+  return {
+    previous: previous && T.eq(clipEnd(previous), clip.start) ? previous : null,
+    next: next && T.eq(clipEnd(clip), next.start) ? next : null,
+  };
+}
+
+/** The transition on a given cut, if one is there. */
+export function transitionBetween(
+  p: Project,
+  fromClipId: ClipId,
+  toClipId: ClipId,
+): Transition | null {
+  return (
+    Object.values(p.transitions).find(
+      (t) => t.fromClipId === fromClipId && t.toClipId === toClipId,
+    ) ?? null
+  );
+}
+
+export interface ActiveTransition {
+  readonly transition: Transition;
+  readonly from: Clip;
+  readonly to: Clip;
+  /** 0 at the start of the transition, approaching 1 at its end. */
+  readonly progress: number;
+}
+
+/** The transition covering `at` on this track, if any. */
+export function activeTransitionAt(
+  p: Project,
+  trackId: TrackId,
+  at: Time,
+): ActiveTransition | null {
+  for (const transition of trackTransitions(p, trackId)) {
+    const span = transitionSpan(p, transition);
+    if (!span) continue;
+    if (T.lt(at, span.start) || T.gte(at, T.rangeEnd(span))) continue;
+
+    const from = p.clips[transition.fromClipId];
+    const to = p.clips[transition.toClipId];
+    if (!from || !to) continue;
+    return { transition, from, to, progress: T.ratio(T.sub(at, span.start), span.duration) };
+  }
+  return null;
+}
+
+/**
+ * Longest transition a cut can support.
+ *
+ * A dissolve plays both clips at once, so each side has to keep going past its
+ * own cut: the outgoing clip spends `tailroom`, the incoming one `headroom`.
+ * Generated clips (titles, fills) have no source to run out of and only the clip
+ * lengths bound them. Returns zero when the cut has no spare material at all.
+ */
+export function maxTransitionDuration(
+  p: AssetLookup,
+  from: Clip,
+  to: Clip,
+  alignment: Transition['alignment'] = 'centered',
+): Time {
+  // Swallowing a whole clip would erase the cut the transition belongs to.
+  let limit = T.min(from.duration, to.duration);
+  const cap = (value: Time): void => {
+    limit = T.min(limit, value);
+  };
+
+  const { tailroom } = clipTrimHandles(p, from);
+  const { headroom } = clipTrimHandles(p, to);
+
+  switch (alignment) {
+    case 'start':
+      // Wholly after the cut: only the outgoing clip plays past its out point.
+      if (tailroom !== null) cap(tailroom);
+      break;
+    case 'end':
+      // Wholly before the cut: only the incoming clip starts early.
+      if (headroom !== null) cap(headroom);
+      break;
+    default:
+      // Straddling the cut: each side supplies half, so each handle buys double.
+      if (tailroom !== null) cap(T.mulInt(tailroom, 2));
+      if (headroom !== null) cap(T.mulInt(headroom, 2));
+  }
+
+  return T.max(limit, T.TIME_ZERO);
+}
 
 export function sequenceTransitions(p: Project, sequenceId: SequenceId): readonly Transition[] {
   return getSequence(p, sequenceId)

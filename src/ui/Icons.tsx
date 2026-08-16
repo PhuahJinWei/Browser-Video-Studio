@@ -237,6 +237,12 @@ export const IconText = (p: IconProps): React.JSX.Element => (
   </Svg>
 );
 
+export const IconTransition = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <path d="M4 5v14M20 5v14M4 5l16 14M20 5L4 19" />
+  </Svg>
+);
+
 export const IconSwatch = (p: IconProps): React.JSX.Element => (
   <Svg {...p}>
     <rect x="3" y="3" width="18" height="18" rx="2" />
