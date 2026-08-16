@@ -20,6 +20,8 @@ export interface Filmstrip {
   readonly frameWidth: number;
   readonly frameHeight: number;
   readonly frameCount: number;
+  /** Frames per second of source, so a coarser strip can be recognised. */
+  readonly framesPerSecond: number;
   /** Total source duration the strip spans, in seconds. */
   readonly sourceSeconds: number;
   /**
@@ -50,7 +52,51 @@ export interface Waveform {
  * the bin poster below already used.
  */
 const FILMSTRIP_HEIGHT = 160;
-const MAX_FILMSTRIP_FRAMES = 48;
+
+/**
+ * Densities we will build, in frames per second of source.
+ *
+ * Quantised so that zooming re-renders a handful of times rather than on every
+ * wheel notch, and each step doubles, so the coarse strip stays usable on screen
+ * while the finer one decodes.
+ */
+export const DENSITY_TIERS = [1, 2, 4, 8] as const;
+
+/**
+ * A frame may cover about this much of the timeline before it looks stretched.
+ * Roughly the natural width of a 16:9 frame at a default lane height.
+ */
+const TARGET_FRAME_PX = 120;
+
+/**
+ * Gap after each frame, as a fraction of its width.
+ *
+ * Contiguous frames are what other editors draw, and they read as a ribbon of film
+ * — which is fine until the footage is busy, when the whole strip turns into one
+ * texture and no single frame is legible. A hairline gutter separates them without
+ * costing meaningful width.
+ */
+const FRAME_GUTTER_RATIO = 0.018;
+
+/**
+ * Ceiling on frames in one strip.
+ *
+ * The sprite is a single canvas, so this is really a limit on its width: 120
+ * frames at ~284px is already about 34,000px across. A long source therefore
+ * stays coarse however far you zoom, which is what it did before density
+ * existed at all — the gain is for clips of the length people actually cut.
+ */
+const MAX_FILMSTRIP_FRAMES = 120;
+
+/**
+ * The coarsest density that still keeps frames under `TARGET_FRAME_PX` at this
+ * zoom. `speed` matters because a slowed clip stretches its source across more
+ * of the timeline, so each frame of it covers more ground.
+ */
+export function densityForZoom(pixelsPerSecond: number, speed = 1): number {
+  const wanted = pixelsPerSecond / (Math.abs(speed) || 1) / TARGET_FRAME_PX;
+  return DENSITY_TIERS.find((tier) => tier >= wanted) ?? DENSITY_TIERS[DENSITY_TIERS.length - 1]!;
+}
 /** Bin cards are ~220 CSS px wide; 2x that stays crisp on a HiDPI display. */
 const POSTER_WIDTH = 440;
 const WAVEFORM_HEIGHT = 160;
@@ -73,6 +119,8 @@ export type ProgressListener = (fraction: number) => void;
 export interface GenerateOptions {
   readonly signal?: AbortSignal;
   readonly onProgress?: ProgressListener;
+  /** Frames per second of source. Defaults to the coarsest tier. */
+  readonly framesPerSecond?: number;
 }
 
 /**
@@ -89,9 +137,13 @@ export async function generateFilmstrip(
   const sourceSeconds = T.toSeconds(duration);
   if (sourceSeconds <= 0) return null;
 
-  // Roughly one frame per second, floored so short clips still read as a strip and
-  // capped so a feature-length source does not decode hundreds of frames.
-  const frameCount = Math.max(4, Math.min(MAX_FILMSTRIP_FRAMES, Math.round(sourceSeconds)));
+  // Floored so short clips still read as a strip, and capped so neither the
+  // decode nor the canvas runs away on a long one.
+  const framesPerSecond = options.framesPerSecond ?? 1;
+  const frameCount = Math.max(
+    4,
+    Math.min(MAX_FILMSTRIP_FRAMES, Math.round(sourceSeconds * framesPerSecond)),
+  );
 
   const probe = await media.getFrame(assetId, T.TIME_ZERO).catch(() => null);
   if (!probe) return null;
@@ -100,7 +152,12 @@ export async function generateFilmstrip(
   const frameWidth = Math.max(2, Math.round(FILMSTRIP_HEIGHT * aspect));
   probe.close();
 
-  const canvas = new OffscreenCanvas(frameWidth * frameCount, FILMSTRIP_HEIGHT);
+  // The gutter is part of the cell, so it scales with the strip: it stays the same
+  // fraction of a frame at every zoom rather than growing into a stripe.
+  const gutter = Math.max(1, Math.round(frameWidth * FRAME_GUTTER_RATIO));
+  const cellWidth = frameWidth + gutter;
+
+  const canvas = new OffscreenCanvas(cellWidth * frameCount, FILMSTRIP_HEIGHT);
   const ctx = canvas.getContext('2d');
   if (!ctx) return null;
   ctx.fillStyle = '#11141b';
@@ -124,7 +181,7 @@ export async function generateFilmstrip(
 
     const frame = sample.toVideoFrame();
     try {
-      ctx.drawImage(frame, i * frameWidth, 0, frameWidth, FILMSTRIP_HEIGHT);
+      ctx.drawImage(frame, i * cellWidth, 0, frameWidth, FILMSTRIP_HEIGHT);
       // The first sampled frame doubles as the poster, at full size.
       if (i === 0 && posterCtx) posterCtx.drawImage(frame, 0, 0, POSTER_WIDTH, posterHeight);
     } finally {
@@ -143,8 +200,9 @@ export async function generateFilmstrip(
 
   return {
     url: URL.createObjectURL(stripBlob),
-    frameWidth,
+    frameWidth: cellWidth,
     frameHeight: FILMSTRIP_HEIGHT,
+    framesPerSecond: frameCount / sourceSeconds,
     frameCount,
     sourceSeconds,
     posterUrl: URL.createObjectURL(posterBlob),
@@ -227,6 +285,10 @@ export class PreviewCache {
   private readonly filmstrips = new Map<AssetId, Filmstrip | null>();
   private readonly waveforms = new Map<AssetId, Waveform | null>();
   private readonly pending = new Map<string, Promise<unknown>>();
+  /** Density each asset's strip has been asked for, so a request is not repeated. */
+  private readonly density = new Map<AssetId, number>();
+  /** In-flight density rebuilds, so a newer zoom can abandon an older one. */
+  private readonly densityJobs = new Map<AssetId, AbortController>();
   /**
    * How far each unfinished asset has got, per kind of preview.
    *
@@ -302,6 +364,8 @@ export class PreviewCache {
       frameWidth: size.width,
       frameHeight: size.height,
       frameCount: 1,
+      // A still has no timeline of frames, so no density can improve it.
+      framesPerSecond: 0,
       sourceSeconds: 0,
       posterUrl: url,
       posterWidth: size.width,
@@ -310,6 +374,63 @@ export class PreviewCache {
   }
 
   /** Build both previews for an asset. Safe to call repeatedly. */
+  /**
+   * Rebuild an asset's strip at a finer density, if it is not already at least that
+   * fine.
+   *
+   * Only ever upgrades. Zooming back out leaves the finer strip in place: it costs
+   * nothing to downscale, and throwing it away would mean decoding it all again on
+   * the next zoom in.
+   *
+   * The previous strip stays visible throughout and is replaced only when the new
+   * one is complete, so zooming never blanks the timeline. A request that arrives
+   * while one is running aborts it, which is what stops a wheel-spin queueing a
+   * dozen decodes.
+   */
+  async ensureDensity(
+    assetId: AssetId,
+    videoDuration: Time | null,
+    framesPerSecond: number,
+  ): Promise<void> {
+    if (!videoDuration) return;
+
+    const existing = this.filmstrips.get(assetId);
+    // `undefined` means nothing built yet — `ensure` owns that case.
+    if (existing === undefined || existing === null) return;
+    if (existing.framesPerSecond >= framesPerSecond - 0.001) return;
+    if (this.density.get(assetId) === framesPerSecond) return;
+
+    this.density.set(assetId, framesPerSecond);
+    this.densityJobs.get(assetId)?.abort();
+    const controller = new AbortController();
+    this.densityJobs.set(assetId, controller);
+
+    try {
+      const strip = await generateFilmstrip(this.media, assetId, videoDuration, {
+        framesPerSecond,
+        signal: controller.signal,
+        onProgress: (fraction) => this.setProgress(assetId, 'film', fraction),
+      });
+      if (controller.signal.aborted || !strip) return;
+
+      // Only now is the old one safe to release.
+      const previous = this.filmstrips.get(assetId);
+      this.filmstrips.set(assetId, strip);
+      if (previous) {
+        URL.revokeObjectURL(previous.url);
+        if (previous.posterUrl !== previous.url) URL.revokeObjectURL(previous.posterUrl);
+      }
+      this.onProgress?.();
+    } catch {
+      // A denser strip is an improvement, not a requirement: on failure the one
+      // already on screen simply stays.
+      this.density.delete(assetId);
+    } finally {
+      this.setProgress(assetId, 'film', null);
+      if (this.densityJobs.get(assetId) === controller) this.densityJobs.delete(assetId);
+    }
+  }
+
   async ensure(assetId: AssetId, videoDuration: Time | null, audioDuration: Time | null): Promise<void> {
     const jobs: Promise<unknown>[] = [];
 

@@ -1,24 +1,126 @@
+/*
+ * Two themes, one set of names.
+ *
+ * `:root` carries the light palette because that is the default; the dark one is an
+ * override keyed on `data-theme`, which `layout.ts` stamps on <html>. Nothing outside
+ * this block names a structural colour directly — every rule below reads a token, so
+ * a theme is a change of values rather than a change of rules.
+ *
+ * The split that matters is structural versus content. Panels, lines, text and the
+ * accent all flip with the theme. Clip colours, the preview backdrop and the beds
+ * behind filmstrips do not: they are the material being edited rather than the
+ * furniture around it, and every NLE keeps them constant so the picture is judged
+ * against the same surround either way. It also happens to be what keeps the baked
+ * waveform rasters legible — their peaks are drawn white, and a themed lane showing
+ * through would erase them on a light background.
+ */
 :root {
-  color-scheme: dark;
-  --bg: #0f1115;
-  --panel: #161920;
-  --panel-2: #1c202a;
-  --line: #262b36;
-  --line-strong: #39404f;
-  --text: #e6e8ec;
-  --muted: #9aa3b2;
-  --accent: #4c8dff;
-  --accent-dim: #2f5ea8;
+  color-scheme: light;
+
+  --bg: #eceff4;
+  --panel: #ffffff;
+  --panel-2: #f4f6fa;
+  --field: #ffffff;
+  /* Wells: thumbnails and anything that should read as cut into the surface. */
+  --sunken: #e3e8ef;
+
+  --line: #dde2ea;
+  --line-strong: #bcc5d3;
+  --text: #14171c;
+  --muted: #5b6675;
+
+  --hover: #e9edf4;
+  --hover-line: #a8b3c2;
+
+  --accent: #2f6fed;
+  --accent-dim: #1e5bd6;
+  /* Text and icons sitting on top of a filled accent. */
+  --on-accent: #ffffff;
+  --accent-soft: #dce8ff;
+  --accent-wash-soft: rgba(47, 111, 237, 0.06);
+  --accent-wash: rgba(47, 111, 237, 0.1);
+  --accent-wash-strong: rgba(47, 111, 237, 0.18);
+
+  --danger: #d92d20;
+  --danger-text: #b42318;
+  --danger-wash: rgba(217, 45, 32, 0.12);
+  --ok: #1a8245;
+  --warn: #b45309;
+  --on-warn: #ffffff;
+  /* Folders read as amber everywhere else; the icon follows suit. */
+  --folder: #d18b0a;
+
+  /* Popovers and tooltips, which float over the page rather than sit in it. */
+  --float: rgba(255, 255, 255, 0.97);
+  --float-text: var(--text);
+  --overlay: rgba(16, 20, 28, 0.45);
+  --shadow-lg: 0 10px 30px rgba(16, 24, 40, 0.18);
+  --shadow-sm: 0 4px 12px rgba(16, 24, 40, 0.16);
+
+  --lane-stripe: rgba(0, 0, 0, 0.05);
+  --lane-locked: rgba(0, 0, 0, 0.04);
+
+  /* -- content: identical in both themes ---------------------------------- */
   --video: #3d6fd4;
+  --video-2: #2f56a6;
   --audio: #2f9e6f;
+  --audio-2: #217a55;
   --title: #b3722f;
-  --danger: #f85149;
-  --ok: #56d364;
-  --warn: #e3b341;
+  --title-2: #8c5722;
+  /*
+   * The bed behind a filmstrip or waveform. Matches the fill `previews.ts` bakes
+   * into the strip, so the two cannot disagree — and it is what stops a light lane
+   * showing through a waveform whose peaks are drawn in white.
+   */
+  --clip-bed: #11141b;
+  --preview-bg: #07080b;
+
   --header-h: 44px;
   --ruler-h: 26px;
   --bin-w: 240px;
   --inspector-w: 280px;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg: #0f1115;
+  --panel: #161920;
+  --panel-2: #1c202a;
+  --field: #0f1115;
+  --sunken: #0a0c10;
+
+  --line: #262b36;
+  --line-strong: #39404f;
+  --text: #e6e8ec;
+  --muted: #9aa3b2;
+
+  --hover: #242a36;
+  --hover-line: #4a5364;
+
+  --accent: #4c8dff;
+  --accent-dim: #2f5ea8;
+  --on-accent: #071018;
+  --accent-soft: #2b3f63;
+  --accent-wash-soft: rgba(76, 141, 255, 0.06);
+  --accent-wash: rgba(76, 141, 255, 0.1);
+  --accent-wash-strong: rgba(76, 141, 255, 0.22);
+
+  --danger: #f85149;
+  --danger-text: #ff8b84;
+  --danger-wash: rgba(248, 81, 73, 0.22);
+  --ok: #56d364;
+  --warn: #e3b341;
+  --on-warn: #14100a;
+  --folder: #e3b341;
+
+  --float: rgba(10, 12, 16, 0.94);
+  --overlay: rgba(0, 0, 0, 0.6);
+  --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.5);
+  --shadow-sm: 0 4px 12px rgba(0, 0, 0, 0.5);
+
+  --lane-stripe: rgba(255, 255, 255, 0.02);
+  --lane-locked: rgba(255, 255, 255, 0.02);
 }
 
 * {
@@ -57,19 +159,28 @@ button svg {
   display: block;
 }
 button:hover:not(:disabled) {
-  background: #242a36;
-  border-color: #4a5364;
+  background: var(--hover);
+  border-color: var(--hover-line);
 }
 button:disabled {
   opacity: 0.4;
   cursor: default;
 }
+/*
+ * Anything filled with the accent states its own foreground.
+ *
+ * These used to inherit `--text`, which was near-white and only legible because the
+ * accent fill was dark. On a light theme the same rule put near-black text on a
+ * mid-blue button, so the colour has to be named rather than inherited.
+ */
 button.primary {
-  background: var(--accent-dim);
+  background: var(--accent);
   border-color: var(--accent);
+  color: var(--on-accent);
 }
 button.primary:hover:not(:disabled) {
-  background: var(--accent);
+  background: var(--accent-dim);
+  border-color: var(--accent-dim);
 }
 button.icon {
   padding: 4px;
@@ -82,9 +193,46 @@ button.icon {
 button.icon:hover:not(:disabled) {
   color: var(--text);
 }
-button.icon.on {
-  background: var(--accent-dim);
+button.icon.on,
+button.icon.on:hover:not(:disabled) {
+  background: var(--accent);
   border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+/*
+ * Colour by meaning, and only where meaning exists.
+ *
+ * Icons are drawn in `currentColor` on purpose, so a semantic colour is a class on
+ * the button rather than a change to the SVG. Applied sparingly: colouring every
+ * icon is the same as colouring none, because nothing stands out any more. The
+ * values come from the palette, so both themes get a legible version.
+ */
+button.icon.tint-danger {
+  color: var(--danger);
+}
+button.icon.tint-danger:hover:not(:disabled) {
+  color: var(--danger);
+  background: var(--danger-wash);
+  border-color: var(--danger);
+}
+button.icon.tint-folder {
+  color: var(--folder);
+}
+button.icon.tint-folder:hover:not(:disabled) {
+  color: var(--folder);
+}
+button.icon.tint-accent {
+  color: var(--accent);
+}
+button.icon.tint-accent:hover:not(:disabled) {
+  color: var(--accent);
+}
+/* A disabled destructive button should not still be shouting. */
+button.icon.tint-danger:disabled,
+button.icon.tint-folder:disabled,
+button.icon.tint-accent:disabled {
+  color: var(--muted);
 }
 
 input[type='number'],
@@ -92,7 +240,7 @@ input[type='text'],
 select {
   font: inherit;
   color: inherit;
-  background: var(--bg);
+  background: var(--field);
   border: 1px solid var(--line-strong);
   border-radius: 5px;
   padding: 3px 6px;
@@ -149,8 +297,9 @@ input[type='range'] {
   border-color: transparent;
 }
 .menubar-title.open {
-  background: var(--accent-dim);
+  background: var(--accent);
   border-color: var(--accent);
+  color: var(--on-accent);
 }
 .menubar-dropdown {
   /* Fixed and portalled to <body>: see MenuBar.tsx for why it cannot live inside
@@ -162,7 +311,7 @@ input[type='range'] {
   background: var(--panel-2);
   border: 1px solid var(--line-strong);
   border-radius: 8px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-lg);
 }
 
 /* The middle button strip absorbs the squeeze and scrolls if it must. */
@@ -255,6 +404,14 @@ input[type='range'] {
 .media-bin {
   position: relative;
 }
+/* Focus decides where Ctrl+A and Delete go, so it has to be visible. */
+.media-bin:focus {
+  outline: none;
+}
+.media-bin:focus-visible,
+.media-bin:focus-within {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
 .media-bin.drag-over {
   outline: 2px dashed var(--accent);
   outline-offset: -4px;
@@ -267,7 +424,7 @@ input[type='range'] {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  background: rgba(76, 141, 255, 0.14);
+  background: var(--accent-wash);
   color: var(--text);
   font-weight: 500;
   pointer-events: none;
@@ -290,7 +447,7 @@ input[type='range'] {
 .bin-empty:hover {
   border-color: var(--accent);
   color: var(--text);
-  background: rgba(76, 141, 255, 0.06);
+  background: var(--accent-wash-soft);
 }
 .bin-empty strong {
   font-weight: 500;
@@ -314,7 +471,7 @@ input[type='range'] {
   aspect-ratio: 16 / 9;
   border-radius: 4px;
   overflow: hidden;
-  background: #0a0c10;
+  background: var(--sunken);
   margin-bottom: 5px;
 }
 .bin-thumb-image {
@@ -373,10 +530,6 @@ input[type='range'] {
   font-weight: 500;
   word-break: break-all;
 }
-.bin-item .meta {
-  color: var(--muted);
-  font-size: 11px;
-}
 .bin-item .row {
   display: flex;
   gap: 6px;
@@ -398,7 +551,7 @@ input[type='range'] {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #07080b;
+  background: var(--preview-bg);
   min-height: 0;
   overflow: hidden;
   position: relative;
@@ -584,13 +737,50 @@ input[type='range'] {
 /* The empty space past the last track — a drop target, not just padding. */
 .timeline-tail {
   flex: 1 1 auto;
-  min-height: 24px;
+  min-height: 44px;
   position: relative;
+  display: flex;
+}
+/*
+ * The header column, continued past the last row.
+ *
+ * Same sticky position and stacking as a track header, because it is the same
+ * column — without it the playhead ran visibly through the header's width in the
+ * strip below the tracks, the one place no header was there to cover it.
+ */
+.tail-header {
+  position: sticky;
+  left: 0;
+  z-index: 5;
+  flex: none;
+  align-self: stretch;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+}
+/*
+ * Shown from the moment a drag starts rather than once the pointer is already on
+ * them. Aiming for an edge you cannot see is the whole reason these were hard to
+ * hit; a dashed outline the instant you pick media up makes them targets.
+ */
+.timeline-tail.insert-ready,
+.ruler.insert-ready {
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent 0 6px,
+    rgb(127 127 127 / 10%) 6px 12px
+  );
 }
 .timeline-tail.insert-active,
 .ruler.insert-active {
   box-shadow: inset 0 0 0 1px var(--accent);
-  background-color: rgba(76, 141, 255, 0.1);
+  background-color: var(--accent-wash);
+  background-image: none;
+}
+.timeline-tail .insert-note.hint {
+  background: transparent;
+  color: var(--muted);
+  border: 1px dashed var(--line-strong);
 }
 .timeline-tail .insert-note {
   position: sticky;
@@ -600,7 +790,7 @@ input[type='range'] {
   padding: 2px 7px;
   border-radius: 4px;
   background: var(--accent);
-  color: #071018;
+  color: var(--on-accent);
   font-size: 10.5px;
   font-weight: 600;
   white-space: nowrap;
@@ -614,17 +804,37 @@ input[type='range'] {
   cursor: pointer;
   user-select: none;
 }
+/*
+ * Ticks of three lengths: a full-height major carrying the number, a half-height
+ * minor to count by, and a stub for individual frames when the zoom is deep enough
+ * to show them. All are anchored to the ruler's baseline and grow upward, which is
+ * what makes it read as a rule rather than a set of columns.
+ */
 .ruler .tick {
   position: absolute;
-  top: 0;
   bottom: 0;
-  border-left: 1px solid var(--line-strong);
-  padding-left: 4px;
+  width: 1px;
+  height: 6px;
+  background: var(--line-strong);
+  pointer-events: none;
+}
+.ruler .tick.frame {
+  height: 3px;
+  opacity: 0.7;
+}
+.ruler .tick.major {
+  height: 100%;
+}
+.ruler .tick.major > span {
+  position: absolute;
+  left: 4px;
+  top: 1px;
   font-size: 10px;
+  line-height: 1.1;
   color: var(--muted);
   font-family: ui-monospace, Menlo, monospace;
-  line-height: var(--ruler-h);
-  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .track-header {
@@ -675,12 +885,12 @@ input[type='range'] {
     90deg,
     transparent,
     transparent 39px,
-    rgba(255, 255, 255, 0.02) 39px,
-    rgba(255, 255, 255, 0.02) 40px
+    var(--lane-stripe) 39px,
+    var(--lane-stripe) 40px
   );
 }
 .track-lane.locked {
-  background-color: rgba(255, 255, 255, 0.02);
+  background-color: var(--lane-locked);
 }
 .track-lane.drop-active {
   /* Outline only. Flooding the lane read as "it will drop across the whole
@@ -694,7 +904,7 @@ input[type='range'] {
   bottom: 3px;
   border-radius: 4px;
   border: 1px dashed var(--accent);
-  background: rgba(76, 141, 255, 0.22);
+  background: var(--accent-wash-strong);
   pointer-events: none;
   z-index: 3;
   display: flex;
@@ -706,7 +916,7 @@ input[type='range'] {
   padding: 2px 6px;
   font-size: 10px;
   color: var(--accent);
-  background: rgba(10, 12, 16, 0.75);
+  background: var(--float);
   border-radius: 0 0 0 4px;
   white-space: nowrap;
 }
@@ -737,30 +947,36 @@ input[type='range'] {
   width: 2px;
   margin-left: -1px;
   background: var(--danger);
-  /* A dark rim, so the line reads over a bright filmstrip as well as a dark lane.
-     Two pixels of red alone disappear into a pale frame. */
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55);
   pointer-events: none;
   /* Above the clips and the drop ghost, below the sticky track headers at 5. */
   z-index: 4;
 }
 
-/* The grab handle: a flag in the ruler, wide enough to hit without aiming. */
+/*
+ * The grab handle: a flag in the ruler, wide enough to hit without aiming.
+ *
+ * `grab` rather than `ew-resize` — the arrows-and-bar cursor means "drag this edge
+ * to resize", which is what the trim handles do. Scrubbing is picking something up
+ * and moving it, and the cursor should say so.
+ */
 .playhead-head {
   position: absolute;
   top: 0;
-  width: 17px;
+  width: 19px;
   height: var(--ruler-h);
-  margin-left: -8.5px;
+  margin-left: -9.5px;
   pointer-events: auto;
-  cursor: ew-resize;
+  cursor: grab;
   z-index: 2;
+}
+.playhead-head:active {
+  cursor: grabbing;
 }
 .playhead-head::before {
   content: '';
   position: absolute;
   top: 2px;
-  left: 1px;
+  left: 2px;
   width: 15px;
   height: 12px;
   background: var(--danger);
@@ -769,8 +985,27 @@ input[type='range'] {
   clip-path: polygon(0 0, 100% 0, 100% 58%, 50% 100%, 0 58%);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
 }
-.playhead-head:hover::before {
-  background: #ff8080;
+/*
+ * The stem, joining the flag to the line below.
+ *
+ * The flag is 12px tall inside a 26px ruler, so without this the marker floated
+ * with 13px of daylight between its point and the line it is supposed to be part
+ * of — two marks rather than one playhead. It runs a pixel past the ruler's bottom
+ * border so the join is not broken by the topbar's own hairline.
+ */
+.playhead-head::after {
+  content: '';
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  margin-left: -1px;
+  width: 2px;
+  bottom: -1px;
+  background: var(--danger);
+}
+.playhead-head:hover::before,
+.playhead-head:hover::after {
+  background: var(--danger-text);
 }
 
 /*
@@ -809,7 +1044,7 @@ input[type='range'] {
   padding: 2px 7px;
   border-radius: 4px;
   background: var(--accent);
-  color: #071018;
+  color: var(--on-accent);
   font-size: 10.5px;
   font-weight: 600;
   white-space: nowrap;
@@ -831,8 +1066,8 @@ input[type='range'] {
   padding: 4px 8px;
   border-radius: 5px;
   border: 1px solid var(--line-strong);
-  background: rgba(10, 12, 16, 0.94);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  background: var(--float);
+  box-shadow: var(--shadow-sm);
   font-family: ui-monospace, Menlo, monospace;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -852,16 +1087,69 @@ input[type='range'] {
   color: var(--warn);
 }
 
-/* The razor replaces the pointer, so the whole surface says what a click will do. */
-.timeline.tool-razor .track-lane,
-.timeline.tool-razor .clip {
-  cursor: crosshair;
+/*
+ * The detail card shown when the pointer rests on a clip or a bin card.
+ *
+ * Replaces the native `title` tooltip, which waits about a second, cannot be styled
+ * and truncates. This carries what a one-line label never could — where a clip sits,
+ * how long it runs, and which part of the source is on screen.
+ */
+.hover-card {
+  position: fixed;
+  z-index: 23;
+  pointer-events: none;
+  min-width: 190px;
+  max-width: 320px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--line-strong);
+  background: var(--float);
+  color: var(--text);
+  box-shadow: var(--shadow-lg);
 }
+.hover-title {
+  font-weight: 600;
+  font-size: 12.5px;
+  line-height: 1.3;
+  word-break: break-word;
+}
+.hover-subtitle {
+  margin-top: 1px;
+  font-size: 11px;
+  color: var(--muted);
+  word-break: break-word;
+}
+.hover-card dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  margin: 7px 0 0;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+}
+.hover-card dl > div {
+  display: contents;
+}
+.hover-card dt {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.hover-card dd {
+  margin: 0;
+  text-align: right;
+  font-family: ui-monospace, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  word-break: break-word;
+}
+
 
 .clip {
   position: absolute;
-  top: 3px;
-  bottom: 3px;
+  /* Filling the lane: the track border below is what separates one from the next,
+     so an inset gap only wasted height that the filmstrip could have used. */
+  top: 0;
+  bottom: 0;
   border-radius: 4px;
   border: 1px solid rgba(0, 0, 0, 0.45);
   overflow: hidden;
@@ -872,13 +1160,13 @@ input[type='range'] {
   align-items: flex-start;
 }
 .clip.video {
-  background: linear-gradient(var(--video), #2f56a6);
+  background: linear-gradient(var(--video), var(--video-2));
 }
 .clip.audio {
-  background: linear-gradient(var(--audio), #217a55);
+  background: linear-gradient(var(--audio), var(--audio-2));
 }
 .clip.title {
-  background: linear-gradient(var(--title), #8c5722);
+  background: linear-gradient(var(--title), var(--title-2));
 }
 /*
  * A transition straddles the cut it spans.
@@ -894,8 +1182,8 @@ input[type='range'] {
  */
 .clip-transition {
   position: absolute;
-  top: 2px;
-  bottom: 2px;
+  top: 0;
+  bottom: 0;
   z-index: 4;
   display: flex;
   align-items: center;
@@ -928,7 +1216,9 @@ input[type='range'] {
   padding: 1px 5px;
   border-radius: 3px;
   background: rgb(8 14 26 / 78%);
-  color: #dce9fb;
+  /* Fixed rather than themed: the chip is deliberately dark so it reads over any
+     frame, so `--text` would put black on black in light mode. */
+  color: #e8f0fc;
   font-size: 10px;
   font-weight: 600;
   white-space: nowrap;
@@ -953,13 +1243,7 @@ input[type='range'] {
 }
 .clip.solid {
   /* Overridden inline with the clip's own colour; this is the fallback. */
-  background: #444c56;
-}
-.clip.solid .clip-name {
-  /* The label sits on an arbitrary user colour, so give it its own contrast. */
-  background: rgb(0 0 0 / 45%);
-  border-radius: 3px;
-  padding: 0 4px;
+  background: var(--line-strong);
 }
 /* Grouped clips carry a dotted top edge, so it is visible why they move as one. */
 /*
@@ -980,7 +1264,7 @@ input[type='range'] {
   padding: 1px;
   border-radius: 2px;
   background: var(--warn);
-  color: #14100a;
+  color: var(--on-warn);
   vertical-align: -1px;
 }
 .clip.selected {
@@ -991,13 +1275,17 @@ input[type='range'] {
 .clip.disabled {
   opacity: 0.4;
 }
-.clip .clip-name {
-  padding: 2px 6px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+/*
+ * State badges, where the name used to be.
+ *
+ * The clip carries no label now — the picture identifies it and the hover card
+ * describes it — so this only ever holds the grouped and missing-media markers.
+ */
+.clip .clip-badges {
+  display: flex;
+  gap: 2px;
+  padding: 2px 4px;
   pointer-events: none;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
 }
 .clip .handle {
   position: absolute;
@@ -1099,12 +1387,46 @@ input[type='range'] {
   color: var(--danger);
   white-space: pre-wrap;
 }
+/* The message is what gives way when the bar is squeezed, not the controls. */
+.statusbar .status-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.statusbar .status-meta {
+  flex: none;
+  white-space: nowrap;
+}
+
+.zoom-slider {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  /* Never squeezed: a zoom control that shrinks to nothing is worse than absent. */
+  flex: none;
+  padding-left: 6px;
+  margin-left: 2px;
+  border-left: 1px solid var(--line);
+}
+.zoom-slider input[type='range'] {
+  width: 96px;
+}
+.zoom-slider button.icon {
+  min-height: 18px;
+  border-color: transparent;
+  background: transparent;
+}
+.zoom-slider button.icon:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--line-strong);
+}
 
 .telemetry {
   position: absolute;
   right: 10px;
   top: 10px;
-  background: rgba(10, 12, 16, 0.86);
+  background: var(--float);
   border: 1px solid var(--line-strong);
   border-radius: 8px;
   padding: 8px 10px;
@@ -1141,7 +1463,7 @@ input[type='range'] {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1189,9 +1511,15 @@ input[type='range'] {
   color: var(--muted);
 }
 
-/* Clip previews: the filmstrip / waveform sits behind the label. */
+/*
+ * Clip previews: the filmstrip / waveform sits behind the label.
+ *
+ * The bed is opaque rather than transparent. A waveform is rasterised as white peaks
+ * on a clear canvas, so letting the lane show through erased it the moment the lane
+ * was not dark — which is exactly what a light theme does.
+ */
 .clip.has-preview {
-  background-color: transparent;
+  background-color: var(--clip-bed);
 }
 .clip.has-preview::before {
   content: '';
@@ -1199,13 +1527,33 @@ input[type='range'] {
   inset: 0;
   pointer-events: none;
 }
+/*
+ * Barely there. A wash heavy enough to say "this is video" is also heavy enough to
+ * stain the frames, which is the one thing the filmstrip is for — so kind is carried
+ * by the coloured edge below and the border instead, the way Resolve does it, and
+ * the tint is left only as a hint of warmth.
+ */
 .clip.video.has-preview::before {
-  background: linear-gradient(rgba(61, 111, 212, 0.42), rgba(47, 86, 166, 0.42));
+  background: linear-gradient(rgb(61 111 212 / 10%), rgb(47 86 166 / 10%));
 }
 .clip.audio.has-preview::before {
-  background: linear-gradient(rgba(47, 158, 111, 0.55), rgba(33, 122, 85, 0.55));
+  background: linear-gradient(rgb(47 158 111 / 12%), rgb(33 122 85 / 12%));
 }
-.clip.has-preview .clip-name {
+/* The edge that says what kind of clip this is, now the fill no longer shouts it. */
+.clip.has-preview::after {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  pointer-events: none;
+}
+.clip.video.has-preview::after {
+  background: var(--video);
+}
+.clip.audio.has-preview::after {
+  background: var(--audio);
+}
+.clip.has-preview .clip-badges {
   position: relative;
 }
 
@@ -1219,7 +1567,7 @@ input[type='range'] {
   background: var(--panel-2);
   border: 1px solid var(--line-strong);
   border-radius: 8px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-lg);
 }
 .menu-item {
   display: flex;
@@ -1241,10 +1589,10 @@ input[type='range'] {
   opacity: 0.35;
 }
 .menu-item.danger {
-  color: #ff8b84;
+  color: var(--danger-text);
 }
 .menu-item.danger:hover:not(:disabled) {
-  background: rgba(248, 81, 73, 0.22);
+  background: var(--danger-wash);
 }
 .menu-icon {
   display: flex;
@@ -1253,6 +1601,10 @@ input[type='range'] {
 }
 .menu-item:hover:not(:disabled) .menu-icon {
   color: inherit;
+}
+/* A destructive entry's icon carries the warning too, not just its label. */
+.menu-item.danger:not(:disabled) .menu-icon {
+  color: var(--danger-text);
 }
 .menu-label {
   flex: 1;
@@ -1286,7 +1638,7 @@ input[type='range'] {
   background: #000;
 }
 .preview-panel:fullscreen .transport {
-  background: rgba(15, 17, 21, 0.9);
+  background: var(--float);
   border-top: 1px solid var(--line);
 }
 
@@ -1315,7 +1667,7 @@ body.focus-mode .preview-panel .preview {
   bottom: 3px;
   border-radius: 4px;
   border: 1px dashed var(--accent);
-  background: rgba(76, 141, 255, 0.22);
+  background: var(--accent-wash-strong);
   pointer-events: none;
   z-index: 3;
   display: flex;
@@ -1327,7 +1679,7 @@ body.focus-mode .preview-panel .preview {
   padding: 2px 6px;
   font-size: 10px;
   color: var(--accent);
-  background: rgba(10, 12, 16, 0.75);
+  background: var(--float);
   border-radius: 0 0 0 4px;
   white-space: nowrap;
 }
@@ -1339,6 +1691,118 @@ body.focus-mode .preview-panel .preview {
   text-overflow: ellipsis;
   overflow: hidden;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+/*
+ * Fade and transition buttons, in a row along the top of every lane.
+ *
+ * Held at one height across the whole track so they read as a strip of controls
+ * rather than marks scattered over the clips, and inset past the trim handles, which
+ * own the very edge and are reached far more often.
+ *
+ * Subtle until pointed at: they are on every clip, and at full strength a busy
+ * timeline would be more buttons than picture.
+ */
+/*
+ * Solid, not translucent.
+ *
+ * A dark wash over a clip measured 1.14:1 against it — no edge at all. And no fixed
+ * colour can win outright, because the filmstrip underneath changes luminance frame
+ * to frame: a dark chip vanishes on a bright frame and a light one on a dark frame.
+ * What separates a control from a moving backdrop is an opaque fill plus a border
+ * and a shadow, so the button reads as sitting *on* the clip rather than in it.
+ *
+ * The colours are fixed rather than themed, for the same reason the clips are: this
+ * sits on content, and content looks the same in both themes.
+ */
+.clip-affordance {
+  position: absolute;
+  top: 5px;
+  z-index: 4;
+  width: 18px;
+  height: 16px;
+  padding: 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  background: #f2f5f9;
+  color: #14171c;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+  opacity: 0.9;
+  transition: opacity 0.1s linear, background 0.1s linear;
+}
+/*
+ * A hit area larger than the button.
+ *
+ * These have to stay small to fit two rows inside a clip on a default audio lane, but
+ * an 18x16 target is well under what is comfortable to click. The padding grows the
+ * target to roughly 22x26 without adding any visual weight. Sized to the 4px gap the
+ * collision rule leaves between neighbours, so two adjacent buttons never fight over
+ * the same pointer.
+ */
+.clip-affordance::after {
+  content: '';
+  position: absolute;
+  inset: -5px -2px;
+}
+.track-lane:hover .clip-affordance {
+  opacity: 1;
+}
+.clip-affordance:hover {
+  opacity: 1;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+/* A fade is already there, so the button takes it away again. */
+.clip-affordance.on {
+  opacity: 1;
+  background: var(--warn);
+  border-color: rgba(0, 0, 0, 0.5);
+  color: var(--on-warn);
+}
+/* Gain lives in the bottom corner: it acts on the clip, not on its edges. */
+.clip-affordance.volume {
+  top: auto;
+  bottom: 5px;
+}
+
+/*
+ * Opens upward, because its button sits at the bottom of the clip.
+ *
+ * Anchored from the bottom rather than the top: dropping down from a button that is
+ * already 5px off the clip's lower edge would put the fader outside the lane.
+ */
+.clip-volume-popover {
+  position: absolute;
+  bottom: 26px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 120px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--line-strong);
+  background: var(--float);
+  box-shadow: var(--shadow-sm);
+}
+.clip-volume-popover input[type='range'] {
+  width: 70px;
+}
+.clip-volume-popover .gain {
+  font-family: ui-monospace, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  color: var(--text);
+  white-space: nowrap;
+}
+.clip-volume-popover .hint {
+  font-size: 10.5px;
 }
 
 .bin-item[draggable='true'] {
@@ -1401,7 +1865,7 @@ body.focus-mode .preview-panel .preview {
 }
 .transition-chip:hover {
   border-color: var(--accent);
-  background: #2b3f63;
+  background: var(--accent-soft);
 }
 .transition-chip:active {
   cursor: grabbing;
@@ -1498,7 +1962,7 @@ body.focus-mode .preview-panel .preview {
 .bin-filter.on {
   color: var(--text);
   border-color: var(--accent);
-  background: #2b3f63;
+  background: var(--accent-soft);
 }
 .bin-filter:disabled {
   opacity: 0.4;
@@ -1519,7 +1983,7 @@ body.focus-mode .preview-panel .preview {
   z-index: 20;
   pointer-events: none;
   border: 1px solid var(--accent);
-  background: rgb(88 166 255 / 16%);
+  background: var(--accent-wash-strong);
   border-radius: 2px;
 }
 
@@ -1578,18 +2042,17 @@ body.resizing {
 .bin-list.list .bin-item {
   display: grid;
   grid-template-columns: 64px minmax(0, 1fr);
-  grid-template-rows: auto auto;
+  grid-template-rows: auto;
   column-gap: 8px;
   align-items: center;
   margin-bottom: 4px;
   padding: 5px 7px;
 }
 .bin-list.list .bin-thumb {
-  grid-row: 1 / span 2;
+  grid-row: 1;
   margin-bottom: 0;
 }
-.bin-list.list .name,
-.bin-list.list .meta {
+.bin-list.list .name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1752,10 +2215,14 @@ body.resizing {
 .bin-folder:hover {
   border-color: var(--line-strong);
 }
+/* Amber, so a folder row is picked out from the media cards at a glance. */
+.bin-folder > svg {
+  color: var(--folder);
+}
 /* While something is being dragged over it, so a drop reads as landing somewhere. */
 .bin-folder.drop-target {
   border-color: var(--accent);
-  background: #2b3f63;
+  background: var(--accent-soft);
 }
 .bin-folder .name {
   flex: 1;
@@ -1776,7 +2243,7 @@ body.resizing {
 
 .bin-item.selected {
   border-color: var(--accent);
-  background: #21304a;
+  background: var(--accent-soft);
 }
 
 /*
@@ -1830,9 +2297,4 @@ body.resizing {
   font-weight: 600;
 }
 
-/* ------------------------------------------------------------- tool switcher */
 
-.toolgroup {
-  display: flex;
-  gap: 2px;
-}

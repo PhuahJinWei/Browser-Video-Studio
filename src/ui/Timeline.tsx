@@ -10,9 +10,9 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { Command } from '../model/commands';
 import type { PreviewCache } from '../engine/previews';
 import {
-  adjacentClips,
   clipEnd,
   clipFitsTrack,
+  clipSourceSpan,
   getTrack,
   isGrouped,
   isMediaClip,
@@ -46,6 +46,7 @@ import {
   IconAlert,
   IconAudio,
   IconClose,
+  IconFade,
   IconEye,
   IconEyeOff,
   IconGroup,
@@ -69,6 +70,7 @@ import {
   IconVideo,
   IconVolume,
 } from './Icons';
+import { formatGain, formatGainPercent } from './format';
 import { useLayout } from './layout';
 import { appendPointFor, counterpartTrackId, orderedTrackIds, useStudio } from './store';
 import {
@@ -141,6 +143,45 @@ interface AssetInsertion {
   readonly where: 'top' | 'bottom';
   readonly trackKind: TrackKind;
   readonly index: number;
+}
+
+/**
+ * Width of a fade or transition button, and how far it sits in from a clip's edge.
+ *
+ * Sized to the tightest case rather than to taste: an audio clip carries two rows of
+ * these, and both have to fit inside a clip on a default 56px audio lane. Anything
+ * larger would need the volume row to disappear on an ordinary track. The visual
+ * stays small while the *hit* area is padded out in CSS, which is what actually makes
+ * them comfortable to click.
+ */
+const AFFORDANCE_WIDTH = 18;
+const AFFORDANCE_HEIGHT = 16;
+/** Clear of the 7px trim handle, which owns the very edge and is used far more often. */
+const EDGE_INSET = 9;
+/**
+ * Shortest lane that can hold a button at the top and another at the bottom.
+ *
+ * Clips are inset 3px top and bottom, and each row needs 5px of margin — so below
+ * this the two rows would overlap and the lower one is dropped instead.
+ */
+const MIN_LANE_FOR_TWO_ROWS = AFFORDANCE_HEIGHT * 2 + 5 * 2 + 4 + 6;
+
+/**
+ * A fade or transition button on a clip boundary.
+ *
+ * Transitions and fades were only ever reachable through a right-click menu, which is
+ * the usual reason a feature goes unused — nothing on screen said either existed.
+ */
+interface Affordance {
+  readonly key: string;
+  readonly kind: 'fade-in' | 'fade-out' | 'cut';
+  /** Left edge of the button, in lane pixels. */
+  readonly x: number;
+  readonly clip: Clip;
+  /** The clip on the other side of a cut. */
+  readonly other?: Clip;
+  /** A fade is already there, so the button removes it. */
+  readonly active?: boolean;
 }
 
 /**
@@ -295,8 +336,6 @@ export function Timeline(): React.JSX.Element {
   const dropAssetOnTrack = useStudio((s) => s.dropAssetOnTrack);
   const dropAssetOnNewTrack = useStudio((s) => s.dropAssetOnNewTrack);
   const moveClipsToNewTrack = useStudio((s) => s.moveClipsToNewTrack);
-  const splitTracksAt = useStudio((s) => s.splitTracksAt);
-  const tool = useStudio((s) => s.tool);
   const draggingAssetId = useStudio((s) => s.draggingAssetId);
   const menu = useContextMenu();
   // Previews arrive asynchronously; this re-renders the lanes when one lands.
@@ -309,8 +348,33 @@ export function Timeline(): React.JSX.Element {
   const playhead = sequence.view.playhead;
   const trackIds = useMemo(() => orderedTrackIds(project, sequenceId), [project, sequenceId]);
 
-  const totalSeconds = Math.max(T.toSeconds(duration()) + MIN_TAIL_SECONDS, MIN_TAIL_SECONDS);
-  const contentWidth = Math.ceil(totalSeconds * pxPerSecond);
+  /**
+   * Usable width of the pane, tracked so the ruler can fill it.
+   *
+   * The content is only ever as wide as the sequence plus a tail, so in any window
+   * wider than that the ruler and the lanes stopped early and left a band of nothing
+   * down the right-hand side. Measuring the pane is the only way to know how much
+   * further they have to reach.
+   */
+  const [paneWidth, setPaneWidth] = useState(0);
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry) setPaneWidth(entry.contentRect.width);
+    });
+    observer.observe(el);
+    setPaneWidth(el.clientWidth);
+    return () => observer.disconnect();
+  }, []);
+
+  const tailSeconds = Math.max(T.toSeconds(duration()) + MIN_TAIL_SECONDS, MIN_TAIL_SECONDS);
+  // Whichever is longer: the material, or enough to reach the right-hand edge.
+  const contentWidth = Math.max(
+    Math.ceil(tailSeconds * pxPerSecond),
+    Math.ceil(paneWidth - HEADER_WIDTH),
+  );
+  const totalSeconds = contentWidth / pxPerSecond;
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const lanesRef = useRef<HTMLDivElement>(null);
@@ -342,6 +406,41 @@ export function Timeline(): React.JSX.Element {
   const [assetInsertion, setAssetInsertion] = useState<AssetInsertion | null>(null);
 
   const frameRate = sequence.frameRate;
+  /** For the hover timer, which fires outside the render that scheduled it. */
+  const frameRateRef = useRef(frameRate);
+  frameRateRef.current = frameRate;
+
+  /**
+   * The clip detail card, and the timer that delays it.
+   *
+   * Suppressed outright while a drag is running: during a gesture the readout that
+   * follows the pointer is the thing worth reading, and a second floating panel
+   * fighting it for the same corner of the screen is just noise.
+   */
+  const [hoverCard, setHoverCard] = useState<HoverCardState | null>(null);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const cancelHover = useCallback((): void => {
+    if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
+    hoverTimer.current = null;
+    setHoverCard(null);
+  }, []);
+
+  const scheduleHover = useCallback(
+    (event: React.PointerEvent, clip: Clip): void => {
+      if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
+      const { clientX, clientY } = event;
+      hoverTimer.current = setTimeout(() => {
+        const latest = useStudio.getState();
+        // Gone, or a gesture started while we were waiting.
+        const current = latest.project().clips[clip.id];
+        if (!current) return;
+        const detail = clipDetails(latest.project(), current, frameRateRef.current);
+        setHoverCard({ clientX, clientY, ...detail, subtitle: detail.subtitle });
+      }, HOVER_DELAY_MS);
+    },
+    [],
+  );
 
   /** Clear everything a gesture puts on screen. */
   const clearGestureHints = useCallback((): void => {
@@ -556,6 +655,12 @@ export function Timeline(): React.JSX.Element {
       const clip = project.clips[drag.clipId];
       if (!clip) return;
 
+      // Dragging up into the ruler used to do nothing at all. The lanes are the only
+      // place a clip can land, so up there the gesture is worth more as a scrub —
+      // it lets you carry a clip to a spot and see the frame you are aiming at.
+      const lanes = lanesRef.current?.getBoundingClientRect();
+      if (lanes && event.clientY < lanes.top) setPlayhead(timeAtClientX(event.clientX));
+
       const deltaSeconds = (event.clientX - drag.originClientX) / pxPerSecond;
       const delta = T.fromSeconds(deltaSeconds, 100_000);
       const excluded = new Set(drag.groupIds);
@@ -685,6 +790,8 @@ export function Timeline(): React.JSX.Element {
       endGesture();
     };
 
+    // A drag starting while a card was pending would show it mid-gesture.
+    cancelHover();
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
     return () => {
@@ -693,8 +800,11 @@ export function Timeline(): React.JSX.Element {
     };
   }, [
     drag,
+    cancelHover,
     project,
     pxPerSecond,
+    setPlayhead,
+    timeAtClientX,
     runMany,
     snap,
     endGesture,
@@ -927,6 +1037,133 @@ export function Timeline(): React.JSX.Element {
     });
   };
 
+  // ------------------------------------------------------- clip affordances
+
+  /**
+   * The fade and transition buttons along the top of a track.
+   *
+   * One per boundary, so every edge has exactly one meaning: an outer edge with
+   * nothing butted against it offers a fade against black, and a bare cut between two
+   * clips offers a transition. A cut that already carries one shows the existing badge
+   * instead, which is why those are skipped here.
+   *
+   * Positions are computed in the lane rather than inside the clips: `.clip` is
+   * `overflow: hidden`, so a button drawn in its corner would be clipped, and one
+   * centred on a cut belongs to neither of the two clips it sits between.
+   */
+  const affordancesFor = (trackId: TrackId): readonly Affordance[] => {
+    const clips = trackClips(project, trackId);
+    const found: Affordance[] = [];
+
+    clips.forEach((clip, index) => {
+      const previous = clips[index - 1];
+      const next = clips[index + 1];
+      const left = T.toSeconds(clip.start) * pxPerSecond;
+      const right = T.toSeconds(clipEnd(clip)) * pxPerSecond;
+
+      // -- leading edge: a fade against black, or a cut with the clip before it
+      const buttsPrevious = previous !== undefined && T.eq(clipEnd(previous), clip.start);
+      if (buttsPrevious) {
+        if (!transitionBetween(project, previous.id, clip.id)) {
+          found.push({ key: `cut:${clip.id}`, kind: 'cut', x: left, clip, other: previous });
+        }
+      } else {
+        found.push({
+          key: `in:${clip.id}`,
+          kind: 'fade-in',
+          x: left + EDGE_INSET,
+          clip,
+          active: transitionBetween(project, null, clip.id) !== null,
+        });
+      }
+
+      // -- trailing edge: only where nothing follows, since the next clip's leading
+      //    edge already owns the boundary between them.
+      const buttsNext = next !== undefined && T.eq(clipEnd(clip), next.start);
+      if (!buttsNext) {
+        found.push({
+          key: `out:${clip.id}`,
+          kind: 'fade-out',
+          x: right - EDGE_INSET - AFFORDANCE_WIDTH,
+          clip,
+          active: transitionBetween(project, clip.id, null) !== null,
+        });
+      }
+    });
+
+    /*
+     * Drop anything that would collide.
+     *
+     * A clip two pixels wide has the same two edges as one that fills the screen, and
+     * without this its buttons would stack on top of each other and on its
+     * neighbours'. Sorting first means the survivor is always the leftmost of a
+     * cluster rather than whichever happened to be built first.
+     */
+    found.sort((a, b) => a.x - b.x);
+    const spaced: Affordance[] = [];
+    for (const item of found) {
+      const last = spaced[spaced.length - 1];
+      if (last && item.x - last.x < AFFORDANCE_WIDTH + 4) continue;
+      // A fade button that has run past its own clip's far edge has no room either.
+      if (item.kind !== 'cut') {
+        const width = T.toSeconds(item.clip.duration) * pxPerSecond;
+        if (width < AFFORDANCE_WIDTH + EDGE_INSET * 2) continue;
+      }
+      spaced.push(item);
+    }
+    return spaced;
+  };
+
+  const FADE_DURATION = T.fromSeconds(DEFAULT_TRANSITION_SECONDS, 1000);
+
+  /**
+   * Add or remove a fade against black at one end of a clip.
+   *
+   * A fade is a transition with nothing on the far side, which is the same mechanism
+   * for picture and for sound — `audibleClipRange` reads a transition into a clip
+   * whether or not it comes from another one. Going through `pairedCuts` means a
+   * linked pair fades together instead of the sound cutting in under a fading image.
+   */
+  const toggleFade = (clip: Clip, edge: 'in' | 'out', active: boolean): void => {
+    const from = edge === 'in' ? null : clip;
+    const to = edge === 'in' ? clip : null;
+
+    if (active) {
+      const existing = transitionBetween(project, from?.id ?? null, to?.id ?? null);
+      if (!existing) return;
+      runMany(
+        pairedTransitions(project, existing).map((t) => ({
+          type: 'removeTransition' as const,
+          transitionId: t.id,
+        })),
+        'Remove fade',
+      );
+      return;
+    }
+    addTransitionOnCuts(
+      pairedCuts(project, from, to),
+      'dissolve',
+      FADE_DURATION,
+      edge === 'in' ? 'Fade in from black' : 'Fade out to black',
+    );
+  };
+
+  /** Offer the transition styles for a bare cut. */
+  const openCutMenu = (event: React.MouseEvent, from: Clip, to: Clip): void => {
+    const audioOnly = getTrack(project, to.trackId).kind === 'audio';
+    menu.open(
+      event,
+      TRANSITION_TYPES.map((type) => ({
+        label: transitionLabel(type),
+        icon: <IconTransition />,
+        // Sound has no edge to wipe; an audio-only transition is always a crossfade.
+        disabled: audioOnly && type !== 'dissolve',
+        onSelect: () =>
+          addTransitionOnCuts(pairedCuts(project, from, to), type, FADE_DURATION, 'Add transition'),
+      })),
+    );
+  };
+
   // ---------------------------------------------------------- context menus
 
   const splitAt = (at: Time, trackIds: readonly TrackId[]): void =>
@@ -941,34 +1178,26 @@ export function Timeline(): React.JSX.Element {
       ? Object.values(project.clips).filter((c) => c.linkGroupId === clip.linkGroupId)
       : [];
 
-    const { previous, next } = adjacentClips(project, clip);
-    const dissolveEntry = (
-      label: string,
-      from: Clip | null,
-      to: Clip | null,
-      againstBlack = false,
-    ): MenuEntry => {
-      const existing =
-        from || to ? transitionBetween(project, from?.id ?? null, to?.id ?? null) : null;
-      return {
-        label: existing ? `${label} (already there)` : label,
-        icon: <IconTransition />,
-        // Against a neighbour both sides are needed; against black, only one.
-        disabled: (againstBlack ? !from && !to : !from || !to) || existing !== null,
-        onSelect: () => {
-          if (!from && !to) return;
-          // Every cut in one batch, so a linked A/V pair stays in step and the
-          // whole thing is one undo.
-          addTransitionOnCuts(
-            pairedCuts(project, from, to),
-            'dissolve',
-            T.time(1),
-            label,
-          );
-        },
-      };
-    };
+    /*
+     * Whether the selection is nothing more than one A/V link.
+     *
+     * Selecting either half of a linked pair selects both, so "Group" was always
+     * offered on a clip that already moves as a unit — grouping it with itself. It
+     * stays available the moment anything else is in the selection, because grouping
+     * a linked pair *with* a third clip is a real edit.
+     */
+    const isOnlyOneLinkUnit =
+      selection.length > 1 &&
+      clip.linkGroupId !== null &&
+      selection.every((id) => project.clips[id]?.linkGroupId === clip.linkGroupId);
 
+    /*
+     * The four dissolve entries that used to sit here are gone.
+     *
+     * They are now buttons on the clip's own edges, which is both easier to reach and
+     * — more to the point — visible without opening a menu first. Two of the four
+     * were also greyed out most of the time, since a dissolve needs a neighbour.
+     */
     const entries: MenuEntry[] = [
       {
         label: 'Split',
@@ -978,13 +1207,6 @@ export function Timeline(): React.JSX.Element {
         disabled: !(T.lt(clip.start, playhead) && T.gt(clipEnd(clip), playhead)),
         onSelect: () => splitAtPlayhead(),
       },
-      'separator',
-      dissolveEntry('Cross dissolve at start', previous, clip),
-      dissolveEntry('Cross dissolve at end', clip, next),
-      // Against black instead of against a neighbour — the only option at the
-      // very start and end of a track, and the commonest transition there is.
-      dissolveEntry('Fade in from black', null, clip, true),
-      dissolveEntry('Fade out to black', clip, null, true),
       'separator',
       {
         label: linked.length > 1 ? `Detach audio from video (${linked.length} clips)` : 'Detach audio from video',
@@ -1000,10 +1222,10 @@ export function Timeline(): React.JSX.Element {
       },
       'separator',
       {
-        label: 'Group',
+        label: isOnlyOneLinkUnit ? 'Group (already linked)' : 'Group',
         icon: <IconGroup />,
         hint: 'Ctrl+G',
-        disabled: selection.length < 2,
+        disabled: selection.length < 2 || isOnlyOneLinkUnit,
         onSelect: () => {
           run({ type: 'groupClips', clipIds: selection }, 'Group clips');
           setStatus(`Grouped ${selection.length} clips — they now move and trim together.`);
@@ -1273,35 +1495,6 @@ export function Timeline(): React.JSX.Element {
   };
   const onRulerPointerUp = (): void => clearGestureHints();
 
-  /**
-   * Cut a clip where the razor was clicked.
-   *
-   * The whole unit is cut by default, so a linked pair comes apart together and its
-   * halves stay the same length; Alt cuts only the track under the pointer, for the
-   * times you want the sound to run under the new picture.
-   */
-  const razorCut = (event: React.PointerEvent, clip: Clip): void => {
-    event.stopPropagation();
-    event.preventDefault();
-    const at = timeAtClientX(event.clientX);
-
-    // A cut exactly on an edge splits nothing and would silently do nothing at all.
-    if (!T.gt(at, clip.start) || !T.lt(at, clipEnd(clip))) {
-      setError('Click inside a clip to cut it');
-      return;
-    }
-
-    const tracks = event.altKey
-      ? [clip.trackId]
-      : [
-          ...new Set(
-            selectionUnit(project, clip.id)
-              .map((id) => project.clips[id]?.trackId)
-              .filter((id): id is TrackId => id !== undefined),
-          ),
-        ];
-    splitTracksAt(at, tracks);
-  };
 
   /**
    * Ctrl/Cmd+wheel zooms; a plain wheel is left alone so the container scrolls
@@ -1356,7 +1549,7 @@ export function Timeline(): React.JSX.Element {
   const playheadX = Math.round(T.toSeconds(playhead) * pxPerSecond);
 
   return (
-    <div className={`timeline tool-${tool}`} ref={scrollRef}>
+    <div className="timeline" ref={scrollRef}>
       {/*
         One scroll container for the headers, the ruler and the lanes. The header
         column is sticky-left and the ruler sticky-top, so both stay put while the
@@ -1382,7 +1575,9 @@ export function Timeline(): React.JSX.Element {
             </button>
           </div>
           <div
-            className={`ruler${assetInsertion?.where === 'top' ? ' insert-active' : ''}`}
+            className={`ruler${draggingAssetId ? ' insert-ready' : ''}${
+              assetInsertion?.where === 'top' ? ' insert-active' : ''
+            }`}
             style={{ width: contentWidth }}
             onPointerDown={onRulerPointerDown}
             onPointerMove={onRulerPointerMove}
@@ -1409,8 +1604,12 @@ export function Timeline(): React.JSX.Element {
             }}
           >
             {ticks.map((tick) => (
-              <div key={tick.seconds} className="tick" style={{ left: tick.x }}>
-                {tick.label}
+              <div
+                key={`${tick.frame ? 'f' : 't'}${tick.seconds}`}
+                className={`tick${tick.major ? ' major' : ''}${tick.frame ? ' frame' : ''}`}
+                style={{ left: tick.x }}
+              >
+                {tick.label && <span>{tick.label}</span>}
               </div>
             ))}
             {/*
@@ -1573,18 +1772,86 @@ export function Timeline(): React.JSX.Element {
                       missing={
                         isMediaClip(clip) && project.assets[clip.assetId]?.status.state === 'missing'
                       }
-                      razor={tool === 'razor'}
                       onSelect={(modifier) => {
                         if (modifier === 'isolate') selectExact([clip.id]);
                         else if (modifier === 'toggle') toggleSelect(clip.id);
                         else if (modifier === 'range') selectRangeTo(clip.id);
                         else select([clip.id]);
                       }}
-                      onRazor={(event) => razorCut(event, clip)}
                       onDragStart={(event, kind, modifier) => startDrag(event, clip, kind, modifier)}
                       onContextMenu={(event) => openClipMenu(event, clip)}
+                      onHoverStart={(event) => scheduleHover(event, clip)}
+                      onHoverEnd={cancelHover}
                     />
                   ))}
+
+                  {/*
+                    Drawn after the clips so they sit above them, and all at one height
+                    so the row reads as a strip of controls rather than decoration
+                    scattered over the clips.
+                  */}
+                  {/*
+                    Per-clip gain, in the clip's bottom-left corner.
+
+                    Down there rather than up with the fades because it means something
+                    different: the fades act on a clip's edges, this acts on the whole
+                    of it. It also keeps clear of the cut button, which lands mid-clip
+                    whenever a cut does. The track header has a fader for the whole
+                    track; this is for the one clip that came in too hot.
+                  */}
+                  {!track.locked &&
+                    track.kind === 'audio' &&
+                    // Two rows of buttons need a lane tall enough to hold them; on a
+                    // track dragged right down, this row is what gives way.
+                    height >= MIN_LANE_FOR_TWO_ROWS &&
+                    trackClips(project, trackId).map((clip) => {
+                      const width = T.toSeconds(clip.duration) * pxPerSecond;
+                      if (width < AFFORDANCE_WIDTH + EDGE_INSET * 2) return null;
+                      return (
+                        <ClipVolume
+                          key={`vol:${clip.id}`}
+                          clip={clip}
+                          x={T.toSeconds(clip.start) * pxPerSecond + EDGE_INSET}
+                        />
+                      );
+                    })}
+
+                  {!track.locked &&
+                    affordancesFor(trackId).map((item) =>
+                      item.kind === 'cut' ? (
+                        <button
+                          key={item.key}
+                          className="clip-affordance cut"
+                          style={{ left: item.x - AFFORDANCE_WIDTH / 2 }}
+                          title="Add a transition on this cut"
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onClick={(event) => openCutMenu(event, item.other!, item.clip)}
+                        >
+                          <IconTransition size={12} />
+                        </button>
+                      ) : (
+                        <button
+                          key={item.key}
+                          className={`clip-affordance ${item.kind}${item.active ? ' on' : ''}`}
+                          style={{ left: item.x }}
+                          title={
+                            item.active
+                              ? `Remove the fade ${item.kind === 'fade-in' ? 'in' : 'out'}`
+                              : `Fade ${item.kind === 'fade-in' ? 'in from' : 'out to'} black`
+                          }
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onClick={() =>
+                            toggleFade(
+                              item.clip,
+                              item.kind === 'fade-in' ? 'in' : 'out',
+                              item.active ?? false,
+                            )
+                          }
+                        >
+                          <IconFade size={12} flip={item.kind === 'fade-out'} />
+                        </button>
+                      ),
+                    )}
                 </div>
               </div>
             );
@@ -1596,7 +1863,9 @@ export function Timeline(): React.JSX.Element {
             and it is the natural place to drop something to give it a track of its own.
           */}
           <div
-            className={`timeline-tail${assetInsertion?.where === 'bottom' ? ' insert-active' : ''}`}
+            className={`timeline-tail${draggingAssetId ? ' insert-ready' : ''}${
+              assetInsertion?.where === 'bottom' ? ' insert-active' : ''
+            }`}
             onDragOver={(event) => {
               if (!event.dataTransfer.types.includes(ASSET_DRAG_TYPE)) return;
               event.preventDefault();
@@ -1620,6 +1889,18 @@ export function Timeline(): React.JSX.Element {
               if (!event.ctrlKey && !event.metaKey) select([]);
             }}
           >
+            {/*
+              Carries the header column past the last track.
+
+              The column is built from one sticky header per row, so the strip below
+              the rows had nothing in it — and the playhead, which is drawn behind the
+              headers, reappeared inside the column's own width down here. This is the
+              missing piece of the column rather than decoration.
+            */}
+            <div className="tail-header" style={{ width: HEADER_WIDTH }} />
+            {draggingAssetId && assetInsertion?.where !== 'bottom' && (
+              <span className="insert-note hint">Drop here for a new track below</span>
+            )}
             {assetInsertion?.where === 'bottom' && (
               <span className="insert-note">New {assetInsertion.trackKind} track</span>
             )}
@@ -1656,6 +1937,8 @@ export function Timeline(): React.JSX.Element {
         </div>
       )}
       {hint && <DragHintBox hint={hint} />}
+      {/* A gesture's own readout takes precedence; two floating panels is one too many. */}
+      {hoverCard && !drag && !transitionDrag && <HoverCard state={hoverCard} />}
     </div>
   );
 }
@@ -1887,11 +2170,11 @@ function ClipView({
   preview,
   loading,
   missing,
-  razor,
   onSelect,
-  onRazor,
   onDragStart,
   onContextMenu,
+  onHoverStart,
+  onHoverEnd,
 }: {
   clip: Clip;
   pxPerSecond: number;
@@ -1901,11 +2184,11 @@ function ClipView({
   loading: boolean;
   /** The asset's bytes could not be found when the project was reopened. */
   missing: boolean;
-  razor: boolean;
   onSelect: (modifier: SelectModifier) => void;
-  onRazor: (event: React.PointerEvent) => void;
   onDragStart: (event: React.PointerEvent, kind: DragKind, modifier: SelectModifier) => void;
   onContextMenu: (event: React.MouseEvent) => void;
+  onHoverStart: (event: React.PointerEvent) => void;
+  onHoverEnd: () => void;
 }): React.JSX.Element {
   const left = T.toSeconds(clip.start) * pxPerSecond;
   const width = Math.max(2, T.toSeconds(clip.duration) * pxPerSecond);
@@ -1920,68 +2203,68 @@ function ClipView({
   // A fill clip shows the colour it produces, so the timeline reads at a glance.
   const fillStyle = clip.kind === 'solid' ? { background: clip.fill } : undefined;
 
-  const title = missing
-    ? `${clip.name} — the file could not be found; re-import it to bring this clip back`
-    : `${clip.name} · ${T.formatDuration(clip.duration, { decimals: 2 })}`;
+  /*
+   * No name on the clip.
+   *
+   * The filmstrip or waveform says what a clip is, and a label over it was covering
+   * the picture to repeat something the hover card now gives in full — with the
+   * position, length and source range a single line could never carry.
+   *
+   * The badges stay: they report state rather than identity, and a clip whose media
+   * has gone missing has to say so without being pointed at first.
+   */
+  const showBadges = width >= 22;
 
   return (
     <div
       className={`clip ${kindClass}${selected ? ' selected' : ''}${clip.enabled ? '' : ' disabled'}${preview ? ' has-preview' : ''}${isGrouped(clip) ? ' grouped' : ''}${loading ? ' loading' : ''}${missing ? ' missing' : ''}`}
       style={{ left, width, ...preview, ...fillStyle }}
-      title={title}
+      // No `title`: the hover card replaces it. Leaving both would show a styled card
+      // and then the browser's own tooltip on top of it a moment later.
+      onPointerEnter={onHoverStart}
+      onPointerLeave={onHoverEnd}
       onContextMenu={onContextMenu}
       onPointerDown={(event) => {
         // Right-click is the context menu's business; selecting here would collapse
         // a multi-selection before the menu could act on it.
         if (!isPrimaryButton(event)) return;
-        // The razor cuts instead of selecting, so it never starts a drag — clicking
-        // a clip to slice it and accidentally nudging it sideways is the one thing
-        // that would make the tool not worth having.
-        if (razor) {
-          onRazor(event);
-          return;
-        }
         const modifier = selectModifier(event);
         onSelect(modifier);
         onDragStart(event, 'move', modifier);
       }}
     >
-      {/* Trim handles would fight the blade for the clip's edges. */}
-      {!razor && (
-        <div
-          className="handle left"
-          onPointerDown={(event) => {
-            if (!isPrimaryButton(event)) return;
-            const modifier = event.altKey ? 'isolate' : 'replace';
-            onSelect(modifier);
-            onDragStart(event, 'trim-in', modifier);
-          }}
-        />
+      <div
+        className="handle left"
+        onPointerDown={(event) => {
+          if (!isPrimaryButton(event)) return;
+          const modifier = event.altKey ? 'isolate' : 'replace';
+          onSelect(modifier);
+          onDragStart(event, 'trim-in', modifier);
+        }}
+      />
+      {showBadges && (isGrouped(clip) || missing) && (
+        <div className="clip-badges">
+          {isGrouped(clip) && (
+            <span className="clip-badge">
+              <IconGroup size={9} />
+            </span>
+          )}
+          {missing && (
+            <span className="clip-badge missing">
+              <IconAlert size={9} />
+            </span>
+          )}
+        </div>
       )}
-      <div className="clip-name">
-        {isGrouped(clip) && (
-          <span className="clip-badge" title="Grouped — moves and trims with its group">
-            <IconGroup size={9} />
-          </span>
-        )}
-        {missing && (
-          <span className="clip-badge missing" title="Media missing — re-import the file">
-            <IconAlert size={9} />
-          </span>
-        )}
-        {clip.name}
-      </div>
-      {!razor && (
-        <div
-          className="handle right"
-          onPointerDown={(event) => {
-            if (!isPrimaryButton(event)) return;
-            const modifier = event.altKey ? 'isolate' : 'replace';
-            onSelect(modifier);
-            onDragStart(event, 'trim-out', modifier);
-          }}
-        />
-      )}
+      <div
+        className="handle right"
+        onPointerDown={(event) => {
+          if (!isPrimaryButton(event)) return;
+          const modifier = event.altKey ? 'isolate' : 'replace';
+          onSelect(modifier);
+          onDragStart(event, 'trim-out', modifier);
+        }}
+      />
     </div>
   );
 }
@@ -1999,6 +2282,79 @@ function formatDelta(delta: Time, frameRate: FrameRate): string {
   // monospaced face the readout uses, where a hyphen rides high and reads as a dash.
   const sign = T.isNegative(delta) ? '−' : '+';
   return `${sign}${T.toTimecode(T.abs(delta), frameRate)}`;
+}
+
+/**
+ * How long the pointer must rest before a hover card appears.
+ *
+ * Long enough that sweeping across a track does not strobe cards, short enough that
+ * deliberately pointing at something feels answered. The native `title` tooltip this
+ * replaces waits about a second, which is past the point of being useful.
+ */
+export const HOVER_DELAY_MS = 400;
+
+export interface HoverRow {
+  readonly label: string;
+  readonly value: string;
+}
+
+export interface HoverCardState {
+  readonly clientX: number;
+  readonly clientY: number;
+  readonly title: string;
+  readonly subtitle: string | null;
+  readonly rows: readonly HoverRow[];
+}
+
+/**
+ * A detail card, shown after the pointer rests on something.
+ *
+ * Fixed rather than absolute, like the drag readout, so it does not drift when the
+ * panel underneath it scrolls. Flipped to the left or above the pointer when it would
+ * otherwise run off screen — a card that reports the details is no use half cut off.
+ */
+export function HoverCard({ state }: { state: HoverCardState }): React.JSX.Element {
+  const ref = useRef<HTMLDivElement>(null);
+  const [placement, setPlacement] = useState<{ left: number; top: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const box = el.getBoundingClientRect();
+    const left =
+      state.clientX + 16 + box.width > window.innerWidth - 8
+        ? Math.max(8, state.clientX - 16 - box.width)
+        : state.clientX + 16;
+    const top =
+      state.clientY + 14 + box.height > window.innerHeight - 8
+        ? Math.max(8, state.clientY - 14 - box.height)
+        : state.clientY + 14;
+    setPlacement({ left, top });
+  }, [state.clientX, state.clientY, state.title]);
+
+  return (
+    <div
+      ref={ref}
+      className="hover-card"
+      style={{
+        left: placement?.left ?? -9999,
+        top: placement?.top ?? -9999,
+        // Hidden for the first paint, before it has been measured and placed.
+        visibility: placement ? 'visible' : 'hidden',
+      }}
+    >
+      <div className="hover-title">{state.title}</div>
+      {state.subtitle && <div className="hover-subtitle">{state.subtitle}</div>}
+      <dl>
+        {state.rows.map((row) => (
+          <div key={row.label}>
+            <dt>{row.label}</dt>
+            <dd>{row.value}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
 }
 
 /** The readout that follows the pointer through a drag. */
@@ -2019,10 +2375,13 @@ function DragHintBox({ hint }: { hint: DragHint }): React.JSX.Element {
 interface Tick {
   readonly seconds: number;
   readonly x: number;
-  readonly label: string;
+  /** Full height and labelled; minors are short and bare. */
+  readonly major: boolean;
+  /** A single-frame subdivision, drawn shortest of all. */
+  readonly frame?: boolean;
+  readonly label?: string;
 }
 
-/** Choose a tick spacing that keeps labels at least ~80 px apart. */
 /**
  * Track volume, in the header rather than only in the inspector.
  *
@@ -2042,7 +2401,7 @@ function TrackVolume({ track }: { track: Track }): React.JSX.Element {
       max={12}
       step={0.5}
       value={db}
-      title={`Volume ${db > 0 ? '+' : ''}${db.toFixed(1)} dB — double-click for unity`}
+      title={`Track volume ${formatGain(db)} — double-click for 100%`}
       onChange={(event) =>
         run(
           {
@@ -2073,6 +2432,167 @@ function staticValue(param: Param<number>, fallback: number): number {
   return param.kind === 'static' ? param.value : fallback;
 }
 
+const CLIP_KIND_LABELS: Record<Clip['kind'], string> = {
+  video: 'Video',
+  audio: 'Audio',
+  image: 'Still',
+  title: 'Title',
+  solid: 'Colour',
+  nested: 'Sequence',
+};
+
+/**
+ * Everything worth knowing about a clip, for its hover card.
+ *
+ * This is where the detail went when the name came off the narrow clips: position,
+ * length and — the part no label ever carried — which part of the source is on
+ * screen, which is what you actually need when matching two takes.
+ */
+function clipDetails(
+  project: Project,
+  clip: Clip,
+  frameRate: FrameRate,
+): { title: string; subtitle: string; rows: HoverRow[] } {
+  const rows: HoverRow[] = [
+    { label: 'Start', value: T.toTimecode(clip.start, frameRate) },
+    { label: 'End', value: T.toTimecode(clipEnd(clip), frameRate) },
+    { label: 'Duration', value: T.formatDuration(clip.duration, { decimals: 2 }) },
+  ];
+
+  const asset = isMediaClip(clip) ? project.assets[clip.assetId] : undefined;
+  if (isMediaClip(clip)) {
+    rows.push({ label: 'Source in', value: T.toTimecode(clip.sourceIn, frameRate) });
+    // Stills have no source timeline, so an out-point would be meaningless.
+    if (clip.kind !== 'image') {
+      rows.push({
+        label: 'Source out',
+        value: T.toTimecode(T.add(clip.sourceIn, clipSourceSpan(clip)), frameRate),
+      });
+    }
+    if (clip.speed !== 1) rows.push({ label: 'Speed', value: `${clip.speed.toFixed(2)}×` });
+  }
+
+  if (asset?.video) {
+    rows.push({
+      label: 'Format',
+      value: `${asset.video.size.width}×${asset.video.size.height}${
+        asset.video.frameRate ? ` · ${T.fpsToNumber(asset.video.frameRate).toFixed(2)} fps` : ''
+      }`,
+    });
+  }
+  if (asset?.audio) {
+    rows.push({ label: 'Audio', value: `${asset.audio.channels} ch · ${asset.audio.sampleRate / 1000} kHz` });
+  }
+  if (clip.kind === 'audio') {
+    const db = staticValue(clip.gainDb, 0);
+    rows.push({
+      label: 'Gain',
+      value: clip.gainDb.kind === 'static' ? formatGainPercent(db) : 'Keyframed',
+    });
+  }
+  if (!clip.enabled) rows.push({ label: 'State', value: 'Disabled' });
+  if (clip.locked) rows.push({ label: 'State', value: 'Locked' });
+  if (asset?.status.state === 'missing') rows.push({ label: 'Media', value: 'Missing — re-import it' });
+
+  const track = project.tracks[clip.trackId];
+  return {
+    title: clip.name,
+    subtitle: `${CLIP_KIND_LABELS[clip.kind]}${track ? ` · ${track.name}` : ''}`,
+    rows,
+  };
+}
+
+/**
+ * Gain for a single audio clip, opened from a button on the clip itself.
+ *
+ * A popover rather than an inline slider: a fader needs room a short clip does not
+ * have, and a slider lying across the clip would compete with the drag that moves it.
+ *
+ * A keyframed `gainDb` is left alone. Writing a static value over an animated one
+ * would silently discard the automation, so the button says so and does nothing —
+ * the inspector is where an animated parameter belongs.
+ */
+function ClipVolume({ clip, x }: { clip: Clip; x: number }): React.JSX.Element | null {
+  const run = useStudio((s) => s.run);
+  const endGesture = useStudio((s) => s.endGesture);
+  const [open, setOpen] = useState(false);
+
+  if (clip.kind !== 'audio') return null;
+  const animated = clip.gainDb.kind !== 'static';
+  const db = staticValue(clip.gainDb, 0);
+
+  return (
+    <>
+      <button
+        className={`clip-affordance volume${db !== 0 ? ' on' : ''}`}
+        style={{ left: x }}
+        title={
+          animated
+            ? 'Volume is keyframed — open the inspector to edit it'
+            : `Clip volume ${formatGain(db)} — double-click the fader for 100%`
+        }
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <IconVolume size={12} />
+      </button>
+
+      {open && (
+        <div
+          className="clip-volume-popover"
+          // Centred on its button, but never pushed off the left of the lane — the
+          // button now sits near a clip's start, and a clip can start at zero.
+          style={{ left: Math.max(0, x + AFFORDANCE_WIDTH / 2 - 60) }}
+          onPointerDown={(event) => event.stopPropagation()}
+          // Closing on leave rather than on an outside click: the lane beneath is a
+          // drag surface, and swallowing that click to dismiss a popover would eat
+          // the start of a marquee.
+          onPointerLeave={() => setOpen(false)}
+        >
+          {animated ? (
+            <span className="hint">Keyframed</span>
+          ) : (
+            <>
+              <input
+                type="range"
+                min={-60}
+                max={12}
+                step={0.5}
+                value={db}
+                onChange={(event) =>
+                  run(
+                    {
+                      type: 'setClipParam',
+                      clipId: clip.id,
+                      key: 'gainDb',
+                      param: staticParam(Number(event.target.value)),
+                    },
+                    'Set clip volume',
+                    `clip-gain:${clip.id}`,
+                  )
+                }
+                onPointerUp={endGesture}
+                onDoubleClick={() =>
+                  run(
+                    {
+                      type: 'setClipParam',
+                      clipId: clip.id,
+                      key: 'gainDb',
+                      param: staticParam(0),
+                    },
+                    'Reset clip volume',
+                  )
+                }
+              />
+              <span className="gain">{formatGainPercent(db)}</span>
+            </>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
 /** The rubber band itself, positioned straight from the pointer. */
 function MarqueeBox({ marquee }: { marquee: MarqueeState }): React.JSX.Element {
   const left = Math.min(marquee.originClientX, marquee.clientX);
@@ -2090,21 +2610,74 @@ function MarqueeBox({ marquee }: { marquee: MarqueeState }): React.JSX.Element {
   );
 }
 
+/**
+ * Steps a ruler may use, in seconds.
+ *
+ * Each is a whole multiple of the one before wherever it matters, so the minor ticks
+ * of one step land exactly on the majors of the next and the rule never shows an
+ * uneven comb.
+ */
+const TICK_STEPS = [
+  0.04, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200,
+] as const;
+
+/** How many minor divisions sit inside one labelled interval. */
+function minorDivisions(step: number): number {
+  // Sexagesimal steps read naturally in sixths (10s inside a minute); the rest in
+  // halves or fifths, whichever keeps the minors from crowding.
+  if (step >= 60) return 6;
+  if (step === 30 || step === 15) return 3;
+  if (step === 0.04) return 1;
+  return 5;
+}
+
+/**
+ * Labelled major ticks and the unlabelled minors between them.
+ *
+ * A ruler is legible because its marks are not all the same: the long ones carry the
+ * numbers and the short ones let you count between. Every tick used to be a
+ * full-height line with a label, which is a set of columns rather than a rule.
+ *
+ * `minSpacing` is a floor on how close two *labels* may come. Removing it entirely
+ * does not show more of the timeline, it just overlaps the digits into a smear —
+ * so the ruler gets denser by adding minors, not by crowding the numbers.
+ */
 function buildTicks(
   totalSeconds: number,
   pxPerSecond: number,
   frameRate: FrameRate,
+  minSpacing = 76,
 ): readonly Tick[] {
-  const candidates = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600];
-  const step = candidates.find((c) => c * pxPerSecond >= 80) ?? 3600;
+  const frameSeconds = T.toSeconds(T.frameDuration(frameRate));
+  // Zoomed far enough in, the useful subdivision is the frame itself.
+  const step: number =
+    TICK_STEPS.find((c) => c * pxPerSecond >= minSpacing) ?? TICK_STEPS[TICK_STEPS.length - 1]!;
+  const minors = minorDivisions(step);
+  const minorStep = step / minors;
+  // Frame ticks, but only when they would not merge into a solid bar.
+  const showFrames = frameSeconds * pxPerSecond >= 6 && minorStep > frameSeconds * 1.5;
 
   const ticks: Tick[] = [];
-  for (let seconds = 0; seconds <= totalSeconds; seconds += step) {
+  const count = Math.ceil(totalSeconds / minorStep);
+  for (let i = 0; i <= count; i++) {
+    const seconds = i * minorStep;
+    const major = i % minors === 0;
     ticks.push({
       seconds,
       x: seconds * pxPerSecond,
-      label: formatTick(seconds, frameRate),
+      major,
+      ...(major ? { label: formatTick(seconds, frameRate) } : {}),
     });
+  }
+
+  if (showFrames) {
+    const frameCount = Math.ceil(totalSeconds / frameSeconds);
+    for (let i = 0; i <= frameCount; i++) {
+      const seconds = i * frameSeconds;
+      // Skip any that a minor already covers, or the two draw on top of each other.
+      if (Math.abs((seconds / minorStep) % 1) < 0.001) continue;
+      ticks.push({ seconds, x: seconds * pxPerSecond, major: false, frame: true });
+    }
   }
   return ticks;
 }
