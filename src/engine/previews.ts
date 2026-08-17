@@ -431,7 +431,10 @@ export async function generateWaveform(
   if (sourceSeconds <= 0) return null;
 
   const columns = WAVEFORM_COLUMNS;
-  const peaks = new Float32Array(columns); // absolute peak per column
+  // Lowest and highest sample per column, so the sprite and the zoom tiles draw the
+  // same asymmetric shape and zooming only ever sharpens it.
+  const lows = new Float32Array(columns);
+  const highs = new Float32Array(columns);
   let sawAudio = false;
   // Decoded audio arrives in buffers of no fixed size, so progress is throttled by
   // how far it has travelled rather than reported per buffer.
@@ -458,8 +461,9 @@ export async function generateWaveform(
         const seconds = timestamp + i / rate;
         const column = Math.floor(seconds / secondsPerColumn);
         if (column < 0 || column >= columns) continue;
-        const magnitude = Math.abs(data[i]!);
-        if (magnitude > peaks[column]!) peaks[column] = magnitude;
+        const value = data[i]!;
+        if (value < lows[column]!) lows[column] = value;
+        if (value > highs[column]!) highs[column] = value;
       }
     }
   }
@@ -471,11 +475,9 @@ export async function generateWaveform(
 
   ctx.clearRect(0, 0, columns, WAVEFORM_HEIGHT);
   ctx.fillStyle = 'rgba(255, 255, 255, 0.72)';
-  const middle = WAVEFORM_HEIGHT / 2;
 
   for (let x = 0; x < columns; x++) {
-    const height = Math.max(1, Math.round(peaks[x]! * (WAVEFORM_HEIGHT - 2)));
-    ctx.fillRect(x, Math.round(middle - height / 2), 1, height);
+    drawWaveformColumn(ctx, x, lows[x]!, highs[x]!, WAVEFORM_HEIGHT);
   }
 
   /*
@@ -503,40 +505,34 @@ interface GenerateWaveformTilesOptions extends GenerateOptions {
  * audio detail rather than a scaling mode applied to the starter image.
  */
 /**
- * Smallest span a column's peak is measured over, in samples.
+ * Draw one column of a waveform, from its lowest sample to its highest.
  *
- * A column narrower than one cycle of the waveform only sees part of that cycle, so
- * its own peak is not the envelope — which is why a min/max reading collapses into a
- * wobbling line once zoomed far enough in. Widening the *measurement* keeps the
- * envelope an envelope; the bar is still placed at full column resolution, so
- * nothing is lost in precision.
+ * Asymmetric on purpose: how far the signal swung up and how far down are different
+ * numbers, and showing both is what makes a waveform look like the material rather
+ * than a shape. Mirroring one peak about the centre throws half of that away.
  *
- * 256 samples is ~5ms, about one cycle of the lowest pitch worth resolving.
+ * The span is stretched to include zero, which is the whole trick. Zoom in far
+ * enough that a column is narrower than one cycle and both readings can land on the
+ * same side of the axis; without this the bar floats off the centre line and the
+ * envelope unravels into a wobble. Anchoring costs nothing at ordinary zoom, where
+ * the signal crosses zero within every column anyway.
  */
-const MIN_PEAK_SAMPLES = 256;
-
-/** Sliding maximum, so each column reports the loudest sample near it. */
-function widenPeaks(
-  peaks: Float32Array,
-  sampleRate: number,
-  columnsPerSecond: number,
-): Float32Array {
-  if (sampleRate <= 0 || columnsPerSecond <= 0) return peaks;
-
-  const samplesPerColumn = sampleRate / columnsPerSecond;
-  const spread = Math.floor((MIN_PEAK_SAMPLES / samplesPerColumn - 1) / 2);
-  // Already wide enough on its own: most zoom levels land here and pay nothing.
-  if (spread < 1) return peaks;
-
-  const widened = new Float32Array(peaks.length);
-  for (let x = 0; x < peaks.length; x++) {
-    const from = Math.max(0, x - spread);
-    const to = Math.min(peaks.length - 1, x + spread);
-    let peak = 0;
-    for (let i = from; i <= to; i++) if (peaks[i]! > peak) peak = peaks[i]!;
-    widened[x] = peak;
-  }
-  return widened;
+function drawWaveformColumn(
+  ctx: OffscreenCanvasRenderingContext2D,
+  x: number,
+  low: number,
+  high: number,
+  height: number,
+): void {
+  const middle = height / 2;
+  const amplitude = (height - 2) / 2;
+  // `fillRect` paints up to but not including its lower edge, so clamping to the
+  // centre row rather than to the centre coordinate is what actually keeps the
+  // axis covered — otherwise a one-sided column stops a pixel short of it.
+  const centre = Math.floor(middle);
+  const top = Math.min(centre, Math.round(middle - Math.max(high, 0) * amplitude));
+  const bottom = Math.max(centre + 1, Math.round(middle - Math.min(low, 0) * amplitude));
+  ctx.fillRect(x, top, 1, bottom - top);
 }
 
 async function generateWaveformTiles(
@@ -581,11 +577,8 @@ async function generateWaveformTiles(
     const count = Math.min(WAVEFORM_COLUMNS_PER_TILE, columnCount - firstColumn);
     const sourceStart = firstColumn / columnsPerSecond;
     const sourceEnd = Math.min(sourceSeconds, (firstColumn + count) / columnsPerSecond);
-    // Absolute peak per column, mirrored at draw time — the same envelope the
-    // source-wide sprite draws, so zooming sharpens the picture rather than
-    // replacing it with a different one.
-    const peaks = new Float32Array(count);
-    let sampleRate = 0;
+    const lows = new Float32Array(count);
+    const highs = new Float32Array(count);
 
     for await (const wrapped of media.audioRange(
       assetId,
@@ -595,7 +588,6 @@ async function generateWaveformTiles(
       if (signal?.aborted) return false;
       const { buffer, timestamp } = wrapped;
       const rate = buffer.sampleRate;
-      sampleRate = rate;
       const sampleCount = buffer.length;
       const fromSample = Math.max(0, Math.floor((sourceStart - timestamp) * rate));
       const toSample = Math.min(sampleCount, Math.ceil((sourceEnd - timestamp) * rate));
@@ -610,26 +602,25 @@ async function generateWaveformTiles(
         const column = Math.floor((seconds - sourceStart) * columnsPerSecond);
         if (column < 0 || column >= count) continue;
 
-        let peak = peaks[column]!;
+        let low = lows[column]!;
+        let high = highs[column]!;
         for (const channel of channels) {
-          const magnitude = Math.abs(channel[sampleIndex]!);
-          if (magnitude > peak) peak = magnitude;
+          const value = channel[sampleIndex]!;
+          if (value < low) low = value;
+          if (value > high) high = value;
         }
-        peaks[column] = peak;
+        lows[column] = low;
+        highs[column] = high;
       }
     }
-
-    const envelope = widenPeaks(peaks, sampleRate, columnsPerSecond);
 
     const canvas = new OffscreenCanvas(count, WAVEFORM_HEIGHT);
     const ctx = canvas.getContext('2d');
     if (!ctx) return false;
     ctx.clearRect(0, 0, count, WAVEFORM_HEIGHT);
     ctx.fillStyle = 'rgba(255, 255, 255, 0.76)';
-    const middle = WAVEFORM_HEIGHT / 2;
     for (let x = 0; x < count; x++) {
-      const height = Math.max(1, Math.round(envelope[x]! * (WAVEFORM_HEIGHT - 2)));
-      ctx.fillRect(x, Math.round(middle - height / 2), 1, height);
+      drawWaveformColumn(ctx, x, lows[x]!, highs[x]!, WAVEFORM_HEIGHT);
     }
 
     if (signal?.aborted) return false;
