@@ -154,6 +154,28 @@ export async function loadMostRecent(): Promise<LoadedProject | null> {
   }
 }
 
+/**
+ * Rename a project that is not open.
+ *
+ * A raw patch of the stored JSON rather than a load-edit-save: loading validates,
+ * and a project too broken to open is exactly the one somebody most wants to
+ * relabel before deciding whether to keep it. The name is the only field touched,
+ * so nothing else can go out of step. The open project renames through the
+ * `setProjectName` command instead, so the change is undoable.
+ */
+export async function renameProject(id: ProjectId, name: string): Promise<void> {
+  const trimmed = name.trim();
+  if (trimmed.length === 0) throw new Error('A project name cannot be empty');
+
+  const path = `${projectDir(id)}/project.json`;
+  const stored = await opfs.readJson<Record<string, unknown>>(path);
+  if (!stored) throw new Error('That project is no longer on disk');
+  await opfs.writeJson(path, { ...stored, name: trimmed });
+
+  const projects = (await listProjects()).map((p) => (p.id === id ? { ...p, name: trimmed } : p));
+  await opfs.writeJson(INDEX_PATH, { projects } satisfies ProjectIndex);
+}
+
 export async function deleteProject(id: ProjectId): Promise<void> {
   await opfs.remove(projectDir(id), true);
   const projects = (await listProjects()).filter((p) => p.id !== id);
@@ -170,6 +192,15 @@ export async function deleteProject(id: ProjectId): Promise<void> {
  * Coalesces bursts of edits into one write, and never runs two writes at once —
  * overlapping `createWritable` calls on the same file can interleave and truncate.
  */
+/**
+ * What the autosaver is doing, for anything that reports it.
+ *
+ * `idle` means nothing has needed writing yet — a project that has not been touched
+ * since it was opened. It is deliberately distinct from `saved`, so a fresh session
+ * does not claim to have written something it never did.
+ */
+export type SaveState = 'idle' | 'saving' | 'saved' | 'error';
+
 export class Autosaver {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private pending: Project | null = null;
@@ -179,6 +210,8 @@ export class Autosaver {
   constructor(
     private readonly delayMs = 800,
     private readonly onError?: (error: Error) => void,
+    /** Reports progress, so the save can be shown rather than merely believed. */
+    private readonly onState?: (state: SaveState) => void,
   ) {}
 
   get error(): Error | null {
@@ -188,6 +221,10 @@ export class Autosaver {
   schedule(project: Project): void {
     this.pending = project;
     if (this.timer !== null) clearTimeout(this.timer);
+    // Reported from the moment there is something outstanding, not from the moment
+    // the write starts: the debounce is part of the wait as far as anyone watching
+    // is concerned.
+    this.onState?.('saving');
     this.timer = setTimeout(() => void this.flush(), this.delayMs);
   }
 
@@ -206,8 +243,10 @@ export class Autosaver {
     try {
       await saveProject(project);
       this.lastError = null;
+      this.onState?.('saved');
     } catch (err) {
       this.lastError = err instanceof Error ? err : new Error(String(err));
+      this.onState?.('error');
       this.onError?.(this.lastError);
     } finally {
       this.writing = false;

@@ -17,6 +17,7 @@ import {
   IconEye,
   IconEyeOff,
   IconFile,
+  IconFolder,
   IconFullscreen,
   IconGauge,
   IconGroup,
@@ -108,7 +109,13 @@ interface MenuDefinition {
   readonly entries: readonly MenuEntry[];
 }
 
-export function MenuBar({ onExport }: { onExport: () => void }): React.JSX.Element {
+export function MenuBar({
+  onExport,
+  onOpenProject,
+}: {
+  onExport: () => void;
+  onOpenProject: () => void;
+}): React.JSX.Element {
   const [open, setOpen] = useState<string | null>(null);
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
@@ -177,6 +184,12 @@ export function MenuBar({ onExport }: { onExport: () => void }): React.JSX.Eleme
         { label: 'New project', icon: <IconFile />, onSelect: () => {
             if (confirm('Start a new project? Unsaved work in this one is kept on disk.')) newProject();
           } },
+        {
+          label: 'Open project…',
+          icon: <IconFolder />,
+          hint: 'Ctrl+O',
+          onSelect: onOpenProject,
+        },
         { label: 'Import media…', icon: <IconPlus />, hint: 'Ctrl+I', onSelect: () => void importViaPicker() },
         'separator',
         {

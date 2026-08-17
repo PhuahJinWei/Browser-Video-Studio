@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { suggestBitrate, type ExportSettings } from '../engine/export';
 import { sequenceDuration } from '../model/selectors';
 import * as T from '../model/time';
+import { Fader } from './Fader';
 import { defaultExportSettings, useStudio } from './store';
 
 const PRESETS = [
@@ -90,15 +91,26 @@ export function ExportDialog({ onClose }: { onClose: () => void }): React.JSX.El
         <div className="field">
           <label>Bitrate</label>
           <div className="value-row">
-            <input
-              type="range"
+            {/*
+              Marked at the rate suggested for this size and frame rate — the one
+              value here that is a genuine recommendation rather than a preference.
+            */}
+            <Fader
               min={500_000}
               max={40_000_000}
               step={500_000}
               value={settings.bitrate}
               disabled={busy}
-              onChange={(event) =>
-                setSettings((s) => ({ ...s, bitrate: Number(event.target.value) }))
+              neutral={suggestBitrate(settings.size, settings.frameRate)}
+              neutralSnapSteps={1}
+              ariaLabel="Export bitrate"
+              title={`Suggested for this format: ${(
+                suggestBitrate(settings.size, settings.frameRate) / 1e6
+              ).toFixed(1)} Mbps`}
+              format={(value) => `${(value / 1e6).toFixed(1)} Mbps`}
+              onChange={(bitrate) => setSettings((s) => ({ ...s, bitrate }))}
+              onReset={() =>
+                setSettings((s) => ({ ...s, bitrate: suggestBitrate(s.size, s.frameRate) }))
               }
             />
             <output>{(settings.bitrate / 1e6).toFixed(1)}M</output>

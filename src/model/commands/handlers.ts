@@ -163,6 +163,21 @@ function splitAcross(
 }
 
 // ---------------------------------------------------------------------------
+// Project
+// ---------------------------------------------------------------------------
+
+function handleSetProjectName(
+  d: Draft,
+  cmd: Extract<Command, { type: 'setProjectName' }>,
+): void {
+  // Trimmed, and never emptied: the name is the only thing distinguishing one row
+  // from another in the project browser, and a blank one cannot be clicked back.
+  const name = cmd.name.trim();
+  if (name.length === 0) throw new ModelError('A project name cannot be empty');
+  d.name = name;
+}
+
+// ---------------------------------------------------------------------------
 // Tracks
 // ---------------------------------------------------------------------------
 
@@ -439,6 +454,41 @@ function handleSetSequenceParam(
 ): void {
   const sequence = draftSequence(d, cmd.sequenceId);
   d.sequences[sequence.id] = { ...sequence, [cmd.key]: cmd.param };
+}
+
+/**
+ * Change what the sequence composites at, and what rate it counts frames in.
+ *
+ * Deliberately does not touch a single clip. Positions and durations are exact
+ * rational seconds rather than frame counts, so a change of rate changes how time is
+ * displayed and exported and nothing about where anything sits — which is the whole
+ * reason the document stores time the way it does.
+ */
+function handleSetSequenceSettings(
+  d: Draft,
+  cmd: Extract<Command, { type: 'setSequenceSettings' }>,
+): void {
+  const sequence = draftSequence(d, cmd.sequenceId);
+
+  if (cmd.size) {
+    // Encoders reject a zero dimension and most reject odd ones, but rounding here
+    // would silently disagree with what the caller asked for — so refuse instead.
+    if (!Number.isInteger(cmd.size.width) || !Number.isInteger(cmd.size.height)) {
+      throw new ModelError('Sequence size must be whole pixels');
+    }
+    if (cmd.size.width <= 0 || cmd.size.height <= 0) {
+      throw new ModelError('Sequence size must be positive');
+    }
+  }
+  if (cmd.frameRate && (cmd.frameRate.num <= 0 || cmd.frameRate.den <= 0)) {
+    throw new ModelError('Frame rate must be positive');
+  }
+
+  d.sequences[sequence.id] = {
+    ...sequence,
+    ...(cmd.size ? { size: cmd.size } : {}),
+    ...(cmd.frameRate ? { frameRate: cmd.frameRate } : {}),
+  };
 }
 
 function handleSetSolidFill(d: Draft, cmd: Extract<Command, { type: 'setSolidFill' }>): void {
@@ -1000,6 +1050,8 @@ function handleSetTransitionDuration(
 
 export function runCommand(d: Draft, command: Command, ids: IdSource): void {
   switch (command.type) {
+    case 'setProjectName':
+      return handleSetProjectName(d, command);
     case 'addTrack':
       return handleAddTrack(d, command, ids);
     case 'removeTrack':
@@ -1034,6 +1086,8 @@ export function runCommand(d: Draft, command: Command, ids: IdSource): void {
       return handleSetSolidFill(d, command);
     case 'setSequenceParam':
       return handleSetSequenceParam(d, command);
+    case 'setSequenceSettings':
+      return handleSetSequenceSettings(d, command);
     case 'addTransition':
       return handleAddTransition(d, command, ids);
     case 'removeTransition':

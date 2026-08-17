@@ -16,6 +16,7 @@ import { isImageFile, MediaLibrary } from '../engine/media';
 import {
   densityForZoom,
   PreviewCache,
+  waveformDensityForZoom,
 } from '../engine/previews';
 import { apply, type Command, type NewClipSpec } from '../model/commands';
 import { normaliseFolder } from '../model/commands/handlers';
@@ -45,20 +46,36 @@ import {
   trackDuration,
 } from '../model/selectors';
 import * as T from '../model/time';
+import { staticParam } from '../model/params';
 import type {
   Asset,
   AssetId,
   Clip,
   ClipId,
+  FrameRate,
   Project,
   SequenceId,
+  Size,
+  ProjectId,
   Time,
   TimeRange,
   TrackId,
   TrackKind,
   TransitionId,
 } from '../model/types';
-import { Autosaver, deleteMedia, loadMostRecent, saveMedia } from '../storage/projectStore';
+import {
+  Autosaver,
+  deleteMedia,
+  deleteProject,
+  listProjects,
+  loadMostRecent,
+  loadProject,
+  renameProject as renameStoredProject,
+  saveMedia,
+  type LoadedProject,
+  type ProjectSummary,
+  type SaveState,
+} from '../storage/projectStore';
 
 const ids = randomIdSource;
 
@@ -97,8 +114,17 @@ function starterProject(): { project: Project; sequenceId: SequenceId } {
     sequenceId,
     name: 'Untitled project',
     frameRate: T.FPS_30,
-    videoTrackIds: [ids.track(), ids.track()],
-    audioTrackIds: [ids.track(), ids.track()],
+    /*
+     * One of each to begin with.
+     *
+     * Four tracks was two more than a new project has anything to put on, and the
+     * empty pair sat between the ruler and the work taking up the timeline's scarcest
+     * dimension. Dropping media past the last lane makes another, and a clip carrying
+     * both streams creates whatever counterpart it needs — so the ones that get used
+     * still arrive on their own.
+     */
+    videoTrackIds: [ids.track()],
+    audioTrackIds: [ids.track()],
   });
   return { project, sequenceId };
 }
@@ -135,6 +161,15 @@ export interface StudioState {
   status: string;
   error: string | null;
   showTelemetry: boolean;
+  /**
+   * What the autosaver is doing.
+   *
+   * There is no Save command — every edit is written to browser storage on a short
+   * debounce — so this is the only thing that can tell anyone their work is being
+   * kept. Silence was fine while nobody was looking for a Save button; it stops
+   * being fine the moment the toolbar implies one should exist.
+   */
+  saveState: SaveState;
 
   project: () => Project;
   playhead: () => Time;
@@ -197,8 +232,11 @@ export interface StudioState {
 
   setPlayhead: (at: Time) => void;
   setZoom: (pixelsPerSecond: number) => void;
-  /** Rebuild filmstrips at a density suited to the current zoom. Debounced. */
-  refreshFilmstripDensity: () => void;
+  /** Build filmstrip and waveform tiles for the current zoom and visible range. */
+  refreshPreviewDensity: (visible?: {
+    readonly startSeconds: number;
+    readonly endSeconds: number;
+  }) => void;
 
   /**
    * Move clips onto a track that does not exist yet — dropping into the gap above,
@@ -217,6 +255,16 @@ export interface StudioState {
       readonly toStart: Time;
     }[],
     coalesceKey?: string,
+    /**
+     * A second track made in the same batch for the linked half of an A/V pair,
+     * so the picture and its sound land together instead of the sound being left
+     * behind on whichever lane it happened to be on.
+     */
+    partner?: {
+      readonly kind: TrackKind;
+      readonly index: number;
+      readonly clipIds: readonly ClipId[];
+    },
   ) => void;
   /** Place an asset on a track created for it at `index` — the media-bin half of the same gesture. */
   dropAssetOnNewTrack: (assetId: AssetId, kind: TrackKind, index: number) => void;
@@ -251,6 +299,8 @@ export interface StudioState {
    */
   splitAtPlayhead: () => void;
   addTransitionNearPlayhead: (transitionType?: string, trackId?: TrackId) => boolean;
+  /** Whether a transition has a bare cut to land on, for anything offering the action. */
+  canAddTransitionNearPlayhead: () => boolean;
   /**
    * Put a transition on these cuts, shortening the clips when they have no
    * handles to spare. Returns false when even that cannot make room.
@@ -271,15 +321,31 @@ export interface StudioState {
   toggleTelemetry: () => void;
   restoreLastProject: () => Promise<void>;
   buildPreviews: () => Promise<void>;
+
+  // -- stored projects ------------------------------------------------------
+  /** Every project in browser storage, newest first. */
+  listStoredProjects: () => Promise<readonly ProjectSummary[]>;
+  /** Close the current project and open this one. Returns false if it would not open. */
+  openStoredProject: (id: ProjectId) => Promise<boolean>;
+  /** Rename a project, open or not. */
+  renameStoredProject: (id: ProjectId, name: string) => Promise<void>;
+  /** Erase a project and its cached media. Moves on if it was the one open. */
+  deleteStoredProject: (id: ProjectId) => Promise<void>;
 }
 
 /**
  * Autosave. Lives outside the store because it is a side-effect owner, not state:
  * every recorded edit schedules a debounced write of the current document.
  */
-const autosaver = new Autosaver(800, (error) => {
-  useStudio.setState({ error: `Autosave failed: ${error.message}` });
-});
+const autosaver = new Autosaver(
+  800,
+  (error) => {
+    useStudio.setState({ error: `Autosave failed: ${error.message}` });
+  },
+  (saveState) => {
+    useStudio.setState({ saveState });
+  },
+);
 
 /**
  * Write any pending edit immediately.
@@ -288,19 +354,22 @@ const autosaver = new Autosaver(800, (error) => {
  * closes. `pagehide` is the reliable signal — `beforeunload` is skipped when a tab
  * is discarded or the page is restored from the back/forward cache.
  */
-export function flushAutosave(): void {
+export function flushAutosave(): Promise<void> {
   const state = useStudio.getState();
   autosaver.schedule(state.project());
-  void autosaver.flush();
+  // Awaitable so a caller that is about to replace the document can let the old one
+  // finish writing first. `pagehide` cannot wait for it and does not need to: the
+  // write is already in flight by the time it returns.
+  return autosaver.flush();
 }
 
 const initial = starterProject();
 
 /**
- * Long enough that spinning the wheel through several zoom levels costs one
- * rebuild rather than one per level.
+ * A short settling pause avoids starting work at every wheel notch. Tiles and tier
+ * fallbacks make aborts cheap now, so this can stay below the delay people perceive.
  */
-const DENSITY_DEBOUNCE_MS = 400;
+const DENSITY_DEBOUNCE_MS = 100;
 let densityTimer: ReturnType<typeof setTimeout> | null = null;
 /** Bumped per pass, so an older sweep stops when a newer zoom starts one. */
 let densityRun = 0;
@@ -323,6 +392,7 @@ export const useStudio = create<StudioState>((set, get) => ({
   draggingAssetId: null,
   status: 'Import media to begin.',
   error: null,
+  saveState: 'idle',
   // Off to begin with. The panel is worth having — it is the only window onto
   // where a frame's time actually goes — but it sits over the picture, and the
   // picture is what you open the app to look at.
@@ -601,18 +671,11 @@ export const useStudio = create<StudioState>((set, get) => ({
       sequenceId: get().sequenceId,
       view: { zoom: Math.max(4, Math.min(2000, pixelsPerSecond)) },
     });
-    get().refreshFilmstripDensity();
+    get().refreshPreviewDensity();
   },
 
-  /**
-   * Ask for filmstrips fine enough for the current zoom.
-   *
-   * Debounced, because zooming arrives as a stream of events and each rebuild is a
-   * decode pass. The wait is deliberately longer than a wheel-spin, so spinning
-   * through several zoom levels costs one rebuild at the level you stop on rather
-   * than one at each level you pass through.
-   */
-  refreshFilmstripDensity: () => {
+  /** Ask for filmstrip and waveform tiles fine enough for the current viewport. */
+  refreshPreviewDensity: (visible) => {
     if (densityTimer !== null) clearTimeout(densityTimer);
     densityTimer = setTimeout(() => {
       densityTimer = null;
@@ -623,29 +686,123 @@ export const useStudio = create<StudioState>((set, get) => ({
       const project = state.project();
       const zoom = getSequence(project, state.sequenceId).view.zoom;
 
-      // Density is per asset, but speed is per clip, so a slowed clip of an asset
-      // asks for more than a full-speed one. Take whichever wants the most.
-      const wanted = new Map<AssetId, number>();
+      type DensityRequest = {
+        density: number;
+        prioritySeconds?: number;
+        priorityDistance: number;
+      };
+      const videoWanted = new Map<AssetId, DensityRequest>();
+      const audioWanted = new Map<AssetId, DensityRequest>();
+      const visibleCentre = visible
+        ? (visible.startSeconds + visible.endSeconds) / 2
+        : null;
       for (const clip of Object.values(project.clips)) {
-        // Only decoded video has a strip: stills and generated clips have nothing
-        // to walk, and audio has a waveform instead.
-        if (clip.kind !== 'video') continue;
-        const density = densityForZoom(zoom, clip.speed);
-        wanted.set(clip.assetId, Math.max(wanted.get(clip.assetId) ?? 0, density));
+        if (clip.kind !== 'video' && clip.kind !== 'audio') continue;
+        const asset = project.assets[clip.assetId];
+        if (!asset) continue;
+
+        let candidateSeconds: number | undefined;
+        let candidateDistance = Number.POSITIVE_INFINITY;
+        if (visible && visibleCentre !== null) {
+          const start = T.toSeconds(clip.start);
+          const end = start + T.toSeconds(clip.duration);
+          if (start < visible.endSeconds && end > visible.startSeconds) {
+            const timelineAt = Math.max(start, Math.min(end, visibleCentre));
+            candidateDistance = Math.abs(timelineAt - visibleCentre);
+            candidateSeconds =
+              T.toSeconds(clip.sourceIn) +
+              (timelineAt - start) * (Math.abs(clip.speed) || 1);
+          }
+        }
+
+        if (clip.kind === 'audio') {
+          if (!asset.audio) continue;
+          const density = waveformDensityForZoom(
+            zoom,
+            clip.speed,
+            typeof window === 'undefined' ? 1 : window.devicePixelRatio,
+          );
+          const current = audioWanted.get(clip.assetId);
+          const useCandidate = candidateDistance <
+            (current?.priorityDistance ?? Number.POSITIVE_INFINITY);
+          audioWanted.set(clip.assetId, {
+            density: Math.max(current?.density ?? 0, density),
+            ...(useCandidate && candidateSeconds !== undefined
+              ? { prioritySeconds: candidateSeconds }
+              : current?.prioritySeconds !== undefined
+                ? { prioritySeconds: current.prioritySeconds }
+                : {}),
+            priorityDistance: useCandidate
+              ? candidateDistance
+              : current?.priorityDistance ?? Number.POSITIVE_INFINITY,
+          });
+          continue;
+        }
+
+        if (!asset.video) continue;
+        const track = project.tracks[clip.trackId];
+        const { width, height } = asset.video.size;
+        const starter = cache.getFilmstrip(clip.assetId);
+        const frameAspect = starter && starter.frameWidth > 0 && starter.frameHeight > 0
+          ? starter.frameWidth / starter.frameHeight
+          : width > 0 && height > 0
+            ? width / height
+            : 16 / 9;
+        // The row separator plus the clip's two border pixels do not contain image;
+        // using the content box makes each CSS cell match the source aspect on screen.
+        const previewHeight = Math.max(1, Math.max(36, track?.height ?? 36) - 3);
+        const density = densityForZoom(
+          zoom,
+          clip.speed,
+          frameAspect,
+          previewHeight,
+        );
+        const current = videoWanted.get(clip.assetId);
+        const useCandidate = candidateDistance <
+          (current?.priorityDistance ?? Number.POSITIVE_INFINITY);
+        videoWanted.set(clip.assetId, {
+          density: Math.max(current?.density ?? 0, density),
+          ...(useCandidate && candidateSeconds !== undefined
+            ? { prioritySeconds: candidateSeconds }
+            : current?.prioritySeconds !== undefined
+              ? { prioritySeconds: current.prioritySeconds }
+              : {}),
+          priorityDistance: useCandidate
+            ? candidateDistance
+            : current?.priorityDistance ?? Number.POSITIVE_INFINITY,
+        });
       }
 
-      // One asset at a time. Each rebuild is a run of seeks, and firing them all at
-      // once would have every asset's decode competing for the same hardware — the
-      // strip you are actually looking at finishing last.
+      // One asset at a time. Concurrent range decodes compete for the same demuxer
+      // and hardware, making the preview actually on screen finish last.
       const run = ++densityRun;
       void (async () => {
-        for (const [assetId, density] of wanted) {
+        // Waveform ranges are quick and fix the currently visible blur first.
+        for (const [assetId, request] of audioWanted) {
+          if (run !== densityRun) return;
+          const asset = project.assets[assetId];
+          if (!asset?.audio) continue;
+          await cache.ensureWaveformDensity(
+            assetId,
+            asset.audio.duration,
+            request.density,
+            request.prioritySeconds,
+          );
+          set({ previewVersion: get().previewVersion + 1 });
+        }
+
+        for (const [assetId, request] of videoWanted) {
           // A newer zoom has taken over; its own pass covers what is left.
           if (run !== densityRun) return;
           const asset = project.assets[assetId];
           if (!asset?.video) continue;
 
-          await cache.ensureDensity(assetId, asset.video.duration, density);
+          await cache.ensureDensity(
+            assetId,
+            asset.video.duration,
+            request.density,
+            request.prioritySeconds,
+          );
           set({ previewVersion: get().previewVersion + 1 });
         }
       })();
@@ -663,7 +820,11 @@ export const useStudio = create<StudioState>((set, get) => ({
     try {
       await engine.attachCanvas(canvas, sequence.size);
       // Re-open any media imported before the canvas existed.
-      for (const [assetId, file] of get().mediaFiles) await engine.openAsset(assetId, file);
+      const assets = get().project().assets;
+      for (const [assetId, file] of get().mediaFiles) {
+        const kind = assets[assetId]?.kind;
+        if (kind) await engine.openAsset(assetId, file, kind);
+      }
       engine.requestRender(get().playhead());
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
@@ -690,7 +851,7 @@ export const useStudio = create<StudioState>((set, get) => ({
         const asset = folder ? { ...probed, folder } : probed;
         commands.push({ type: 'addAsset', asset });
         nextFiles.set(assetId, file);
-        await get().engine?.openAsset(assetId, file);
+        await get().engine?.openAsset(assetId, file, asset.kind);
         // Copy beside the project so it reopens after a reload.
         await saveMedia(get().project().id, assetId, file, MEDIA_COPY_LIMIT_BYTES).catch(() => false);
       } catch (err) {
@@ -760,37 +921,25 @@ export const useStudio = create<StudioState>((set, get) => ({
 
     const placement = planPlacement(project, state.sequenceId, asset, anchorTrackId);
     get().runMany(placement.commands, `Add "${asset.name}"`);
-    set({
-      status: placement.createdTrackName
-        ? `Added "${asset.name}" — created ${placement.createdTrackName} for its other stream.`
-        : `Added "${asset.name}".`,
-    });
+    set({ status: `Added "${asset.name}"${placementNotes(placement)}` });
     get().engine?.requestRender(placement.start);
   },
 
   addTitle: (text) => {
     const state = get();
-    const sequence = getSequence(state.project(), state.sequenceId);
-    const trackId = sequence.videoTrackIds[sequence.videoTrackIds.length - 1];
-    if (!trackId) {
-      set({ error: 'Add a video track first' });
-      return;
-    }
-    state.run(
-      {
-        type: 'insertClip',
-        trackId,
-        mode: 'overwrite',
-        clip: {
-          kind: 'title',
-          start: state.playhead(),
-          duration: T.time(3),
-          text,
-          name: text.slice(0, 24) || 'Title',
-        },
-      },
-      'Add title',
-    );
+    const plan = planGenerated(state.project(), state.sequenceId, {
+      kind: 'title',
+      start: state.playhead(),
+      duration: T.time(3),
+      text,
+      name: text.slice(0, 24) || 'Title',
+    });
+    state.runMany(plan.commands, 'Add title');
+    set({
+      status: plan.createdTrack
+        ? 'Added a title on a new track above — the one below was busy at the playhead.'
+        : 'Added a title.',
+    });
   },
 
   splitAtPlayhead: () => {
@@ -845,24 +994,13 @@ export const useStudio = create<StudioState>((set, get) => ({
     return true;
   },
 
+  canAddTransitionNearPlayhead: () => bareCutNearPlayhead(get()) !== null,
+
   addTransitionNearPlayhead: (transitionType, trackId) => {
     const state = get();
     const project = state.project();
-    const at = state.playhead();
 
-    const searched = trackId
-      ? [trackId]
-      : state.selection.length > 0
-        ? [...new Set(state.selection.map((id) => project.clips[id]?.trackId))].filter(
-            (id): id is TrackId => id !== undefined,
-          )
-        : orderedTrackIds(project, state.sequenceId);
-
-    let best: { from: Clip; to: Clip; distanceSeconds: number } | null = null;
-    for (const id of searched) {
-      const cut = nearestCut(project, id, at);
-      if (cut && (!best || cut.distanceSeconds < best.distanceSeconds)) best = cut;
-    }
+    const best = bareCutNearPlayhead(state, trackId);
     if (!best) {
       set({ error: 'No bare cut near the playhead to put a transition on' });
       return false;
@@ -878,21 +1016,18 @@ export const useStudio = create<StudioState>((set, get) => ({
 
   addSolid: (fill) => {
     const state = get();
-    const sequence = getSequence(state.project(), state.sequenceId);
-    const trackId = sequence.videoTrackIds[sequence.videoTrackIds.length - 1];
-    if (!trackId) {
-      set({ error: 'Add a video track first' });
-      return;
-    }
-    state.run(
-      {
-        type: 'insertClip',
-        trackId,
-        mode: 'overwrite',
-        clip: { kind: 'solid', start: state.playhead(), duration: T.time(3), fill },
-      },
-      'Add colour',
-    );
+    const plan = planGenerated(state.project(), state.sequenceId, {
+      kind: 'solid',
+      start: state.playhead(),
+      duration: T.time(3),
+      fill,
+    });
+    state.runMany(plan.commands, 'Add colour');
+    set({
+      status: plan.createdTrack
+        ? 'Added a colour on a new track above — the one below was busy at the playhead.'
+        : 'Added a colour.',
+    });
   },
 
   /**
@@ -926,35 +1061,50 @@ export const useStudio = create<StudioState>((set, get) => ({
 
     const placement = planPlacement(project, state.sequenceId, asset, trackId);
     get().runMany(placement.commands, `Add "${asset.name}"`);
-    set({
-      status: placement.createdTrackName
-        ? `Added "${asset.name}" — created ${placement.createdTrackName} for its ${
-            track.kind === 'video' ? 'audio' : 'video'
-          }.`
-        : `Added "${asset.name}".`,
-    });
+    set({ status: `Added "${asset.name}"${placementNotes(placement)}` });
   },
 
-  moveClipsToNewTrack: (kind, index, moves, coalesceKey) => {
+  moveClipsToNewTrack: (kind, index, moves, coalesceKey, partner) => {
+    const sequenceId = get().sequenceId;
     const trackId = ids.track();
+    const partnerTrackId = partner ? ids.track() : null;
+    const partnerClips = new Set(partner?.clipIds ?? []);
+
     // One batch: addTrack then the move. Two batches would let undo put the clip
     // back while leaving the track it was dropped into sitting there empty.
     //
     // Passing the drag's own coalesce key folds this into the same undo step as the
     // pointer moves that led here, so the whole gesture comes apart in one go.
+    //
+    // The two indices do not disturb each other: a sequence keeps its video and
+    // audio track lists separately, so neither insert shifts the other's position.
     get().runMany(
       [
-        { type: 'addTrack', sequenceId: get().sequenceId, kind, index, trackId },
+        { type: 'addTrack', sequenceId, kind, index, trackId },
+        ...(partner && partnerTrackId
+          ? [
+              {
+                type: 'addTrack' as const,
+                sequenceId,
+                kind: partner.kind,
+                index: partner.index,
+                trackId: partnerTrackId,
+              },
+            ]
+          : []),
         {
           type: 'moveClips',
           moves: moves.map((move) => ({
             clipId: move.clipId,
-            toTrackId: move.toTrackId ?? trackId,
+            toTrackId:
+              partnerTrackId && partnerClips.has(move.clipId)
+                ? partnerTrackId
+                : (move.toTrackId ?? trackId),
             toStart: move.toStart,
           })),
         },
       ],
-      `Move to a new ${kind} track`,
+      partner ? 'Move to new tracks' : `Move to a new ${kind} track`,
       coalesceKey,
     );
   },
@@ -988,9 +1138,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     const placement = planPlacement(withTrack, state.sequenceId, asset, trackId);
     state.runMany([addTrack, ...placement.commands], `Add "${asset.name}"`);
     set({
-      status: placement.createdTrackName
-        ? `Added "${asset.name}" on a new ${kind} track — and ${placement.createdTrackName} for its other stream.`
-        : `Added "${asset.name}" on a new ${kind} track.`,
+      status: `Added "${asset.name}" on a new ${kind} track${placementNotes(placement)}`,
     });
   },
 
@@ -1176,6 +1324,12 @@ export const useStudio = create<StudioState>((set, get) => ({
 
       await cache.ensure(asset.id, asset.video?.duration ?? null, asset.audio?.duration ?? null);
       set({ previewVersion: get().previewVersion + 1 });
+      /*
+       * Zoom may have changed while the first strip was still decoding. In that
+       * case the density request arrived before its starter preview existed. Re-read
+       * the current viewport now that the filmstrip and waveform can be upgraded.
+       */
+      if (asset.video || asset.audio) get().refreshPreviewDensity();
     }
   },
 
@@ -1183,44 +1337,205 @@ export const useStudio = create<StudioState>((set, get) => ({
   restoreLastProject: async () => {
     try {
       const loaded = await loadMostRecent();
-      if (!loaded) return;
-
-      // Record what could not be found on the assets themselves, before the history
-      // is seeded. Done here rather than through `run` because it is not an edit:
-      // nobody should be able to undo the discovery that a file has gone.
-      let project = loaded.project;
-      for (const assetId of loaded.missingAssetIds) {
-        project = apply(project, { type: 'setAssetStatus', assetId, status: { state: 'missing' } }, ids);
-      }
-
-      const sequenceId = project.activeSequenceId;
-      get().previews?.dispose();
-      set({
-        history: initHistory(project),
-        sequenceId,
-        selection: [],
-        selectedAssetIds: [],
-        mediaFiles: loaded.media,
-        previews: null,
-        previewVersion: 0,
-        status:
-          loaded.missingAssetIds.length > 0
-            ? `Reopened "${loaded.project.name}" — ${loaded.missingAssetIds.length} file(s) need re-importing.`
-            : `Reopened "${loaded.project.name}".`,
-      });
-
-      const engine = get().engine;
-      if (engine) {
-        engine.setSequence(sequenceId);
-        for (const [assetId, file] of loaded.media) await engine.openAsset(assetId, file);
-        engine.requestRender(get().playhead());
-        void get().buildPreviews();
-      }
+      if (loaded) await adopt(set, get, loaded, 'Reopened');
     } catch (err) {
       set({ error: `Could not reopen the last project: ${err instanceof Error ? err.message : err}` });
     }
   },
+
+  listStoredProjects: async () => {
+    try {
+      return await listProjects();
+    } catch (err) {
+      set({ error: `Could not read the project list: ${err instanceof Error ? err.message : err}` });
+      return [];
+    }
+  },
+
+  openStoredProject: async (id) => {
+    if (id === get().project().id) return true;
+    try {
+      /*
+       * Write the project being left before reading the one being opened. The
+       * autosaver runs on a debounce, so without this the last few seconds of work
+       * would be dropped by the switch — the one moment where losing them is least
+       * excusable, since nothing about clicking Open suggests discarding anything.
+       */
+      await flushAutosave();
+
+      const loaded = await loadProject(id);
+      if (!loaded) {
+        set({ error: 'That project is no longer in browser storage.' });
+        return false;
+      }
+      await adopt(set, get, loaded, 'Opened');
+      return true;
+    } catch (err) {
+      set({ error: `Could not open that project: ${err instanceof Error ? err.message : err}` });
+      return false;
+    }
+  },
+
+  renameStoredProject: async (id, name) => {
+    const trimmed = name.trim();
+    if (trimmed.length === 0) return;
+    try {
+      if (id === get().project().id) {
+        // The open document is the source of truth for its own name, and the index
+        // is rebuilt from it — so this goes through a command, and is undoable.
+        get().run({ type: 'setProjectName', name: trimmed }, 'Rename project');
+        // Flushed rather than left to the debounce so the browser listing, which is
+        // read straight back from disk, does not show the old name for a second.
+        await flushAutosave();
+      } else {
+        await renameStoredProject(id, trimmed);
+      }
+    } catch (err) {
+      set({ error: `Could not rename that project: ${err instanceof Error ? err.message : err}` });
+    }
+  },
+
+  deleteStoredProject: async (id) => {
+    const wasOpen = id === get().project().id;
+    try {
+      await deleteProject(id);
+    } catch (err) {
+      set({ error: `Could not delete that project: ${err instanceof Error ? err.message : err}` });
+      return;
+    }
+
+    /*
+     * Deleting what is on screen has to move off it as well. The autosaver holds the
+     * open document and writes it on the next edit, so a project deleted while open
+     * would simply reappear — with its media gone, since that is not coming back.
+     */
+    if (!wasOpen) {
+      set({ status: 'Project deleted.' });
+      return;
+    }
+    try {
+      const next = await loadMostRecent();
+      if (next) {
+        await adopt(set, get, next, 'Deleted that project; opened');
+        return;
+      }
+    } catch {
+      // Fall through: a broken neighbour is no reason to leave the deleted one up.
+    }
+    get().newProject();
+    set({ status: 'Project deleted. Started a new one.' });
+  },
 }));
+
+/**
+ * Put a project read from disk on screen.
+ *
+ * Shared by every route in — restoring on launch, opening from the browser, and
+ * falling back after a delete — so all three land in exactly the same state rather
+ * than each remembering to reset a different subset of it.
+ */
+async function adopt(
+  set: (partial: Partial<StudioState>) => void,
+  get: () => StudioState,
+  loaded: LoadedProject,
+  verb: string,
+): Promise<void> {
+  // Record what could not be found on the assets themselves, before the history
+  // is seeded. Done here rather than through `run` because it is not an edit:
+  // nobody should be able to undo the discovery that a file has gone.
+  let project = loaded.project;
+  for (const assetId of loaded.missingAssetIds) {
+    project = apply(project, { type: 'setAssetStatus', assetId, status: { state: 'missing' } }, ids);
+  }
+
+  const sequenceId = project.activeSequenceId;
+  get().previews?.dispose();
+  set({
+    history: initHistory(project),
+    sequenceId,
+    selection: [],
+    selectedTrackId: null,
+    selectedTransitionId: null,
+    selectionAnchor: null,
+    selectedAssetIds: [],
+    assetSelectionAnchor: null,
+    mediaFiles: loaded.media,
+    previews: null,
+    previewVersion: 0,
+    error: null,
+    // Nothing has been edited yet, so the indicator must not claim a save that
+    // belongs to whatever was open before.
+    saveState: 'idle',
+    status:
+      loaded.missingAssetIds.length > 0
+        ? `${verb} "${project.name}" — ${loaded.missingAssetIds.length} file(s) need re-importing.`
+        : `${verb} "${project.name}".`,
+  });
+
+  const engine = get().engine;
+  if (!engine) return;
+
+  await engine.pause();
+  engine.setSequence(sequenceId);
+
+  /*
+   * Opened one at a time and forgiven individually. A file the decoder will not
+   * take is a problem for its own clips, not for the project — a single refusal
+   * used to throw out of this loop and leave every asset after it unopened, so one
+   * unreadable import cost you the whole reopen.
+   */
+  const unreadable: AssetId[] = [];
+  for (const [assetId, file] of loaded.media) {
+    const kind = project.assets[assetId]?.kind;
+    if (!kind) continue;
+    try {
+      await engine.openAsset(assetId, file, kind);
+    } catch {
+      unreadable.push(assetId);
+    }
+  }
+
+  if (unreadable.length > 0) {
+    // Same treatment as a file that has gone: the clips stay, and the library says
+    // which source needs replacing.
+    let marked = get().project();
+    for (const assetId of unreadable) {
+      marked = apply(marked, { type: 'setAssetStatus', assetId, status: { state: 'missing' } }, ids);
+    }
+    set({
+      history: initHistory(marked),
+      status: `${verb} "${marked.name}" — ${unreadable.length} file(s) could not be decoded.`,
+    });
+  }
+
+  engine.requestRender(get().playhead());
+  void get().buildPreviews();
+}
+
+/**
+ * What a placement changed beyond adding the clip, for the status line.
+ *
+ * Both of these alter the project in ways nobody asked for directly, so they have to
+ * be said out loud — a sequence that silently changed resolution is indistinguishable
+ * from a bug.
+ */
+function placementNotes(placement: PlacementPlan): string {
+  const notes: string[] = [];
+  if (placement.adoptedFormat) {
+    const { size, frameRate } = placement.adoptedFormat;
+    notes.push(
+      `sequence set to ${size.width}x${size.height} at ` +
+        `${T.fpsToNumber(frameRate).toFixed(2)} fps to match it`,
+    );
+  }
+  if (placement.fittedScale !== null) {
+    notes.push(`scaled to ${Math.round(placement.fittedScale * 100)}% to fit the frame`);
+  }
+  if (placement.createdTrackName) {
+    notes.push(`created ${placement.createdTrackName} for its other stream`);
+  }
+  return notes.length > 0 ? ` — ${notes.join(', ')}.` : '.';
+}
 
 /** Default export settings derived from the sequence. */
 export function defaultExportSettings(project: Project, sequenceId: SequenceId): ExportSettings {
@@ -1277,11 +1592,156 @@ export function appendPointFor(
   return end;
 }
 
+/**
+ * The bare cut nearest the playhead, or null when there is none to use.
+ *
+ * Shared by the command and by whatever offers it, so a button cannot claim a
+ * transition is available when running it would only produce an error. Searches the
+ * selected clips' tracks when there is a selection, and every track when there is not.
+ */
+function bareCutNearPlayhead(
+  state: StudioState,
+  trackId?: TrackId,
+): { from: Clip; to: Clip; distanceSeconds: number } | null {
+  const project = state.project();
+  const at = state.playhead();
+
+  const searched = trackId
+    ? [trackId]
+    : state.selection.length > 0
+      ? [...new Set(state.selection.map((id) => project.clips[id]?.trackId))].filter(
+          (id): id is TrackId => id !== undefined,
+        )
+      : orderedTrackIds(project, state.sequenceId);
+
+  let best: { from: Clip; to: Clip; distanceSeconds: number } | null = null;
+  for (const id of searched) {
+    const cut = nearestCut(project, id, at);
+    if (cut && (!best || cut.distanceSeconds < best.distanceSeconds)) best = cut;
+  }
+  return best;
+}
+
+/**
+ * Where a generated clip — a title, a colour — should go.
+ *
+ * Above the picture rather than through it. The topmost video track is used when it
+ * happens to be free at that moment; when something is already there, a new track is
+ * made above instead of carving a hole in it. This used to overwrite the top track
+ * unconditionally, which was survivable while a new project had a spare one and is
+ * not now that it has exactly one.
+ */
+function planGenerated(
+  project: Project,
+  sequenceId: SequenceId,
+  clip: NewClipSpec,
+): { commands: Command[]; createdTrack: boolean } {
+  const sequence = getSequence(project, sequenceId);
+  const top = sequence.videoTrackIds[sequence.videoTrackIds.length - 1];
+  const range = T.rangeFromBounds(clip.start, T.add(clip.start, clip.duration));
+
+  if (top !== undefined && clipsWithin(project, [top], range).length === 0) {
+    return {
+      commands: [{ type: 'insertClip', trackId: top, mode: 'overwrite', clip }],
+      createdTrack: false,
+    };
+  }
+
+  const trackId = ids.track();
+  return {
+    commands: [
+      {
+        type: 'addTrack',
+        sequenceId,
+        kind: 'video',
+        index: sequence.videoTrackIds.length,
+        trackId,
+      },
+      { type: 'insertClip', trackId, mode: 'overwrite', clip },
+    ],
+    createdTrack: true,
+  };
+}
+
 export interface PlacementPlan {
   readonly commands: readonly Command[];
   readonly start: Time;
   /** Name of a track that had to be created, for the status line. */
   readonly createdTrackName: string | null;
+  /** The sequence took its format from this clip, for the status line. */
+  readonly adoptedFormat: { readonly size: Size; readonly frameRate: FrameRate } | null;
+  /** The clip was scaled to fit a frame it did not match, for the status line. */
+  readonly fittedScale: number | null;
+}
+
+/**
+ * Natural size of an asset's picture, or null when it has none.
+ *
+ * A still reports through `image`; anything decoded reports through `video`.
+ */
+function visualSize(asset: Asset): Size | null {
+  const size = asset.video?.size ?? asset.image?.size ?? null;
+  return size && size.width > 0 && size.height > 0 ? size : null;
+}
+
+/**
+ * The format an empty sequence should take from the first thing put in it, or null
+ * to leave it alone.
+ *
+ * A sequence is created before any media exists, so its resolution is necessarily a
+ * guess — and the guess was always 1920x1080. Dropping a 576x360 recording into that
+ * drew it at native size in the middle of a frame three times too big, with no way to
+ * correct it. Taking the format from the footage is what every editor does with a new
+ * sequence, and it is the only answer that neither crops nor upscales.
+ *
+ * Restricted to video: a still is often a logo or a poster frame at some unrelated
+ * size, and letting one dictate the whole project would be worse than the guess. It
+ * also only applies while nothing has been cut yet, so it can never resize a sequence
+ * someone has started editing.
+ */
+export function formatToAdopt(
+  project: Project,
+  sequenceId: SequenceId,
+  asset: Asset,
+): { size: Size; frameRate: FrameRate } | null {
+  /*
+   * Decoded footage only, tested on `kind` rather than on the presence of a video
+   * stream. A still carries a synthetic one — `importImage` fills it in so an image
+   * can be laid on a video track — so asking whether `asset.video` exists lets a
+   * 4000x3000 logo declare itself the format of the whole project.
+   */
+  if (asset.kind !== 'video') return null;
+
+  const sequence = getSequence(project, sequenceId);
+  const empty = [...sequence.videoTrackIds, ...sequence.audioTrackIds].every(
+    (id) => (project.tracks[id]?.clipIds.length ?? 0) === 0,
+  );
+  if (!empty) return null;
+
+  const size = asset.video?.size;
+  if (!size || size.width <= 0 || size.height <= 0) return null;
+
+  const frameRate = asset.video?.frameRate ?? sequence.frameRate;
+  const same =
+    size.width === sequence.size.width &&
+    size.height === sequence.size.height &&
+    frameRate.num === sequence.frameRate.num &&
+    frameRate.den === sequence.frameRate.den;
+  return same ? null : { size, frameRate };
+}
+
+/**
+ * Scale that fits a picture inside the frame without cropping it.
+ *
+ * 1 when it already fits exactly, so the common case adds no command at all. Larger
+ * sources shrink to contain; smaller ones are left alone rather than blown up —
+ * upscaling is lossy, and a clip deliberately placed small should stay small. The
+ * value is only a starting point either way; it is an ordinary clip transform the
+ * inspector can change.
+ */
+function fitScale(source: Size, frame: Size): number {
+  const scale = Math.min(frame.width / source.width, frame.height / source.height);
+  return scale < 1 ? scale : 1;
 }
 
 /**
@@ -1314,6 +1774,22 @@ export function planPlacement(
   let partnerTrackId = counterpartTrackId(project, sequenceId, trackId);
   let createdTrackName: string | null = null;
 
+  /*
+   * First footage into an empty sequence sets its format.
+   *
+   * Done before the clip goes in, so the fit below measures against the frame the
+   * sequence is about to have rather than the one it is leaving behind.
+   */
+  const adoptedFormat = formatToAdopt(project, sequenceId, asset);
+  if (adoptedFormat) {
+    commands.push({
+      type: 'setSequenceSettings',
+      sequenceId,
+      size: adoptedFormat.size,
+      frameRate: adoptedFormat.frameRate,
+    });
+  }
+
   if (needsPartner && !partnerTrackId && index >= 0) {
     // Fill the counterpart list up to the same index, so V3 pairs with a new A3.
     const prefix = partnerKind === 'video' ? 'V' : 'A';
@@ -1333,12 +1809,27 @@ export function planPlacement(
   // A still becomes an image clip, which trims without a source bound.
   const visualKind = asset.kind === 'image' ? 'image' : 'video';
 
+  /*
+   * A picture that does not match the frame is fitted to it.
+   *
+   * The compositor draws every layer at its own pixel size, so without this a clip
+   * that disagrees with the sequence either floats in a surround of black or hangs
+   * off the edges. Only bites when the sequence already had a format to keep — the
+   * adoption above makes the first clip an exact match, so it scales by 1.
+   */
+  const source = visualSize(asset);
+  const frame = adoptedFormat?.size ?? sequence.size;
+  const scale = source ? fitScale(source, frame) : 1;
+  const visualClipId = ids.clip();
+
   const clipFor = (kind: 'video' | 'audio' | 'image'): NewClipSpec => ({
     kind,
     assetId: asset.id,
     start,
     duration,
     name: asset.name,
+    // Only the picture needs an id up front, to scale it in the same batch.
+    ...(kind === 'audio' ? {} : { clipId: visualClipId }),
     ...(usesPartner ? { linkGroupId } : {}),
   });
 
@@ -1357,7 +1848,25 @@ export function planPlacement(
     });
   }
 
-  return { commands, start, createdTrackName };
+  const fitted = scale !== 1 && (track.kind === 'video' || usesPartner);
+  if (fitted) {
+    for (const key of ['transform.scaleX', 'transform.scaleY'] as const) {
+      commands.push({
+        type: 'setClipParam',
+        clipId: visualClipId,
+        key,
+        param: staticParam(scale),
+      });
+    }
+  }
+
+  return {
+    commands,
+    start,
+    createdTrackName,
+    adoptedFormat,
+    fittedScale: fitted ? scale : null,
+  };
 }
 
 /** Tracks in display order: video top-down (so V2 is above V1), then audio. */

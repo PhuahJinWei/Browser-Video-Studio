@@ -21,6 +21,47 @@ export function gainDbToPercent(db: number): number {
   return 10 ** (db / 20) * 100;
 }
 
+/** The inverse, for controls that are driven in percent. */
+export function percentToGainDb(percent: number): number {
+  if (percent <= 0) return GAIN_FLOOR_DB;
+  return 20 * Math.log10(percent / 100);
+}
+
+/**
+ * How far a volume control goes, in percent.
+ *
+ * A volume slider is driven in percent rather than in decibels, and the two must
+ * agree about where things are. Spacing the travel in decibels while labelling it in
+ * percent put unity at 83% of the way along, made the middle of the slider read 6%,
+ * and ended the range at 398% — a number that is neither round nor reachable.
+ *
+ * Doubling is as far as boosting usefully goes before a recording needs fixing at
+ * source, so 200 puts unity in the middle where a reader expects to find it.
+ *
+ * The cost, stated plainly: percent is linear in amplitude, so everything below
+ * -20 dB now lives in the bottom twentieth of the travel. Fine fades are better done
+ * in the inspector, where the number is visible and the arrow keys step by one.
+ */
+export const GAIN_PERCENT_MAX = 200;
+export const GAIN_PERCENT_UNITY = 100;
+
+/** A plain percentage, for controls that are already counted in it. */
+export function formatPercent(value: number): string {
+  return `${Math.round(value)}%`;
+}
+
+/**
+ * Pan, as a side and an amount.
+ *
+ * `-0.35` says nothing about which speaker it favours. Naming the side is the whole
+ * content of the control, and the number alone was leaving it out.
+ */
+export function formatPan(value: number): string {
+  const amount = Math.round(Math.abs(value) * 100);
+  if (amount === 0) return 'Centre';
+  return `${value < 0 ? 'L' : 'R'} ${amount}%`;
+}
+
 /**
  * Gain as a percentage, for the controls people reach for first.
  *

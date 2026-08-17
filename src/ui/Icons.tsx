@@ -448,3 +448,12 @@ export const IconToggleOff = (p: IconProps): React.JSX.Element => (
     <circle cx="7" cy="12" r="2.6" fill="currentColor" stroke="none" />
   </Svg>
 );
+
+/** Overflow actions that do not deserve permanent track-header space. */
+export const IconMore = (p: IconProps): React.JSX.Element => (
+  <Svg {...p}>
+    <circle cx="5" cy="12" r="1.25" fill="currentColor" stroke="none" />
+    <circle cx="12" cy="12" r="1.25" fill="currentColor" stroke="none" />
+    <circle cx="19" cy="12" r="1.25" fill="currentColor" stroke="none" />
+  </Svg>
+);

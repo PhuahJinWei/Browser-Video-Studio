@@ -22,6 +22,18 @@ export function Preview(): React.JSX.Element {
     void attachEngine(canvasRef.current).then(() => restoreLastProject());
   }, [attachEngine, restoreLastProject]);
 
+  /*
+   * Keep the compositor's render targets on the sequence's resolution.
+   *
+   * The canvas below follows it through its width/height attributes, but the
+   * compositor allocates its targets once — so a sequence that changes size, as it
+   * now does when it takes its format from the first clip, would leave the two
+   * disagreeing and the last composite stretched over the new canvas.
+   */
+  useEffect(() => {
+    useStudio.getState().engine?.setSize(sequence.size);
+  }, [sequence.size.width, sequence.size.height]);
+
   return (
     <div className="preview-panel">
       <div className="preview">

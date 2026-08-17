@@ -190,6 +190,31 @@ describe('schema migration', () => {
     expect(migrated.name).toBe(current.name);
   });
 
+  it('widens only audio tracks that still use the legacy 56px default', () => {
+    const legacy = {
+      ...f.project,
+      schemaVersion: 4,
+      tracks: {
+        ...f.project.tracks,
+        [f.a1]: { ...f.project.tracks[f.a1]!, height: 56 },
+        [f.v1]: { ...f.project.tracks[f.v1]!, height: 56 },
+      },
+    };
+
+    const migrated = migrateProject(legacy);
+    expect(migrated.tracks[f.a1]!.height).toBe(72);
+    expect(migrated.tracks[f.v1]!.height).toBe(56);
+
+    const customized = migrateProject({
+      ...legacy,
+      tracks: {
+        ...legacy.tracks,
+        [f.a1]: { ...f.project.tracks[f.a1]!, height: 40 },
+      },
+    });
+    expect(customized.tracks[f.a1]!.height).toBe(40);
+  });
+
   it('leaves a current project alone', () => {
     const current = run(f, insertCommand(f, { trackId: f.v1, start: sec(0), duration: sec(2) }));
     expect(needsMigration(current)).toBe(false);

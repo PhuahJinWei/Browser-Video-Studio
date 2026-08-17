@@ -37,6 +37,12 @@ import type {
 // ---------------------------------------------------------------------------
 
 export interface Draft {
+  /**
+   * The project's own name. Not an entity map, but renaming is an edit like any
+   * other — it belongs on the undo stack rather than being written behind the
+   * document's back.
+   */
+  name: string;
   assets: Record<AssetId, Asset>;
   sequences: Record<SequenceId, Sequence>;
   tracks: Record<TrackId, Track>;
@@ -49,6 +55,7 @@ export interface Draft {
 /** Shallow-copy the entity maps so handlers can mutate freely. */
 export function newDraft(p: Project): Draft {
   return {
+    name: p.name,
     assets: { ...p.assets },
     sequences: { ...p.sequences },
     tracks: { ...p.tracks },
@@ -85,6 +92,7 @@ function reuseIfUnchanged<V>(
 export function commitDraft(p: Project, d: Draft): Project {
   return {
     ...p,
+    name: d.name,
     assets: reuseIfUnchanged(p.assets, d.assets),
     sequences: reuseIfUnchanged(p.sequences, d.sequences),
     tracks: reuseIfUnchanged(p.tracks, d.tracks),

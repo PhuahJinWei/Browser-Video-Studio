@@ -8,7 +8,12 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Command } from '../model/commands';
-import type { PreviewCache } from '../engine/previews';
+import { DEFAULT_TRACK_HEIGHT } from '../model/factories';
+import {
+  densityForZoom,
+  type PreviewCache,
+  waveformDensityForZoom,
+} from '../engine/previews';
 import {
   clipEnd,
   clipFitsTrack,
@@ -16,7 +21,6 @@ import {
   getTrack,
   isGrouped,
   isMediaClip,
-  nearestCut,
   pairedCuts,
   pairedTransitions,
   selectionUnit,
@@ -29,6 +33,7 @@ import { staticParam } from '../model/params';
 import * as T from '../model/time';
 import { TRANSITION_TYPES } from '../model/types';
 import type {
+  Asset,
   Clip,
   ClipId,
   FrameRate,
@@ -42,10 +47,11 @@ import type {
   TransitionId,
 } from '../model/types';
 import { useContextMenu, type MenuEntry } from './ContextMenu';
+import { planGapInsert } from './insertGap';
+import { shiftedTrack } from './trackShift';
 import {
   IconAlert,
   IconAudio,
-  IconClose,
   IconFade,
   IconEye,
   IconEyeOff,
@@ -54,6 +60,7 @@ import {
   IconLink,
   IconLock,
   IconMarker,
+  IconMore,
   IconMuted,
   IconNextEdit,
   IconPlus,
@@ -70,12 +77,31 @@ import {
   IconVideo,
   IconVolume,
 } from './Icons';
-import { formatGain, formatGainPercent } from './format';
-import { useLayout } from './layout';
+import { Fader } from './Fader';
+import {
+  formatGain,
+  formatGainPercent,
+  formatPercent,
+  GAIN_PERCENT_MAX,
+  GAIN_PERCENT_UNITY,
+  gainDbToPercent,
+  percentToGainDb,
+} from './format';
+import {
+  TIMELINE_VIDEO_RATIO_MAX,
+  TIMELINE_VIDEO_RATIO_MIN,
+  useLayout,
+} from './layout';
 import { appendPointFor, counterpartTrackId, orderedTrackIds, useStudio } from './store';
 import {
+  clampTrackHeight,
+  isExpandedTrackHeader,
+  TRACK_HEIGHT_MAX,
+  TRACK_HEIGHT_MIN,
+  TRACK_HEIGHT_STEP,
+} from './trackHeight';
+import {
   DEFAULT_TRANSITION_SECONDS,
-  TRANSITION_DRAG_TYPE,
   transitionLabel,
   transitionShortLabel,
 } from './transitions';
@@ -83,11 +109,10 @@ import {
 /**
  * Width of the sticky track-header column.
  *
- * Wide enough for an audio row's name, mute, solo, fader, lock and remove
- * without the name being squeezed to nothing.
+ * Wide enough for an expanded audio header's identity and mixing rows.
  */
 const HEADER_WIDTH = 216;
-const MIN_TRACK_HEIGHT = 36;
+const TRACK_SECTION_DIVIDER_HEIGHT = 8;
 const MIN_TAIL_SECONDS = 10;
 const SNAP_PIXELS = 8;
 
@@ -234,6 +259,19 @@ interface DragState {
   readonly originTrackId: TrackId;
   /** Every clip that moves with this one (linked audio/video). */
   readonly groupIds: readonly ClipId[];
+  /**
+   * Where each of them started.
+   *
+   * A move edits the document on every pointer event rather than drawing a
+   * proxy, so once the drag is under way nothing on screen remembers where the
+   * clips came from. This is what the outline left behind is drawn from.
+   */
+  readonly origins: readonly {
+    readonly clipId: ClipId;
+    readonly trackId: TrackId;
+    readonly start: Time;
+    readonly duration: Time;
+  }[];
 }
 
 /**
@@ -326,13 +364,16 @@ export function Timeline(): React.JSX.Element {
   const selectWithin = useStudio((s) => s.selectWithin);
   const setInspectorOpen = useLayout((s) => s.setInspectorOpen);
   const inspectorOpen = useLayout((s) => s.inspectorOpen);
+  const timelineVideoRatio = useLayout((s) => s.timelineVideoRatio);
+  const setTimelineVideoRatio = useLayout((s) => s.setTimelineVideoRatio);
+  const setTimelinePaneScroll = useLayout((s) => s.setTimelinePaneScroll);
   const setStatus = useStudio((s) => s.setStatus);
-  const setError = useStudio((s) => s.setError);
   const selectedTransitionId = useStudio((s) => s.selectedTransitionId);
   const selectedTrackId = useStudio((s) => s.selectedTrackId);
   const toggleSelect = useStudio((s) => s.toggleSelect);
   const setPlayhead = useStudio((s) => s.setPlayhead);
   const setZoom = useStudio((s) => s.setZoom);
+  const refreshPreviewDensity = useStudio((s) => s.refreshPreviewDensity);
   const duration = useStudio((s) => s.duration);
   const previews = useStudio((s) => s.previews);
   const dropAssetOnTrack = useStudio((s) => s.dropAssetOnTrack);
@@ -349,6 +390,9 @@ export function Timeline(): React.JSX.Element {
   zoomRef.current = pxPerSecond;
   const playhead = sequence.view.playhead;
   const trackIds = useMemo(() => orderedTrackIds(project, sequenceId), [project, sequenceId]);
+  const previewGeometryKey = trackIds
+    .map((trackId) => Math.max(TRACK_HEIGHT_MIN, getTrack(project, trackId).height))
+    .join(':');
 
   /**
    * Usable width of the pane, tracked so the ruler can fill it.
@@ -358,6 +402,9 @@ export function Timeline(): React.JSX.Element {
    * down the right-hand side. Measuring the pane is the only way to know how much
    * further they have to reach.
    */
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const videoPaneRef = useRef<HTMLDivElement>(null);
+  const audioPaneRef = useRef<HTMLDivElement>(null);
   const [paneWidth, setPaneWidth] = useState(0);
   useLayoutEffect(() => {
     const el = scrollRef.current;
@@ -370,6 +417,12 @@ export function Timeline(): React.JSX.Element {
     return () => observer.disconnect();
   }, []);
 
+  useLayoutEffect(() => {
+    const layout = useLayout.getState();
+    if (videoPaneRef.current) videoPaneRef.current.scrollTop = layout.timelineVideoScrollTop;
+    if (audioPaneRef.current) audioPaneRef.current.scrollTop = layout.timelineAudioScrollTop;
+  }, []);
+
   const tailSeconds = Math.max(T.toSeconds(duration()) + MIN_TAIL_SECONDS, MIN_TAIL_SECONDS);
   // Whichever is longer: the material, or enough to reach the right-hand edge.
   const contentWidth = Math.max(
@@ -378,7 +431,6 @@ export function Timeline(): React.JSX.Element {
   );
   const totalSeconds = contentWidth / pxPerSecond;
 
-  const scrollRef = useRef<HTMLDivElement>(null);
   const lanesRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [transitionDrag, setTransitionDrag] = useState<TransitionDragState | null>(null);
@@ -438,11 +490,26 @@ export function Timeline(): React.JSX.Element {
         const current = latest.project().clips[clip.id];
         if (!current) return;
         const detail = clipDetails(latest.project(), current, frameRateRef.current);
-        setHoverCard({ clientX, clientY, ...detail, subtitle: detail.subtitle });
+        setHoverCard({ subjectId: clip.id, clientX, clientY, ...detail, subtitle: detail.subtitle });
       }, HOVER_DELAY_MS);
     },
     [],
   );
+
+  /*
+   * Drop the card when the clip it describes goes.
+   *
+   * Deleting whatever is under the pointer unmounts it, so no `pointerleave` ever
+   * arrives and the card is left describing a clip that is not there any more. The
+   * same applies to undo, to a ripple delete taking a neighbour, and to a split
+   * replacing one clip with two.
+   */
+  useEffect(() => {
+    if (hoverCard && !project.clips[hoverCard.subjectId as ClipId]) cancelHover();
+  }, [project.clips, hoverCard, cancelHover]);
+
+  // A pending card must not land after this panel has gone.
+  useEffect(() => cancelHover, [cancelHover]);
 
   /** Clear everything a gesture puts on screen. */
   const clearGestureHints = useCallback((): void => {
@@ -527,6 +594,10 @@ export function Timeline(): React.JSX.Element {
     const lanes = lanesRef.current?.querySelectorAll<HTMLElement>('[data-track-id]');
     if (!lanes) return null;
     for (const lane of lanes) {
+      const pane = lane.closest<HTMLElement>('.timeline-pane');
+      if (!pane) continue;
+      const paneRect = pane.getBoundingClientRect();
+      if (clientY < paneRect.top || clientY > paneRect.bottom) continue;
       const rect = lane.getBoundingClientRect();
       if (clientY >= rect.top && clientY <= rect.bottom) {
         return (lane.dataset.trackId ?? null) as TrackId | null;
@@ -544,12 +615,36 @@ export function Timeline(): React.JSX.Element {
 
     const found: TrackId[] = [];
     for (const lane of lanes) {
+      const pane = lane.closest<HTMLElement>('.timeline-pane');
+      if (!pane) continue;
+      const paneRect = pane.getBoundingClientRect();
       const rect = lane.getBoundingClientRect();
-      if (rect.bottom < top || rect.top > bottom) continue;
+      const visibleTop = Math.max(rect.top, paneRect.top);
+      const visibleBottom = Math.min(rect.bottom, paneRect.bottom);
+      if (visibleBottom < visibleTop || visibleBottom < top || visibleTop > bottom) continue;
       const id = lane.dataset.trackId;
       if (id) found.push(id as TrackId);
     }
     return found;
+  }, []);
+
+  /** Keep a dragged clip or asset moving through a pane's independently-scrolled stack. */
+  const autoScrollPaneAt = useCallback((clientY: number): void => {
+    const threshold = 32;
+    const maximumStep = 18;
+    for (const pane of [videoPaneRef.current, audioPaneRef.current]) {
+      if (!pane) continue;
+      const rect = pane.getBoundingClientRect();
+      if (clientY < rect.top || clientY > rect.bottom) continue;
+      const fromTop = clientY - rect.top;
+      const fromBottom = rect.bottom - clientY;
+      if (fromTop < threshold) {
+        pane.scrollTop -= Math.ceil(maximumStep * (1 - fromTop / threshold));
+      } else if (fromBottom < threshold) {
+        pane.scrollTop += Math.ceil(maximumStep * (1 - fromBottom / threshold));
+      }
+      return;
+    }
   }, []);
 
   const timeAtClientX = useCallback(
@@ -607,70 +702,113 @@ export function Timeline(): React.JSX.Element {
    * cannot land anyway. That makes the gesture unambiguous without a proximity band
    * that would fire on the ordinary vertical drift of a horizontal drag.
    */
-  // Trimming cannot make a track, so the gaps are for a move and nothing else.
-  const clipDragging = drag?.kind === 'move';
+  /** What a drop in a gap would make, shared by the ghosts and by the drop itself. */
+  const gapPlan = useMemo(
+    () =>
+      drag && insertion
+        ? planGapInsert(project, sequence, drag.clipId, drag.groupIds, insertion)
+        : null,
+    [drag, insertion, project, sequence],
+  );
 
   /**
-   * The dragged clip, drawn where it would land rather than left behind on its old
-   * lane. The document is not touched — the track does not exist until the drop —
-   * so this is the one place the timeline shows something the project does not yet
-   * contain.
+   * The dragged clips, drawn where they would land rather than left behind on their
+   * old lanes. The document is not touched — the tracks do not exist until the drop
+   * — so this is the one place the timeline shows something the project does not
+   * yet contain.
    */
-  const insertGhost = useMemo(() => {
-    if (!drag || !insertion) return null;
-    const clip = project.clips[drag.clipId];
-    if (!clip) return null;
+  const insertGhosts = useMemo(() => {
+    const sides: { above: InsertGhost[]; below: InsertGhost[] } = { above: [], below: [] };
+    if (!gapPlan) return sides;
 
-    return {
-      where: insertion.where,
-      left: T.toSeconds(clip.start) * pxPerSecond,
-      width: Math.max(2, T.toSeconds(clip.duration) * pxPerSecond),
-      name: clip.name,
-      kind: clip.kind === 'audio' ? 'audio' : clip.kind === 'title' ? 'title' : clip.kind === 'solid' ? 'solid' : 'video',
-      height: Math.max(MIN_TRACK_HEIGHT, getTrack(project, clip.trackId).height),
-      fill: clip.kind === 'solid' ? clip.fill : undefined,
+    const ghostFor = (clip: Clip): InsertGhost => {
+      const height = Math.max(TRACK_HEIGHT_MIN, getTrack(project, clip.trackId).height);
+      const asset = isMediaClip(clip) ? project.assets[clip.assetId] : undefined;
+      const preview = previewStyle(clip, pxPerSecond, previews, asset, height);
+      return {
+        id: clip.id,
+        left: T.toSeconds(clip.start) * pxPerSecond,
+        width: Math.max(2, T.toSeconds(clip.duration) * pxPerSecond),
+        kind: clipKindClass(clip),
+        height,
+        appearance: {
+          ...(preview ? { backgroundColor: 'var(--clip-bed)' } : {}),
+          ...preview,
+          ...(clip.kind === 'solid' ? { background: clip.fill } : {}),
+        },
+      };
     };
-  }, [drag, insertion, project, pxPerSecond]);
+
+    sides[gapPlan.primaryTrack.side].push(ghostFor(gapPlan.primary));
+    if (gapPlan.partnerTrack) {
+      for (const partner of gapPlan.partners) sides[gapPlan.partnerTrack.side].push(ghostFor(partner));
+    }
+    return sides;
+  }, [gapPlan, project, pxPerSecond, previews]);
+
+  /** Clips whose lane copy the ghosts stand in for, so neither is drawn twice. */
+  const relocatingIds = useMemo(
+    () =>
+      new Set<ClipId>(
+        gapPlan ? [gapPlan.primary.id, ...(gapPlan.partnerTrack ? gapPlan.partners.map((c) => c.id) : [])] : [],
+      ),
+    [gapPlan],
+  );
 
   const insertionAt = useCallback(
     (clientY: number, clipKind: Clip['kind']): Insertion | null => {
-      const lanes = [...(lanesRef.current?.querySelectorAll<HTMLElement>('[data-track-id]') ?? [])];
-      if (lanes.length === 0) return null;
+      // Nothing to insert relative to yet.
+      if (!lanesRef.current?.querySelector('[data-track-id]')) return null;
 
-      const rects = lanes.map((lane) => lane.getBoundingClientRect());
+      // Each adaptive tail is both the spare pane space and the new-track target.
+      // Hit-testing it directly keeps the ruler and the opposite media section out.
+      const zone = [...(lanesRef.current?.querySelectorAll<HTMLElement>('[data-insert-gap]') ?? [])]
+        .map((element) => ({
+          side: element.dataset.insertGap,
+          rect: element.getBoundingClientRect(),
+          paneRect: element.closest<HTMLElement>('.timeline-pane')?.getBoundingClientRect(),
+        }))
+        .find(
+          ({ rect, paneRect }) =>
+            paneRect &&
+            clientY >= paneRect.top &&
+            clientY <= paneRect.bottom &&
+            clientY >= rect.top &&
+            clientY <= rect.bottom,
+        );
+      if (!zone) return null;
+
       const videoCount = sequence.videoTrackIds.length;
       const trackKind: TrackKind = clipFitsTrack(clipKind, 'video') ? 'video' : 'audio';
-
-      // The span of display rows this kind occupies. Video is listed top-down, so
-      // the video block always runs from row 0 to row videoCount - 1.
-      const first = trackKind === 'video' ? 0 : videoCount;
-      const last = (trackKind === 'video' ? videoCount : rects.length) - 1;
-      const empty = first > last;
-
+      // Each section owns its outward edge: video tracks are created above the
+      // video stack, audio tracks below the audio stack. Crossing the divider is a
+      // track move, not an invitation to create the other kind in the wrong pane.
+      if (
+        (zone.side === 'top' && trackKind !== 'video') ||
+        (zone.side === 'bottom' && trackKind !== 'audio')
+      ) {
+        return null;
+      }
       const label = `New ${trackKind} track`;
-      // Above the block: the new track goes on top of that kind's stack. For video
+
+      // Above everything: the new track goes on top of that kind's stack. For video
       // that is the end of `videoTrackIds`, since display order reverses it.
-      if (!empty && clientY < rects[first]!.top) {
+      if (zone.side === 'top') {
         return {
           where: 'above',
           trackKind,
           index: trackKind === 'video' ? videoCount : 0,
-          clientY: rects[first]!.top,
+          clientY: zone.rect.bottom,
           label,
         };
       }
-      // Below the block: the bottom of that kind's stack.
-      const bottom = empty ? rects[rects.length - 1]!.bottom : rects[last]!.bottom;
-      if (clientY > bottom) {
-        return {
-          where: 'below',
-          trackKind,
-          index: trackKind === 'video' ? 0 : sequence.audioTrackIds.length,
-          clientY: bottom,
-          label,
-        };
-      }
-      return null;
+      return {
+        where: 'below',
+        trackKind,
+        index: trackKind === 'video' ? 0 : sequence.audioTrackIds.length,
+        clientY: zone.rect.top,
+        label,
+      };
     },
     [sequence.videoTrackIds.length, sequence.audioTrackIds.length],
   );
@@ -683,6 +821,7 @@ export function Timeline(): React.JSX.Element {
     const move = (event: PointerEvent): void => {
       const clip = project.clips[drag.clipId];
       if (!clip) return;
+      autoScrollPaneAt(event.clientY);
 
       const deltaSeconds = (event.clientX - drag.originClientX) / pxPerSecond;
       const delta = T.fromSeconds(deltaSeconds, 100_000);
@@ -721,14 +860,28 @@ export function Timeline(): React.JSX.Element {
         setSnapMark(snapped.hit !== null && T.eq(target, snapped.at) ? snapped.hit : null);
 
         // Recompute from the drag origin each time so the gesture is not cumulative.
+        // That has to include the vertical step: reading a member's *current* track
+        // would measure each move against the last one, so a drag up and back down
+        // would shift it twice and then find nothing left to undo.
+        const originTracks = new Map(drag.origins.map((origin) => [origin.clipId, origin.trackId]));
         const moves = drag.groupIds
           .map((id) => project.clips[id])
           .filter((c): c is Clip => c !== undefined)
           .map((c) => ({
             clipId: c.id,
-            // Only the clip under the pointer changes track; its linked partner
-            // stays on its own, since audio cannot live on a video track anyway.
-            toTrackId: c.id === clip.id ? destination : c.trackId,
+            // The rest of the unit takes the same step through its own stack, so a
+            // linked pair stays a pair when the picture changes lane and a
+            // multi-track selection keeps its shape.
+            toTrackId:
+              c.id === clip.id
+                ? destination
+                : shiftedTrack(
+                    project,
+                    sequence,
+                    drag.originTrackId,
+                    destination,
+                    originTracks.get(c.id) ?? c.trackId,
+                  ),
             toStart: T.max(T.TIME_ZERO, T.add(target, T.sub(c.start, clip.start))),
           }));
 
@@ -789,22 +942,32 @@ export function Timeline(): React.JSX.Element {
         // been moving clips through it on every pointer event.
         const state = useStudio.getState();
         const latest = state.project();
-        const primary = latest.clips[drag.clipId];
+        const plan = planGapInsert(latest, sequence, drag.clipId, drag.groupIds, pending);
 
-        if (primary) {
+        if (plan) {
+          const partnerIds = new Set(plan.partnerTrack ? plan.partners.map((c) => c.id) : []);
           const moves = drag.groupIds
             .map((id) => latest.clips[id])
             .filter((c): c is Clip => c !== undefined)
             .map((c) => ({
               clipId: c.id,
-              // null lands on the track about to be made; a linked partner stays on
-              // its own, exactly as it does for an ordinary cross-track drag.
-              toTrackId: c.id === primary.id ? null : c.trackId,
+              // null lands on the track about to be made, and a linked partner on
+              // the second one. Anything else in the unit — a group of same-kind
+              // clips — stays on its own, as it does for a cross-track drag.
+              toTrackId: c.id === plan.primary.id || partnerIds.has(c.id) ? null : c.trackId,
               toStart: c.start,
             }));
-          // Same coalesce key as the drag, so the new track and the move it came
+          // Same coalesce key as the drag, so the new tracks and the move they came
           // from collapse into the one undo step the whole gesture deserves.
-          moveClipsToNewTrack(pending.trackKind, pending.index, moves, `drag:${drag.clipId}`);
+          moveClipsToNewTrack(
+            plan.primaryTrack.kind,
+            plan.primaryTrack.index,
+            moves,
+            `drag:${drag.clipId}`,
+            plan.partnerTrack
+              ? { kind: plan.partnerTrack.kind, index: plan.partnerTrack.index, clipIds: [...partnerIds] }
+              : undefined,
+          );
         }
       }
 
@@ -832,9 +995,11 @@ export function Timeline(): React.JSX.Element {
     trackAtClientY,
     insertionAt,
     moveClipsToNewTrack,
+    sequence,
     clearGestureHints,
     showHint,
     frameRate,
+    autoScrollPaneAt,
   ]);
 
   useEffect(() => {
@@ -929,28 +1094,6 @@ export function Timeline(): React.JSX.Element {
       window.removeEventListener('pointerup', up);
     };
   }, [transitionDrag, runMany, endGesture, timeAtClientX, showHint, clearGestureHints, frameRate]);
-
-  /**
-   * Drop a transition style onto a track: it lands on the cut closest to where
-   * the pointer was let go, since a transition belongs to a cut rather than to a
-   * position.
-   */
-  const dropTransitionOnTrack = (
-    transitionType: string,
-    trackId: TrackId,
-    at: Time,
-  ): void => {
-    const cut = nearestCut(project, trackId, at);
-    if (!cut) {
-      setError('No bare cut on that track to drop a transition on');
-      return;
-    }
-    addTransitionOnCuts(
-      pairedCuts(project, cut.from, cut.to),
-      transitionType,
-      T.fromSeconds(DEFAULT_TRANSITION_SECONDS, 1000),
-    );
-  };
 
   /**
    * Rubber-band selection.
@@ -1055,6 +1198,10 @@ export function Timeline(): React.JSX.Element {
       originDuration: clip.duration,
       originTrackId: clip.trackId,
       groupIds,
+      origins: groupIds
+        .map((id) => project.clips[id])
+        .filter((c): c is Clip => c !== undefined)
+        .map((c) => ({ clipId: c.id, trackId: c.trackId, start: c.start, duration: c.duration })),
     });
   };
 
@@ -1532,7 +1679,13 @@ export function Timeline(): React.JSX.Element {
     if (!el) return;
 
     const onWheel = (event: WheelEvent): void => {
-      if (!event.ctrlKey && !event.metaKey) return;
+      if (!event.ctrlKey && !event.metaKey) {
+        if (event.shiftKey && event.deltaY !== 0) {
+          event.preventDefault();
+          el.scrollLeft += event.deltaY;
+        }
+        return;
+      }
       event.preventDefault();
 
       const rect = el.getBoundingClientRect();
@@ -1558,7 +1711,32 @@ export function Timeline(): React.JSX.Element {
     if (!anchor || !el) return;
     pendingAnchor.current = null;
     el.scrollLeft = Math.max(0, anchor.seconds * pxPerSecond - anchor.offset);
+    el.style.setProperty('--timeline-scroll-x', `${Math.round(el.scrollLeft)}px`);
   }, [pxPerSecond]);
+
+  /**
+   * Tell the progressive filmstrip and waveform builders which source region
+   * deserves its first tile. Scroll and zoom both move this window; cached fallback
+   * layers stay visible underneath each new pass.
+   */
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const refreshVisiblePreviews = () => {
+      el.style.setProperty('--timeline-scroll-x', `${Math.round(el.scrollLeft)}px`);
+      const visibleWidth = Math.max(0, el.clientWidth - HEADER_WIDTH);
+      const startSeconds = Math.max(0, el.scrollLeft / zoomRef.current);
+      refreshPreviewDensity({
+        startSeconds,
+        endSeconds: startSeconds + visibleWidth / zoomRef.current,
+      });
+    };
+
+    refreshVisiblePreviews();
+    el.addEventListener('scroll', refreshVisiblePreviews, { passive: true });
+    return () => el.removeEventListener('scroll', refreshVisiblePreviews);
+  }, [paneWidth, previewGeometryKey, pxPerSecond, refreshPreviewDensity]);
 
   const ticks = useMemo(
     () => buildTicks(totalSeconds, pxPerSecond, sequence.frameRate),
@@ -1569,16 +1747,91 @@ export function Timeline(): React.JSX.Element {
   // 2px rule antialias across three columns and read as a soft grey smear.
   const playheadX = Math.round(T.toSeconds(playhead) * pxPerSecond);
 
+  const draggedClip = drag?.kind === 'move' ? project.clips[drag.clipId] : null;
+  const draggedClipTrackKind: TrackKind | null = draggedClip
+    ? clipFitsTrack(draggedClip.kind, 'video')
+      ? 'video'
+      : 'audio'
+    : null;
+  const canInsertVideo =
+    draggedClipTrackKind === 'video' || assetInsertionFor('top') !== null;
+  const canInsertAudio =
+    draggedClipTrackKind === 'audio' || assetInsertionFor('bottom') !== null;
+
+  /** Unused pane room doubles as a generous target without moving any tracks. */
+  const timelineTail = (paneKind: TrackKind): React.JSX.Element => {
+    const side = paneKind === 'video' ? 'top' : 'bottom';
+    const dragging = paneKind === 'video' ? canInsertVideo : canInsertAudio;
+    const ghosts = side === 'top' ? insertGhosts.above : insertGhosts.below;
+    const active =
+      (side === 'top' && insertion?.where === 'above') ||
+      (side === 'bottom' && insertion?.where === 'below') ||
+      assetInsertion?.where === side;
+
+    return (
+      <div
+        className={`timeline-tail ${side}${dragging ? ' insert-ready' : ''}${active ? ' insert-active' : ''}`}
+        data-insert-gap={side}
+        onPointerDown={(event) => {
+          if (event.target !== event.currentTarget) return;
+          if (!event.ctrlKey && !event.metaKey) select([]);
+        }}
+        onDragOver={(event) => {
+          if (!dragging || !event.dataTransfer.types.includes(ASSET_DRAG_TYPE)) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'copy';
+          setDropTrackId(null);
+          setAssetInsertion(assetInsertionFor(side));
+        }}
+        onDragLeave={(event) => {
+          if (event.currentTarget.contains(event.relatedTarget as Node)) return;
+          setAssetInsertion(null);
+        }}
+        onDrop={(event) => {
+          const assetId = event.dataTransfer.getData(ASSET_DRAG_TYPE);
+          if (!assetId) return;
+          event.preventDefault();
+          setAssetInsertion(null);
+          const target = assetInsertionFor(side);
+          if (target) dropAssetOnNewTrack(assetId as never, target.trackKind, target.index);
+        }}
+      >
+        <div className="tail-header" style={{ width: HEADER_WIDTH }} />
+        <div className="timeline-tail-lane">
+          {ghosts.map((ghost) => (
+            <div
+              key={ghost.id}
+              className={`insert-ghost ${ghost.kind}`}
+              style={{
+                left: ghost.left,
+                width: ghost.width,
+                height: ghost.height,
+                ...(side === 'top' ? { bottom: 0 } : { top: 0 }),
+                ...ghost.appearance,
+              }}
+            />
+          ))}
+          {dragging && ghosts.length === 0 && (
+            <span className="insert-tail-note">
+              {active ? 'Release' : 'Drop'} to create a new {paneKind} track
+            </span>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="timeline" ref={scrollRef}>
       {/*
-        One scroll container for the headers, the ruler and the lanes. The header
-        column is sticky-left and the ruler sticky-top, so both stay put while the
-        whole thing scrolls in either direction. Two separately-scrolling panes
-        (the previous arrangement) clipped vertically and left tracks unreachable.
+        The outer container owns the one shared horizontal time axis. Its wide child
+        creates the scrollbar; the sticky shell remains viewport-sized while each
+        track pane gets its own vertical overflow.
       */}
-      <div className="timeline-grid" style={{ width: HEADER_WIDTH + contentWidth }}>
-        <div className="timeline-topbar">
+      <div className="timeline-scroll-width" style={{ width: HEADER_WIDTH + contentWidth }}>
+        <div className="timeline-shell" style={{ width: paneWidth || '100%' }}>
+          <div className="timeline-topbar-viewport">
+            <div className="timeline-topbar" style={{ width: HEADER_WIDTH + contentWidth }}>
           <div className="timeline-corner" style={{ width: HEADER_WIDTH }}>
             <button
               className="icon"
@@ -1596,33 +1849,12 @@ export function Timeline(): React.JSX.Element {
             </button>
           </div>
           <div
-            className={`ruler${draggingAssetId ? ' insert-ready' : ''}${
-              assetInsertion?.where === 'top' ? ' insert-active' : ''
-            }`}
+            className="ruler"
             style={{ width: contentWidth }}
             onPointerDown={onRulerPointerDown}
             onPointerMove={onRulerPointerMove}
             onPointerUp={onRulerPointerUp}
             onContextMenu={openRulerMenu}
-            // Media dragged up above every lane means a new track on top, the same
-            // as it does for a clip. Handled here because the ruler is what actually
-            // occupies that space — there is no lane above the first one to catch it.
-            onDragOver={(event) => {
-              if (!event.dataTransfer.types.includes(ASSET_DRAG_TYPE)) return;
-              event.preventDefault();
-              event.dataTransfer.dropEffect = 'copy';
-              setDropTrackId(null);
-              setAssetInsertion(assetInsertionFor('top'));
-            }}
-            onDragLeave={() => setAssetInsertion(null)}
-            onDrop={(event) => {
-              const assetId = event.dataTransfer.getData(ASSET_DRAG_TYPE);
-              setAssetInsertion(null);
-              if (!assetId) return;
-              event.preventDefault();
-              const target = assetInsertionFor('top');
-              if (target) dropAssetOnNewTrack(assetId as never, target.trackKind, target.index);
-            }}
           >
             {ticks.map((tick) => (
               <div
@@ -1657,39 +1889,35 @@ export function Timeline(): React.JSX.Element {
               }}
               onPointerUp={() => clearGestureHints()}
             />
+              </div>
+            </div>
           </div>
-        </div>
 
-        <div className="timeline-body" ref={lanesRef}>
-          {/*
-            Real rows rather than a line drawn at the boundary. `insertionAt` fires
-            when the pointer is above the first lane or below the last, so a strip
-            occupying that space *is* the drop target — nothing else was needed to
-            make it work, only somewhere to aim.
-
-            They open for the whole drag rather than when the pointer nears an edge:
-            a gap that appears on approach moves the lanes, which moves the pointer
-            into a different row, which closes the gap again.
-          */}
-          <InsertGap
-            side="top"
-            dragging={clipDragging || Boolean(draggingAssetId)}
-            active={insertion?.where === 'above' || assetInsertion?.where === 'top'}
-            ghost={insertGhost?.where === 'above' ? insertGhost : null}
-            onAssetOver={() => {
-              setDropTrackId(null);
-              setAssetInsertion(assetInsertionFor('top'));
+          <div
+            className="timeline-split"
+            ref={lanesRef}
+            style={{
+              gridTemplateRows: `minmax(44px, ${timelineVideoRatio}fr) ${TRACK_SECTION_DIVIDER_HEIGHT}px minmax(44px, ${1 - timelineVideoRatio}fr)`,
             }}
-            onAssetLeave={() => setAssetInsertion(null)}
-            onAssetDrop={(assetId) => {
-              setAssetInsertion(null);
-              const target = assetInsertionFor('top');
-              if (target) dropAssetOnNewTrack(assetId as never, target.trackKind, target.index);
-            }}
-          />
-          {trackIds.map((trackId) => {
+          >
+            {(['video', 'audio'] as const).map((paneKind) => (
+              <div className={`timeline-pane-group ${paneKind}`} key={paneKind}>
+                <div
+                  className={`timeline-pane ${paneKind}`}
+                  ref={paneKind === 'video' ? videoPaneRef : audioPaneRef}
+                  onScroll={(event) =>
+                    setTimelinePaneScroll(paneKind, event.currentTarget.scrollTop)
+                  }
+                  onDragOver={(event) => autoScrollPaneAt(event.clientY)}
+                >
+                  <div
+                    className="timeline-pane-grid"
+                    style={{ width: HEADER_WIDTH + contentWidth }}
+                  >
+          {paneKind === 'video' && timelineTail('video')}
+          {trackIds.filter((trackId) => getTrack(project, trackId).kind === paneKind).map((trackId) => {
             const track = getTrack(project, trackId);
-            const height = Math.max(MIN_TRACK_HEIGHT, track.height);
+            const height = Math.max(TRACK_HEIGHT_MIN, track.height);
             return (
               <div className="timeline-row" key={trackId} style={{ height }}>
                 <TrackHeader
@@ -1707,11 +1935,6 @@ export function Timeline(): React.JSX.Element {
                   }`}
                   style={{ width: contentWidth }}
                   onDragOver={(event) => {
-                    if (event.dataTransfer.types.includes(TRANSITION_DRAG_TYPE)) {
-                      event.preventDefault();
-                      event.dataTransfer.dropEffect = 'copy';
-                      return;
-                    }
                     if (!event.dataTransfer.types.includes(ASSET_DRAG_TYPE)) return;
                     event.preventDefault();
                     event.dataTransfer.dropEffect = 'copy';
@@ -1722,14 +1945,6 @@ export function Timeline(): React.JSX.Element {
                     setDropTrackId((current) => (current === trackId ? null : current));
                   }}
                   onDrop={(event) => {
-                    const droppedTransition = event.dataTransfer.getData(TRANSITION_DRAG_TYPE);
-                    if (droppedTransition) {
-                      event.preventDefault();
-                      setDropTrackId(null);
-                      // The cut nearest where it was let go, on this track only.
-                      dropTransitionOnTrack(droppedTransition, trackId, timeAtClientX(event.clientX));
-                      return;
-                    }
                     const assetId = event.dataTransfer.getData(ASSET_DRAG_TYPE);
                     setDropTrackId(null);
                     if (!assetId) return;
@@ -1754,6 +1969,51 @@ export function Timeline(): React.JSX.Element {
                     if (event.target === event.currentTarget) openLaneMenu(event, trackId);
                   }}
                 >
+                  {/*
+                    Where the clips were when the drag started.
+
+                    Nothing else on screen says it: a move rewrites the document as
+                    the pointer travels, so the clip *is* at the new place and there
+                    is no proxy trailing behind it. Without this the only record of
+                    where a nudge began is your memory of it.
+                  */}
+                  {drag?.kind === 'move' &&
+                    drag.origins
+                      .filter((origin) => origin.trackId === trackId)
+                      .map((origin) => {
+                        const current = project.clips[origin.clipId];
+                        if (!current) return null;
+                        const original = {
+                          ...current,
+                          trackId: origin.trackId,
+                          start: origin.start,
+                          duration: origin.duration,
+                        };
+                        const asset = isMediaClip(original)
+                          ? project.assets[original.assetId]
+                          : undefined;
+                        const appearance = previewStyle(
+                          original,
+                          pxPerSecond,
+                          previews,
+                          asset,
+                          height,
+                        );
+                        return (
+                          <div
+                            key={origin.clipId}
+                            className={`clip drag-origin ${clipKindClass(original)}${appearance ? ' has-preview' : ''}`}
+                            style={{
+                              left: T.toSeconds(origin.start) * pxPerSecond,
+                              width: Math.max(2, T.toSeconds(origin.duration) * pxPerSecond),
+                              ...appearance,
+                              ...(original.kind === 'solid'
+                                ? { background: original.fill }
+                                : {}),
+                            }}
+                          />
+                        );
+                      })}
                   {dropGhosts?.trackIds.includes(trackId) && (
                     <div
                       className="drop-ghost"
@@ -1811,10 +2071,16 @@ export function Timeline(): React.JSX.Element {
                     <ClipView
                       key={clip.id}
                       clip={clip}
-                      relocating={insertion !== null && drag?.clipId === clip.id}
+                      relocating={relocatingIds.has(clip.id)}
                       pxPerSecond={pxPerSecond}
                       selected={selection.includes(clip.id)}
-                      preview={previewStyle(clip, pxPerSecond, previews)}
+                      preview={previewStyle(
+                        clip,
+                        pxPerSecond,
+                        previews,
+                        isMediaClip(clip) ? project.assets[clip.assetId] : undefined,
+                        height,
+                      )}
                       loading={isMediaClip(clip) && previews?.getFilmstrip(clip.assetId) === undefined
                         && previews?.getWaveform(clip.assetId) === undefined}
                       missing={
@@ -1901,75 +2167,21 @@ export function Timeline(): React.JSX.Element {
                       ),
                     )}
                 </div>
+                <TrackResizeHandle
+                  track={track}
+                  tracksOfKind={trackIds
+                    .map((id) => getTrack(project, id))
+                    .filter((candidate) => candidate.kind === track.kind)}
+                  onSelect={() => selectTrack(trackId)}
+                  onCommand={run}
+                  onCommandMany={runMany}
+                  onCommit={endGesture}
+                />
               </div>
             );
           })}
 
-          {/*
-            The space under the last lane. It exists because the grid is stretched to
-            fill the pane — which is also what lets the playhead run to the floor —
-            and it is the natural place to drop something to give it a track of its own.
-          */}
-          <InsertGap
-            side="bottom"
-            dragging={clipDragging || Boolean(draggingAssetId)}
-            active={insertion?.where === 'below' || assetInsertion?.where === 'bottom'}
-            ghost={insertGhost?.where === 'below' ? insertGhost : null}
-            onAssetOver={() => {
-              setDropTrackId(null);
-              setAssetInsertion(assetInsertionFor('bottom'));
-            }}
-            onAssetLeave={() => setAssetInsertion(null)}
-            onAssetDrop={(assetId) => {
-              setAssetInsertion(null);
-              const target = assetInsertionFor('bottom');
-              if (target) dropAssetOnNewTrack(assetId as never, target.trackKind, target.index);
-            }}
-          />
-
-          <div
-            className={`timeline-tail${draggingAssetId ? ' insert-ready' : ''}${
-              assetInsertion?.where === 'bottom' ? ' insert-active' : ''
-            }`}
-            onDragOver={(event) => {
-              if (!event.dataTransfer.types.includes(ASSET_DRAG_TYPE)) return;
-              event.preventDefault();
-              event.dataTransfer.dropEffect = 'copy';
-              setDropTrackId(null);
-              setAssetInsertion(assetInsertionFor('bottom'));
-            }}
-            onDragLeave={() => setAssetInsertion(null)}
-            onDrop={(event) => {
-              const assetId = event.dataTransfer.getData(ASSET_DRAG_TYPE);
-              setAssetInsertion(null);
-              if (!assetId) return;
-              event.preventDefault();
-              const target = assetInsertionFor('bottom');
-              if (target) dropAssetOnNewTrack(assetId as never, target.trackKind, target.index);
-            }}
-            onPointerDown={(event) => {
-              // Clicking past the end of the tracks clears the selection, the same as
-              // clicking bare lane does.
-              if (event.target !== event.currentTarget) return;
-              if (!event.ctrlKey && !event.metaKey) select([]);
-            }}
-          >
-            {/*
-              Carries the header column past the last track.
-
-              The column is built from one sticky header per row, so the strip below
-              the rows had nothing in it — and the playhead, which is drawn behind the
-              headers, reappeared inside the column's own width down here. This is the
-              missing piece of the column rather than decoration.
-            */}
-            <div className="tail-header" style={{ width: HEADER_WIDTH }} />
-            {draggingAssetId && assetInsertion?.where !== 'bottom' && (
-              <span className="insert-note hint">Drop here for a new track below</span>
-            )}
-            {assetInsertion?.where === 'bottom' && (
-              <span className="insert-note">New {assetInsertion.trackKind} track</span>
-            )}
-          </div>
+          {paneKind === 'audio' && timelineTail('audio')}
 
           {/*
             Below the lanes in the stacking order but above the clips, so the sticky
@@ -1986,9 +2198,20 @@ export function Timeline(): React.JSX.Element {
               }}
             />
           )}
-        </div>
+                  </div>
+                </div>
+                {paneKind === 'video' && (
+                  <TrackSectionDivider
+                    ratio={timelineVideoRatio}
+                    onChange={setTimelineVideoRatio}
+                  />
+                )}
+              </div>
+            ))}
+          </div>
 
-        {marquee && <MarqueeBox marquee={marquee} />}
+          {marquee && <MarqueeBox marquee={marquee} />}
+        </div>
       </div>
 
       {/*
@@ -2007,6 +2230,228 @@ export function Timeline(): React.JSX.Element {
 }
 
 // -------------------------------------------------------------------- pieces
+
+/** Allocates vertical room between the independently scrolling video/audio stacks. */
+function TrackSectionDivider({
+  ratio,
+  onChange,
+}: {
+  ratio: number;
+  onChange: (ratio: number) => void;
+}): React.JSX.Element {
+  const [dragging, setDragging] = useState(false);
+
+  useEffect(
+    () => () => document.body.classList.remove('resizing-track-sections'),
+    [],
+  );
+
+  const setFromClientY = (element: HTMLElement, clientY: number): void => {
+    const split = element.closest<HTMLElement>('.timeline-split');
+    if (!split) return;
+    const rect = split.getBoundingClientRect();
+    const available = Math.max(1, rect.height - TRACK_SECTION_DIVIDER_HEIGHT);
+    const next = (clientY - rect.top - TRACK_SECTION_DIVIDER_HEIGHT / 2) / available;
+    onChange(Math.max(TIMELINE_VIDEO_RATIO_MIN, Math.min(TIMELINE_VIDEO_RATIO_MAX, next)));
+  };
+
+  const finish = (): void => {
+    setDragging(false);
+    document.body.classList.remove('resizing-track-sections');
+  };
+
+  return (
+    <div
+      className={`track-section-divider${dragging ? ' dragging' : ''}`}
+      role="separator"
+      tabIndex={0}
+      aria-label="Resize video and audio track panes"
+      aria-orientation="horizontal"
+      aria-valuemin={Math.round(TIMELINE_VIDEO_RATIO_MIN * 100)}
+      aria-valuemax={Math.round(TIMELINE_VIDEO_RATIO_MAX * 100)}
+      aria-valuenow={Math.round(ratio * 100)}
+      title="Resize video and audio panes — double-click to balance"
+      onPointerDown={(event) => {
+        if (!isPrimaryButton(event)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        document.body.classList.add('resizing-track-sections');
+        setDragging(true);
+        setFromClientY(event.currentTarget, event.clientY);
+      }}
+      onPointerMove={(event) => {
+        if (!dragging || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
+        setFromClientY(event.currentTarget, event.clientY);
+      }}
+      onPointerUp={(event) => {
+        if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+        setFromClientY(event.currentTarget, event.clientY);
+        event.currentTarget.releasePointerCapture(event.pointerId);
+        finish();
+      }}
+      onPointerCancel={finish}
+      onLostPointerCapture={finish}
+      onDoubleClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onChange(0.5);
+      }}
+      onKeyDown={(event) => {
+        let next: number | null = null;
+        if (event.key === 'ArrowUp') next = ratio - 0.02;
+        else if (event.key === 'ArrowDown') next = ratio + 0.02;
+        else if (event.key === 'PageUp') next = ratio - 0.1;
+        else if (event.key === 'PageDown') next = ratio + 0.1;
+        else if (event.key === 'Home') next = TIMELINE_VIDEO_RATIO_MIN;
+        else if (event.key === 'End') next = TIMELINE_VIDEO_RATIO_MAX;
+        if (next === null) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onChange(Math.max(TIMELINE_VIDEO_RATIO_MIN, Math.min(TIMELINE_VIDEO_RATIO_MAX, next)));
+      }}
+    />
+  );
+}
+
+/** Direct manipulation for the height property that was previously Inspector-only. */
+function TrackResizeHandle({
+  track,
+  tracksOfKind,
+  onSelect,
+  onCommand,
+  onCommandMany,
+  onCommit,
+}: {
+  track: Track;
+  tracksOfKind: readonly Track[];
+  onSelect: () => void;
+  onCommand: (command: Command, label: string, coalesceKey?: string) => void;
+  onCommandMany: (commands: readonly Command[], label: string, coalesceKey?: string) => void;
+  onCommit: () => void;
+}): React.JSX.Element {
+  const drag = useRef<{
+    pointerId: number;
+    clientY: number;
+    height: number;
+    bases: readonly { trackId: TrackId; height: number }[] | null;
+    lastHeights: Map<TrackId, number> | null;
+  } | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  useEffect(
+    () => () => document.body.classList.remove('resizing-track'),
+    [],
+  );
+
+  const setHeight = (height: number): void => {
+    const clamped = clampTrackHeight(height);
+    const bases = drag.current?.bases;
+    if (bases) {
+      const delta = clamped - drag.current!.height;
+      const lastHeights = drag.current!.lastHeights!;
+      const commands = bases
+        .map((base) => ({
+          type: 'setTrackProps' as const,
+          trackId: base.trackId,
+          props: { height: clampTrackHeight(base.height + delta) },
+        }))
+        .filter((command) => command.props.height !== lastHeights.get(command.trackId));
+      if (commands.length === 0) return;
+      for (const command of commands) lastHeights.set(command.trackId, command.props.height!);
+      onCommandMany(commands, `Resize ${track.kind} tracks`, `height:${track.kind}:all`);
+      return;
+    }
+    if (clamped === track.height) return;
+    onCommand(
+      { type: 'setTrackProps', trackId: track.id, props: { height: clamped } },
+      'Resize track',
+      `height:${track.id}`,
+    );
+  };
+
+  const finish = (): void => {
+    if (!drag.current) return;
+    drag.current = null;
+    setDragging(false);
+    document.body.classList.remove('resizing-track');
+    onCommit();
+  };
+
+  return (
+    <div
+      className={`track-resize-handle${dragging ? ' dragging' : ''}`}
+      role="separator"
+      tabIndex={0}
+      aria-label={`Resize ${track.name}`}
+      aria-orientation="horizontal"
+      aria-valuemin={TRACK_HEIGHT_MIN}
+      aria-valuemax={TRACK_HEIGHT_MAX}
+      aria-valuenow={track.height}
+      title={`Resize ${track.name} — Shift-drag all ${track.kind} tracks · double-click to reset`}
+      onPointerDown={(event) => {
+        if (!isPrimaryButton(event)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onSelect();
+        drag.current = {
+          pointerId: event.pointerId,
+          clientY: event.clientY,
+          height: track.height,
+          bases: event.shiftKey
+            ? tracksOfKind.map((candidate) => ({
+                trackId: candidate.id,
+                height: candidate.height,
+              }))
+            : null,
+          lastHeights: event.shiftKey
+            ? new Map(tracksOfKind.map((candidate) => [candidate.id, candidate.height]))
+            : null,
+        };
+        event.currentTarget.setPointerCapture(event.pointerId);
+        document.body.classList.add('resizing-track');
+        setDragging(true);
+      }}
+      onPointerMove={(event) => {
+        const active = drag.current;
+        if (!active || active.pointerId !== event.pointerId) return;
+        setHeight(active.height + event.clientY - active.clientY);
+      }}
+      onPointerUp={(event) => {
+        const active = drag.current;
+        if (!active || active.pointerId !== event.pointerId) return;
+        setHeight(active.height + event.clientY - active.clientY);
+        finish();
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+      }}
+      onPointerCancel={finish}
+      onLostPointerCapture={finish}
+      onDoubleClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setHeight(DEFAULT_TRACK_HEIGHT);
+        onCommit();
+      }}
+      onKeyDown={(event) => {
+        let height: number | null = null;
+        if (event.key === 'ArrowUp') height = track.height - TRACK_HEIGHT_STEP;
+        else if (event.key === 'ArrowDown') height = track.height + TRACK_HEIGHT_STEP;
+        else if (event.key === 'PageUp') height = track.height - TRACK_HEIGHT_STEP * 5;
+        else if (event.key === 'PageDown') height = track.height + TRACK_HEIGHT_STEP * 5;
+        else if (event.key === 'Home') height = TRACK_HEIGHT_MIN;
+        else if (event.key === 'End') height = TRACK_HEIGHT_MAX;
+        if (height === null) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onSelect();
+        setHeight(height);
+        onCommit();
+      }}
+    />
+  );
+}
 
 function TrackHeader({
   track,
@@ -2100,9 +2545,38 @@ function TrackHeader({
     },
   ];
 
+  const expanded = isExpandedTrackHeader(track.height);
+  const operationalControls = track.kind === 'audio' ? (
+    <>
+      <button
+        className={`icon${track.muted ? ' on' : ''}`}
+        title={track.muted ? 'Unmute' : 'Mute'}
+        onClick={() => toggle({ muted: !track.muted }, 'Mute track')}
+      >
+        {track.muted ? <IconMuted /> : <IconVolume />}
+      </button>
+      <button
+        className={`icon${track.solo ? ' on' : ''}`}
+        title={track.solo ? 'Unsolo' : 'Solo'}
+        onClick={() => toggle({ solo: !track.solo }, 'Solo track')}
+      >
+        <IconSolo />
+      </button>
+      {expanded && <TrackVolume track={track} />}
+    </>
+  ) : (
+    <button
+      className={`icon${track.hidden ? ' on' : ''}`}
+      title={track.hidden ? 'Show track' : 'Hide track'}
+      onClick={() => toggle({ hidden: !track.hidden }, 'Hide track')}
+    >
+      {track.hidden ? <IconEyeOff /> : <IconEye />}
+    </button>
+  );
+
   return (
     <div
-      className={`track-header${selected ? ' selected' : ''}`}
+      className={`track-header ${expanded ? 'expanded' : 'compact'}${selected ? ' selected' : ''}`}
       style={{ width }}
       onPointerDown={(event) => {
         // Buttons and the rename field handle their own clicks.
@@ -2115,115 +2589,178 @@ function TrackHeader({
         menu.open(event, entries);
       }}
     >
-      <span className="track-kind">
-        {track.kind === 'audio' ? <IconAudio size={12} /> : <IconVideo size={12} />}
-      </span>
-      {renaming ? (
-        <input
-          className="rename-input"
-          value={draft}
-          autoFocus
-          onChange={(event) => setDraft(event.target.value)}
-          onBlur={commitRename}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') commitRename();
-            if (event.key === 'Escape') setRenaming(false);
-            event.stopPropagation();
-          }}
-          // The lane below would otherwise start a selection under the field.
-          onPointerDown={(event) => event.stopPropagation()}
-        />
-      ) : (
-        <span
-          className="label"
-          title={`${track.name} — double-click to rename`}
-          onDoubleClick={startRename}
-        >
-          {track.name}
+      <div className="track-header-row identity">
+        <span className="track-kind">
+          {track.kind === 'audio' ? <IconAudio size={12} /> : <IconVideo size={12} />}
         </span>
-      )}
-      {track.kind === 'audio' ? (
-        <>
-          <button
-            className={`icon${track.muted ? ' on' : ''}`}
-            title={track.muted ? 'Unmute' : 'Mute'}
-            onClick={() => toggle({ muted: !track.muted }, 'Mute track')}
+        {renaming ? (
+          <input
+            className="rename-input"
+            value={draft}
+            autoFocus
+            onChange={(event) => setDraft(event.target.value)}
+            onBlur={commitRename}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') commitRename();
+              if (event.key === 'Escape') setRenaming(false);
+              event.stopPropagation();
+            }}
+            // The lane below would otherwise start a selection under the field.
+            onPointerDown={(event) => event.stopPropagation()}
+          />
+        ) : (
+          <span
+            className="label"
+            title={`${track.name} — double-click to rename`}
+            onDoubleClick={startRename}
           >
-            {track.muted ? <IconMuted /> : <IconVolume />}
-          </button>
-          <button
-            className={`icon${track.solo ? ' on' : ''}`}
-            title="Solo"
-            onClick={() => toggle({ solo: !track.solo }, 'Solo track')}
-          >
-            <IconSolo />
-          </button>
-          <TrackVolume track={track} />
-        </>
-      ) : (
+            {track.name}
+          </span>
+        )}
+        {!expanded && operationalControls}
         <button
-          className={`icon${track.hidden ? ' on' : ''}`}
-          title={track.hidden ? 'Show track' : 'Hide track'}
-          onClick={() => toggle({ hidden: !track.hidden }, 'Hide track')}
+          className={`icon${track.locked ? ' on' : ''}`}
+          title={track.locked ? 'Unlock track' : 'Lock track'}
+          onClick={() => toggle({ locked: !track.locked }, 'Lock track')}
         >
-          {track.hidden ? <IconEyeOff /> : <IconEye />}
+          {track.locked ? <IconLock /> : <IconUnlocked />}
         </button>
-      )}
-      <button
-        className={`icon${track.locked ? ' on' : ''}`}
-        title={track.locked ? 'Unlock track' : 'Lock track'}
-        onClick={() => toggle({ locked: !track.locked }, 'Lock track')}
-      >
-        {track.locked ? <IconLock /> : <IconUnlocked />}
-      </button>
-      {removable && (
-        <button className="icon" title="Delete this track and its clips" onClick={remove}>
-          <IconClose />
+        <button
+          className="icon track-menu-button"
+          title="Track actions"
+          aria-label={`${track.name} actions`}
+          onClick={(event) => {
+            onSelect();
+            menu.open(event, entries);
+          }}
+        >
+          <IconMore />
         </button>
-      )}
+      </div>
+      {expanded && <div className="track-header-row operations">{operationalControls}</div>}
     </div>
   );
 }
 
 /**
- * Position the asset-wide filmstrip or waveform behind a clip.
+ * Position the asset-wide waveform or available filmstrip tile layers behind a clip.
  *
- * The image covers the whole source, so trimming and moving only shift a CSS
- * background — no re-rasterisation, and clips cut from one asset share one image.
+ * Coordinates stay source-wide, so trimming and moving only shift CSS backgrounds —
+ * no re-rasterisation, and clips cut from one asset share one cache.
  */
 function previewStyle(
   clip: Clip,
   pxPerSecond: number,
   previews: PreviewCache | null,
+  asset: Asset | undefined,
+  trackHeight: number,
 ): React.CSSProperties | undefined {
   if (!previews || !isMediaClip(clip)) return undefined;
 
-  const preview =
-    clip.kind === 'audio' ? previews.getWaveform(clip.assetId) : previews.getFilmstrip(clip.assetId);
-  if (!preview) return undefined;
+  const speed = Math.abs(clip.speed) || 1;
+  if (clip.kind !== 'audio') {
+    const size = asset?.video?.size;
+    const starter = previews.getFilmstrip(clip.assetId);
+    const frameAspect = starter && starter.frameWidth > 0 && starter.frameHeight > 0
+      ? starter.frameWidth / starter.frameHeight
+      : size && size.width > 0 && size.height > 0
+        ? size.width / size.height
+        : 16 / 9;
+    const preview = previews.getFilmstripPreview(
+      clip.assetId,
+      // One row separator plus the clip's two borders do not show image pixels.
+      densityForZoom(pxPerSecond, speed, frameAspect, Math.max(1, trackHeight - 3)),
+    );
+    if (!preview) return undefined;
 
-  // A still has no timeline of frames to map onto: tile the poster instead.
-  if (preview.sourceSeconds <= 0) {
+    // A still has no timeline of frames to map onto: tile the poster instead.
+    if (preview.sourceSeconds <= 0) {
+      const poster = preview.layers[0];
+      if (!poster) return undefined;
+      return {
+        backgroundImage: `url(${poster.url})`,
+        backgroundSize: 'auto 100%',
+        backgroundRepeat: 'repeat-x',
+        backgroundPosition: 'left center',
+      };
+    }
+
+    const clipSourceStart = T.toSeconds(clip.sourceIn);
+    const clipSourceEnd = clipSourceStart + T.toSeconds(clip.duration) * speed;
+    const layers = preview.layers.filter(
+      (layer) =>
+        layer.sourceStart < clipSourceEnd &&
+        layer.sourceStart + layer.sourceDuration > clipSourceStart,
+    );
+    if (layers.length === 0) return undefined;
+
+    /*
+     * The separator is CSS, not part of a thumbnail. Its one pixel therefore stays
+     * one pixel at every zoom instead of scaling into the dark scratches caused by
+     * the old baked gutters. The sampling density makes this period equal to the
+     * source frame's natural width at the visible track height.
+     */
+    const frameWidth = pxPerSecond / speed / preview.framesPerSecond;
+    const sourceOffset = (clipSourceStart / speed) * pxPerSecond;
+    const divider =
+      'linear-gradient(to right, transparent calc(100% - 1px), rgb(4 10 16 / 68%) calc(100% - 1px))';
+
     return {
-      backgroundImage: `url(${preview.url})`,
-      backgroundSize: 'auto 100%',
-      backgroundRepeat: 'repeat-x',
-      backgroundPosition: 'left center',
+      backgroundImage: [divider, ...layers.map((layer) => `url(${layer.url})`)].join(', '),
+      backgroundSize: [
+        `${frameWidth}px 100%`,
+        ...layers.map((layer) => `${(layer.sourceDuration / speed) * pxPerSecond}px 100%`),
+      ].join(', '),
+      backgroundPosition: [
+        `${-sourceOffset}px center`,
+        ...layers.map(
+          (layer) =>
+            `${((layer.sourceStart - clipSourceStart) / speed) * pxPerSecond}px center`,
+        ),
+      ].join(', '),
+      backgroundRepeat: ['repeat-x', ...layers.map(() => 'no-repeat')].join(', '),
     };
   }
 
-  const speed = Math.abs(clip.speed) || 1;
-  // Pixels the whole source would occupy at this zoom and speed.
-  const sourceWidth = (preview.sourceSeconds / speed) * pxPerSecond;
-  if (!Number.isFinite(sourceWidth) || sourceWidth <= 0) return undefined;
+  const preview = previews.getWaveformPreview(
+    clip.assetId,
+    waveformDensityForZoom(pxPerSecond, speed, window.devicePixelRatio),
+  );
+  if (!preview) return undefined;
 
-  const offset = (T.toSeconds(clip.sourceIn) / speed) * pxPerSecond;
+  const clipSourceStart = T.toSeconds(clip.sourceIn);
+  const clipSourceEnd = clipSourceStart + T.toSeconds(clip.duration) * speed;
+  const layers = preview.layers.filter(
+    (layer) =>
+      layer.sourceStart < clipSourceEnd &&
+      layer.sourceStart + layer.sourceDuration > clipSourceStart,
+  );
+  if (layers.length === 0) return undefined;
+
   return {
-    backgroundImage: `url(${preview.url})`,
-    backgroundSize: `${sourceWidth}px 100%`,
-    backgroundPosition: `${-offset}px center`,
-    backgroundRepeat: 'no-repeat',
+    backgroundImage: layers.map((layer) => `url(${layer.url})`).join(', '),
+    backgroundSize: layers
+      .map((layer) => `${(layer.sourceDuration / speed) * pxPerSecond}px 100%`)
+      .join(', '),
+    backgroundPosition: layers
+      .map(
+        (layer) =>
+          `${((layer.sourceStart - clipSourceStart) / speed) * pxPerSecond}px center`,
+      )
+      .join(', '),
+    backgroundRepeat: layers.map(() => 'no-repeat').join(', '),
   };
+}
+
+/** The visual family shared by clips and every drag representation of a clip. */
+function clipKindClass(clip: Clip): 'audio' | 'title' | 'solid' | 'video' {
+  return clip.kind === 'audio'
+    ? 'audio'
+    : clip.kind === 'title'
+      ? 'title'
+      : clip.kind === 'solid'
+        ? 'solid'
+        : 'video';
 }
 
 function ClipView({
@@ -2258,14 +2795,7 @@ function ClipView({
 }): React.JSX.Element {
   const left = T.toSeconds(clip.start) * pxPerSecond;
   const width = Math.max(2, T.toSeconds(clip.duration) * pxPerSecond);
-  const kindClass =
-    clip.kind === 'audio'
-      ? 'audio'
-      : clip.kind === 'title'
-        ? 'title'
-        : clip.kind === 'solid'
-          ? 'solid'
-          : 'video';
+  const kindClass = clipKindClass(clip);
   // A fill clip shows the colour it produces, so the timeline reads at a glance.
   const fillStyle = clip.kind === 'solid' ? { background: clip.fill } : undefined;
 
@@ -2365,6 +2895,15 @@ export interface HoverRow {
 }
 
 export interface HoverCardState {
+  /**
+   * What the card is describing — a clip id, or an asset id.
+   *
+   * The card holds a snapshot of the details rather than a live reference, which is
+   * what let it outlive its subject: deleting the thing under the pointer unmounts
+   * it, so `pointerleave` never fires and the card sat there describing something
+   * that no longer existed. Naming the subject is what lets the owner notice.
+   */
+  readonly subjectId: string;
   readonly clientX: number;
   readonly clientY: number;
   readonly title: string;
@@ -2460,35 +2999,38 @@ function TrackVolume({ track }: { track: Track }): React.JSX.Element {
   const db = staticValue(track.gainDb, 0);
 
   return (
-    <input
+    <Fader
       className="track-volume"
-      type="range"
-      min={-60}
-      max={12}
-      step={0.5}
-      value={db}
+      min={0}
+      max={GAIN_PERCENT_MAX}
+      step={1}
+      value={Math.round(gainDbToPercent(db))}
+      // Unity, which is where a track sits until someone moves it.
+      neutral={GAIN_PERCENT_UNITY}
+      neutralSnapSteps={5}
+      thumb={10}
+      format={formatPercent}
       title={`Track volume ${formatGain(db)} — double-click for 100%`}
-      onChange={(event) =>
+      ariaLabel={`${track.name} volume`}
+      onChange={(percent) =>
         run(
           {
             type: 'setTrackParam',
             trackId: track.id,
             key: 'gainDb',
-            param: staticParam(Number(event.target.value)),
+            param: staticParam(percentToGainDb(percent)),
           },
           'Set track volume',
           `gain:${track.id}`,
         )
       }
-      onPointerUp={endGesture}
-      onDoubleClick={() =>
+      onCommit={endGesture}
+      onReset={() =>
         run(
           { type: 'setTrackParam', trackId: track.id, key: 'gainDb', param: staticParam(0) },
           'Reset track volume',
         )
       }
-      // Otherwise the header behind it takes the drag and selects the track.
-      onPointerDown={(event) => event.stopPropagation()}
     />
   );
 }
@@ -2582,6 +3124,20 @@ function ClipVolume({ clip, x }: { clip: Clip; x: number }): React.JSX.Element |
   const run = useStudio((s) => s.run);
   const endGesture = useStudio((s) => s.endGesture);
   const [open, setOpen] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = (event: PointerEvent): void => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (buttonRef.current?.contains(target) || popoverRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    window.addEventListener('pointerdown', closeOutside, true);
+    return () => window.removeEventListener('pointerdown', closeOutside, true);
+  }, [open]);
 
   if (clip.kind !== 'audio') return null;
   const animated = clip.gainDb.kind !== 'static';
@@ -2590,6 +3146,7 @@ function ClipVolume({ clip, x }: { clip: Clip; x: number }): React.JSX.Element |
   return (
     <>
       <button
+        ref={buttonRef}
         className={`clip-affordance volume${db !== 0 ? ' on' : ''}`}
         style={{ left: x }}
         title={
@@ -2605,40 +3162,41 @@ function ClipVolume({ clip, x }: { clip: Clip; x: number }): React.JSX.Element |
 
       {open && (
         <div
+          ref={popoverRef}
           className="clip-volume-popover"
           // Centred on its button, but never pushed off the left of the lane — the
           // button now sits near a clip's start, and a clip can start at zero.
           style={{ left: Math.max(0, x + AFFORDANCE_WIDTH / 2 - 60) }}
           onPointerDown={(event) => event.stopPropagation()}
-          // Closing on leave rather than on an outside click: the lane beneath is a
-          // drag surface, and swallowing that click to dismiss a popover would eat
-          // the start of a marquee.
-          onPointerLeave={() => setOpen(false)}
         >
           {animated ? (
             <span className="hint">Keyframed</span>
           ) : (
             <>
-              <input
-                type="range"
-                min={-60}
-                max={12}
-                step={0.5}
-                value={db}
-                onChange={(event) =>
+              <Fader
+                className="clip-volume-fader"
+                min={0}
+                max={GAIN_PERCENT_MAX}
+                step={1}
+                value={Math.round(gainDbToPercent(db))}
+                neutral={GAIN_PERCENT_UNITY}
+                neutralSnapSteps={5}
+                format={formatPercent}
+                ariaLabel={`${clip.name} volume`}
+                onChange={(percent) =>
                   run(
                     {
                       type: 'setClipParam',
                       clipId: clip.id,
                       key: 'gainDb',
-                      param: staticParam(Number(event.target.value)),
+                      param: staticParam(percentToGainDb(percent)),
                     },
                     'Set clip volume',
                     `clip-gain:${clip.id}`,
                   )
                 }
-                onPointerUp={endGesture}
-                onDoubleClick={() =>
+                onCommit={endGesture}
+                onReset={() =>
                   run(
                     {
                       type: 'setClipParam',
@@ -2723,78 +3281,12 @@ function minorDivisions(step: number): number {
  * here instead.
  */
 interface InsertGhost {
+  readonly id: ClipId;
   readonly left: number;
   readonly width: number;
-  readonly name: string;
   readonly kind: string;
   readonly height: number;
-  readonly fill: string | undefined;
-}
-
-function InsertGap({
-  side,
-  dragging,
-  active,
-  ghost,
-  onAssetOver,
-  onAssetLeave,
-  onAssetDrop,
-}: {
-  side: 'top' | 'bottom';
-  dragging: boolean;
-  active: boolean;
-  ghost: InsertGhost | null;
-  onAssetOver: () => void;
-  onAssetLeave: () => void;
-  onAssetDrop: (assetId: string) => void;
-}): React.JSX.Element {
-  return (
-    <div className={`insert-gap ${side}${dragging ? ' dragging' : ''}${active ? ' active' : ''}`}>
-      <div className="insert-gap-header" style={{ width: HEADER_WIDTH }} />
-      <div
-        className="insert-gap-lane"
-        onDragOver={(event) => {
-          if (!event.dataTransfer.types.includes(ASSET_DRAG_TYPE)) return;
-          event.preventDefault();
-          event.dataTransfer.dropEffect = 'copy';
-          onAssetOver();
-        }}
-        onDragLeave={(event) => {
-          if (event.currentTarget.contains(event.relatedTarget as Node)) return;
-          onAssetLeave();
-        }}
-        onDrop={(event) => {
-          const assetId = event.dataTransfer.getData(ASSET_DRAG_TYPE);
-          if (!assetId) return;
-          event.preventDefault();
-          onAssetDrop(assetId);
-        }}
-      >
-        {ghost ? (
-          /*
-            Anchored to the edge the new track will be created against, so the clip
-            grows out of the gap the way it will once the track exists. The gap
-            clips the overflow, which is what makes it read as sliding in from
-            beyond the lanes rather than floating over them.
-          */
-          <div
-            className={`insert-ghost ${ghost.kind}`}
-            style={{
-              left: ghost.left,
-              width: ghost.width,
-              height: ghost.height,
-              ...(side === 'top' ? { bottom: 0 } : { top: 0 }),
-              ...(ghost.fill ? { background: ghost.fill } : {}),
-            }}
-          >
-            <span className="clip-name">{ghost.name}</span>
-          </div>
-        ) : (
-          <span>New track</span>
-        )}
-      </div>
-    </div>
-  );
+  readonly appearance: React.CSSProperties;
 }
 
 function buildTicks(
@@ -2856,4 +3348,3 @@ function formatTick(seconds: number, frameRate: FrameRate): string {
   const hours = Number(hh);
   return hours > 0 ? `${hh}:${mm}:${ss}:${ff}` : `${mm}:${ss}:${ff}`;
 }
-

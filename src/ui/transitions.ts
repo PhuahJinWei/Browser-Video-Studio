@@ -27,9 +27,6 @@ export const TRANSITION_SHORT_LABELS: Readonly<Record<TransitionType, string>> =
   'wipe.iris': 'Iris',
 };
 
-/** MIME type carrying a transition type when dragging from the transitions library. */
-export const TRANSITION_DRAG_TYPE = 'application/x-bvs-transition';
-
 /** Length a transition gets when added without a length being asked for. */
 export const DEFAULT_TRANSITION_SECONDS = 1;
 

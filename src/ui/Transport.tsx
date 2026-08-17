@@ -16,10 +16,10 @@ import {
   IconPrevEdit,
   IconSkipEnd,
   IconSkipStart,
-  IconSplit,
   IconStepBack,
   IconStepForward,
 } from './Icons';
+import { Scrubber } from './Scrubber';
 import { useStudio } from './store';
 
 export function Transport(): React.JSX.Element {
@@ -29,7 +29,6 @@ export function Transport(): React.JSX.Element {
   const togglePlay = useStudio((s) => s.togglePlay);
   const setPlayhead = useStudio((s) => s.setPlayhead);
   const duration = useStudio((s) => s.duration);
-  const splitAtPlayhead = useStudio((s) => s.splitAtPlayhead);
   const grabScreenshot = useStudio((s) => s.grabScreenshot);
   const [expanded, setExpanded] = useState(false);
 
@@ -119,93 +118,76 @@ export function Transport(): React.JSX.Element {
   const step = (frames: number): void =>
     setPlayhead(T.clamp(T.add(at, T.mulInt(frame, frames)), T.TIME_ZERO, total));
 
-  const splitHere = (): void =>
-    splitAtPlayhead();
-
   const progress = T.isPositive(total) ? Math.min(1, T.ratio(at, total)) : 0;
+  const setProgress = (ratio: number): void => {
+    if (!T.isPositive(total)) return;
+    setPlayhead(T.mulRational(total, T.fromSeconds(ratio, 100_000)));
+  };
 
   return (
     <div className="transport">
-      <div
-        className="scrub"
+      <Scrubber
+        value={progress}
+        onChange={setProgress}
+        step={T.isPositive(total) ? T.ratio(frame, total) : 0.01}
+        ariaLabel="Preview position"
+        ariaValueText={`${T.toTimecode(at, sequence.frameRate)} of ${T.toTimecode(total, sequence.frameRate)}`}
         title="Click to seek"
-        onPointerDown={(event) => {
-          event.currentTarget.setPointerCapture(event.pointerId);
-          seekFromEvent(event, total, setPlayhead);
-        }}
-        onPointerMove={(event) => {
-          if (event.buttons === 1) seekFromEvent(event, total, setPlayhead);
-        }}
-      >
-        <div className="scrub-fill" style={{ width: `${progress * 100}%` }} />
-        <div className="scrub-knob" style={{ left: `${progress * 100}%` }} />
-      </div>
+      />
 
       <div className="transport-buttons">
-        <button className="icon" title="Go to start (Home)" onClick={() => setPlayhead(T.TIME_ZERO)}>
-          <IconSkipStart />
-        </button>
-        <button className="icon" title="Previous edit point" onClick={goPrevEdit}>
-          <IconPrevEdit />
-        </button>
-        <button className="icon" title="Previous frame (←)" onClick={() => step(-1)}>
-          <IconStepBack />
-        </button>
-
-        <button
-          className="icon play"
-          title={playing ? 'Pause (Space)' : 'Play (Space)'}
-          onClick={() => void togglePlay()}
-        >
-          {playing ? <IconPause size={16} /> : <IconPlay size={16} />}
-        </button>
-
-        <button className="icon" title="Next frame (→)" onClick={() => step(1)}>
-          <IconStepForward />
-        </button>
-        <button className="icon" title="Next edit point" onClick={goNextEdit}>
-          <IconNextEdit />
-        </button>
-        <button className="icon" title="Go to end (End)" onClick={() => setPlayhead(total)}>
-          <IconSkipEnd />
-        </button>
-
-        <span className="transport-gap" />
-
-        <button className="icon" title="Split at the playhead (S)" onClick={splitHere}>
-          <IconSplit />
-        </button>
-        <button
-          className="icon"
-          title="Save this frame as a PNG (Shift+S)"
-          onClick={() => void grabScreenshot()}
-        >
-          <IconCamera />
-        </button>
-        <button
-          className="icon"
-          title={expanded ? 'Exit fullscreen (Esc)' : 'Fullscreen preview'}
-          onClick={toggleFullscreen}
-        >
-          {expanded ? <IconExitFullscreen /> : <IconFullscreen />}
-        </button>
-
         <span className="transport-time">
           {T.toTimecode(at, sequence.frameRate)}
           <span className="dim"> / {T.toTimecode(total, sequence.frameRate)}</span>
         </span>
+
+        <div className="transport-playback" role="group" aria-label="Playback controls">
+          <button className="icon" title="Go to start (Home)" onClick={() => setPlayhead(T.TIME_ZERO)}>
+            <IconSkipStart />
+          </button>
+          <button className="icon" title="Previous edit point" onClick={goPrevEdit}>
+            <IconPrevEdit />
+          </button>
+          <button className="icon" title="Previous frame (←)" onClick={() => step(-1)}>
+            <IconStepBack />
+          </button>
+
+          <button
+            className="icon play"
+            title={playing ? 'Pause (Space)' : 'Play (Space)'}
+            onClick={() => void togglePlay()}
+          >
+            {playing ? <IconPause size={16} /> : <IconPlay size={16} />}
+          </button>
+
+          <button className="icon" title="Next frame (→)" onClick={() => step(1)}>
+            <IconStepForward />
+          </button>
+          <button className="icon" title="Next edit point" onClick={goNextEdit}>
+            <IconNextEdit />
+          </button>
+          <button className="icon" title="Go to end (End)" onClick={() => setPlayhead(total)}>
+            <IconSkipEnd />
+          </button>
+        </div>
+
+        <div className="transport-utilities" role="group" aria-label="Preview utilities">
+          <button
+            className="icon"
+            title="Save this frame as a PNG (Shift+S)"
+            onClick={() => void grabScreenshot()}
+          >
+            <IconCamera />
+          </button>
+          <button
+            className="icon"
+            title={expanded ? 'Exit fullscreen (Esc)' : 'Fullscreen preview'}
+            onClick={toggleFullscreen}
+          >
+            {expanded ? <IconExitFullscreen /> : <IconFullscreen />}
+          </button>
+        </div>
       </div>
     </div>
   );
-}
-
-function seekFromEvent(
-  event: React.PointerEvent<HTMLDivElement>,
-  total: T.Time,
-  setPlayhead: (at: T.Time) => void,
-): void {
-  if (!T.isPositive(total)) return;
-  const rect = event.currentTarget.getBoundingClientRect();
-  const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-  setPlayhead(T.mulRational(total, T.fromSeconds(ratio, 100_000)));
 }

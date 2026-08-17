@@ -67,6 +67,21 @@ const MIGRATIONS: Readonly<Record<number, MigrationStep>> = {
     }
     return { ...project, transitions: migrated, schemaVersion: 4 };
   },
+  /**
+   * 4 → 5: audio and video tracks now share the same 72px default. Only the old
+   * 56px audio default is widened; explicitly customized heights remain untouched.
+   */
+  4: (project) => {
+    const tracks = (project.tracks ?? {}) as Record<string, Record<string, unknown>>;
+    const migrated: Record<string, unknown> = {};
+    for (const [id, track] of Object.entries(tracks)) {
+      migrated[id] =
+        track.kind === 'audio' && track.height === 56
+          ? { ...track, height: 72 }
+          : track;
+    }
+    return { ...project, tracks: migrated, schemaVersion: 5 };
+  },
 };
 
 export function readSchemaVersion(project: unknown): number | null {

@@ -75,7 +75,8 @@
   --clip-bed: #11141b;
   --preview-bg: #07080b;
 
-  --header-h: 44px;
+  --header-h: 88px;
+  --divider-h: 7px;
   --ruler-h: 26px;
   --bin-w: 240px;
   --inspector-w: 280px;
@@ -251,6 +252,122 @@ input[type='range'] {
   accent-color: var(--accent);
 }
 
+/*
+ * A slider that knows where its neutral value is.
+ *
+ * None of them showed it, so there was no way to see at a glance whether a control
+ * had been touched, and no way to find your way back to unity except by remembering
+ * the number. The mark is drawn by a wrapper rather than on the input itself: a
+ * native range paints its own track over anything behind it, so a background on the
+ * element is simply hidden.
+ *
+ * `--neutral` is a fraction of the travel. The thumb's centre only reaches the ends
+ * inset by half its own width, so the mark has to be inset the same way or it drifts
+ * away from the thumb towards the extremes.
+ */
+.range {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  --thumb: 14px;
+}
+.range > input[type='range'] {
+  position: relative;
+  z-index: 1;
+  min-height: 24px;
+  margin: 0;
+  cursor: pointer;
+}
+.range > input[type='range']:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.range.has-neutral::before {
+  content: '';
+  position: absolute;
+  left: calc(var(--thumb) / 2 + var(--neutral) * (100% - var(--thumb)));
+  top: 50%;
+  width: 2px;
+  height: 11px;
+  margin: -5.5px 0 0 -1px;
+  border-radius: 1px;
+  background: var(--line-strong);
+  pointer-events: none;
+}
+
+/*
+ * The value, while it is being pulled.
+ *
+ * The compact faders have nowhere to keep a permanent readout — the track header is
+ * already name, mute, solo, lock and remove — so the number appears at the moment it
+ * is being changed, which is when it is wanted, and gets out of the way afterwards.
+ */
+.range-bubble {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: calc(var(--thumb) / 2 + var(--at) * (100% - var(--thumb)));
+  transform: translateX(-50%);
+  z-index: 22;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--line-strong);
+  background: var(--float);
+  color: var(--text);
+  font-family: ui-monospace, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: var(--shadow-sm);
+}
+
+/*
+ * A labelled action, for the things nobody could find.
+ *
+ * Icon over a word, tall enough to read and to hit. Used sparingly: a label on undo
+ * teaches nobody anything, and every one of these costs width that a narrow window
+ * has to scroll. Only the three that create something carry one.
+ */
+button.action {
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  padding: 4px 9px;
+  min-width: 56px;
+  min-height: 46px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text);
+  font-size: 10.5px;
+  line-height: 1;
+}
+button.action svg {
+  color: var(--muted);
+}
+button.action:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--line-strong);
+}
+button.action:hover:not(:disabled) svg {
+  color: var(--accent);
+}
+button.action:disabled svg {
+  color: var(--muted);
+}
+button.action.tint-danger:hover:not(:disabled) svg {
+  color: var(--danger);
+}
+
+/* Buttons that belong together, so eight controls read as four clusters. */
+.toolgroup {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
 /* ------------------------------------------------------------------ layout */
 
 .app {
@@ -263,14 +380,53 @@ input[type='range'] {
   overflow: hidden;
 }
 
+/*
+ * Two rows: identity and menus on top, actions underneath.
+ *
+ * Splitting them is what lets the action row carry a label on every button — it has
+ * the whole window rather than whatever the brand and the menu bar leave over.
+ */
 .header {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+  overflow: hidden;
+}
+.header-top {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 0 12px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
+  height: 32px;
+  flex: none;
   min-width: 0;
+  border-bottom: 1px solid var(--line);
+}
+.header-top > button,
+.header-top > .master-volume {
+  flex: none;
+}
+.header-top .spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+/*
+ * There is no Save command, so this is the only thing that says the work is kept —
+ * and it names *where*, since browser storage is not a file the reader owns.
+ */
+.save-state {
+  flex: none;
+  padding: 0 10px;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.save-state.error {
+  color: var(--danger);
+  font-weight: 600;
 }
 
 /* ------------------------------------------------------------------ menubar */
@@ -314,11 +470,12 @@ input[type='range'] {
   box-shadow: var(--shadow-lg);
 }
 
-/* The middle button strip absorbs the squeeze and scrolls if it must. */
+/* The action row absorbs the squeeze and scrolls if it must. */
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  padding: 0 8px;
   flex: 1 1 auto;
   min-width: 0;
   /* Scrolls sideways when squeezed. This also clips vertically — CSS computes a
@@ -326,14 +483,13 @@ input[type='range'] {
      the menu dropdowns are portalled out rather than nested here. */
   overflow-x: auto;
   scrollbar-width: none;
-  padding: 6px 0;
+}
+.toolbar .spacer {
+  flex: 1;
+  min-width: 8px;
 }
 .toolbar::-webkit-scrollbar {
   display: none;
-}
-.header > button,
-.header > .timecode {
-  flex: none;
 }
 .header .brand {
   font-size: 13px;
@@ -544,6 +700,8 @@ input[type='range'] {
   flex-direction: column;
   min-height: 0;
   flex: 1;
+  container-type: inline-size;
+  container-name: preview-panel;
 }
 
 .preview {
@@ -598,23 +756,27 @@ input[type='range'] {
   cursor: pointer;
   display: flex;
   align-items: center;
+  touch-action: none;
 }
-.scrub::before {
-  content: '';
-  position: absolute;
-  left: 10px;
-  right: 10px;
+.scrub:focus-visible {
+  outline: none;
+}
+.scrub-rail {
+  position: relative;
+  width: 100%;
   height: 3px;
   border-radius: 2px;
   background: var(--line-strong);
 }
+.scrub:focus-visible .scrub-rail {
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
 .scrub-fill {
-  position: relative;
-  height: 3px;
+  position: absolute;
+  inset: 0 auto 0 0;
   border-radius: 2px;
   background: var(--accent);
   pointer-events: none;
-  max-width: calc(100% - 20px);
 }
 .scrub-knob {
   position: absolute;
@@ -624,7 +786,6 @@ input[type='range'] {
   border-radius: 50%;
   background: var(--text);
   transform: translate(-50%, -50%);
-  margin-left: 10px;
   pointer-events: none;
   box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.45);
 }
@@ -632,26 +793,31 @@ input[type='range'] {
   background: var(--accent);
 }
 
-/*
- * Wraps rather than scrolls. It used to be a hidden-scrollbar strip like the app
- * header, which is right for a row of buttons -- you can push it sideways to reach
- * them -- but wrong here: the timecode sits at the far end, so under a narrow
- * preview it went off-screen entirely with nothing to say so. Wrapping puts it on
- * its own line instead, and nothing is ever out of reach.
- */
+/* Three semantic zones keep playback centred regardless of unequal side content. */
 .transport-buttons {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-areas: 'time playback utilities';
   align-items: center;
-  gap: 3px;
-  row-gap: 5px;
+  column-gap: 10px;
   min-width: 0;
 }
 .transport-buttons button {
   flex: none;
 }
-.transport-buttons .transport-gap {
-  width: 10px;
+.transport-playback,
+.transport-utilities {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.transport-playback {
+  grid-area: playback;
+  justify-self: center;
+}
+.transport-utilities {
+  grid-area: utilities;
+  justify-self: end;
 }
 .transport-buttons button.icon.play {
   min-width: 32px;
@@ -664,62 +830,81 @@ input[type='range'] {
   background: var(--accent);
 }
 .transport-time {
-  margin-left: auto;
+  grid-area: time;
+  justify-self: start;
+  min-width: 0;
   flex: none;
-  padding-left: 8px;
   font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
   font-size: 11px;
   color: var(--text);
+  white-space: nowrap;
 }
 .transport-time .dim {
   color: var(--muted);
 }
 
+/* A narrow monitor gets one uninterrupted playback row, then status and utilities. */
+@container preview-panel (max-width: 620px) {
+  .transport-buttons {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      'playback playback'
+      'time utilities';
+    row-gap: 5px;
+  }
+}
+
 /* --------------------------------------------------------------- timeline */
 
-/*
-  A single scroll container holding the header column, the ruler and the lanes.
-  The header column is sticky-left and the ruler sticky-top, so both stay in place
-  while everything scrolls together. The previous arrangement — two panes, each
-  `overflow-y: hidden` — clipped vertically and made tracks past the fold
-  completely unreachable.
-*/
+/* One horizontal time axis; vertical overflow belongs to each track section. */
 .timeline {
   min-width: 0;
   min-height: 0;
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: hidden;
   background: var(--panel);
   position: relative;
+  --timeline-scroll-x: 0px;
+}
+
+.timeline-scroll-width {
+  position: relative;
+  height: 100%;
+  min-height: 0;
 }
 
 /*
- * Stretched to fill the pane, not merely to fit its tracks.
- *
- * Without the min-height the grid ended at the last lane, and the playhead — which
- * spans its parent — stopped there too, halfway up an otherwise empty pane. The
- * column layout hands the leftover height to the body, which is what gives the line
- * something to run down and gives a drop somewhere to land.
+ * The wide parent creates the shared horizontal scrollbar. This child sticks to
+ * the viewport's left edge, then translates only its time content by that scroll.
  */
-.timeline-grid {
-  position: relative;
-  min-width: 100%;
-  min-height: 100%;
+.timeline-shell {
+  position: sticky;
+  left: 0;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+}
+
+.timeline-topbar-viewport {
+  position: relative;
+  z-index: 9;
+  flex: none;
+  overflow: hidden;
 }
 
 .timeline-topbar {
-  position: sticky;
-  top: 0;
-  z-index: 6;
+  position: relative;
   display: flex;
   background: var(--panel-2);
   border-bottom: 1px solid var(--line);
+  transform: translateX(calc(0px - var(--timeline-scroll-x)));
 }
 
 .timeline-corner {
-  position: sticky;
-  left: 0;
+  position: relative;
   z-index: 7;
   flex: none;
   height: var(--ruler-h);
@@ -729,28 +914,192 @@ input[type='range'] {
   padding: 0 6px;
   background: var(--panel-2);
   border-right: 1px solid var(--line);
+  transform: translateX(var(--timeline-scroll-x));
 }
 
-.timeline-body {
+.timeline-split {
   position: relative;
-  /* Takes the height the tracks do not, so the playhead reaches the floor. */
   flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  overflow: hidden;
+}
+
+.timeline-pane-group {
+  display: contents;
+}
+
+.timeline-pane {
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: var(--panel);
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
+
+.timeline-pane-grid {
+  position: relative;
+  min-height: 100%;
   display: flex;
   flex-direction: column;
+  /* Resize handles may straddle a row seam, but must not create phantom scroll. */
+  overflow: clip;
+  transform: translateX(calc(0px - var(--timeline-scroll-x)));
+}
+
+/* Keep the video stack against the divider; audio grows downward from it. */
+.timeline-pane.video .timeline-tail:first-child,
+.timeline-pane.audio .timeline-tail:last-of-type {
+  flex: 1 1 auto;
+}
+
+/* These are the fixed label column inside horizontally translated time content. */
+.timeline-pane-grid .track-header,
+.timeline-pane-grid .tail-header {
+  transform: translateX(var(--timeline-scroll-x));
 }
 
 .timeline-row {
+  position: relative;
   display: flex;
   border-bottom: 1px solid var(--line);
   flex: none;
 }
 
+/*
+ * Direct track-height control. The painted seam remains one pixel, while the
+ * transparent hit area is eight pixels tall so grabbing it does not require aiming.
+ */
+.track-resize-handle {
+  position: absolute;
+  z-index: 8;
+  left: 0;
+  right: 0;
+  bottom: -4px;
+  height: 8px;
+  cursor: row-resize;
+  touch-action: none;
+}
+.track-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  right: 0;
+  left: 0;
+  height: 1px;
+  background: transparent;
+}
+.track-resize-handle:hover::after,
+.track-resize-handle:focus-visible::after,
+.track-resize-handle.dragging::after {
+  background: var(--accent);
+}
+.track-resize-handle:focus-visible {
+  outline: none;
+}
+body.resizing-track {
+  cursor: row-resize;
+  user-select: none;
+}
+
+/* A structural boundary, deliberately stronger than a per-track resize seam. */
+.track-section-divider {
+  position: relative;
+  z-index: 10;
+  min-height: 8px;
+  cursor: row-resize;
+  touch-action: none;
+  background: var(--panel-2);
+  border-top: 1px solid var(--line-strong);
+  border-bottom: 1px solid var(--line-strong);
+}
+.track-section-divider::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: calc(50% - 22px);
+  width: 44px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--line-strong);
+}
+.track-section-divider:hover::after,
+.track-section-divider:focus-visible::after,
+.track-section-divider.dragging::after {
+  background: var(--accent);
+}
+.track-section-divider:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -2px;
+}
+body.resizing-track-sections {
+  cursor: row-resize;
+  user-select: none;
+}
+
 /* The empty space past the last track — a drop target, not just padding. */
 .timeline-tail {
   flex: 1 1 auto;
-  min-height: 44px;
+  /* The insertion target remains reachable even after spare pane room runs out. */
+  min-height: 22px;
   position: relative;
   display: flex;
+  overflow: hidden;
+}
+.timeline-tail-lane {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+.timeline-tail.top {
+  border-bottom: 1px solid var(--line);
+}
+.timeline-tail.bottom {
+  border-top: 1px solid var(--line);
+}
+
+/*
+ * The spacer becomes the forgiving part of the new-track target during a drag.
+ * It changes paint only: its flex size is untouched, so no lane jumps under the
+ * pointer when the target wakes up.
+ */
+.timeline-tail.insert-ready {
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent 0 8px,
+    rgb(127 127 127 / 7%) 8px 16px
+  );
+}
+.timeline-tail.insert-active {
+  box-shadow: inset 0 0 0 1px var(--accent);
+  background-color: var(--accent-wash);
+  background-image: none;
+}
+.insert-tail-note {
+  position: absolute;
+  z-index: 3;
+  top: 50%;
+  left: 12px;
+  transform: translate(var(--timeline-scroll-x), -50%);
+  padding: 4px 8px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--panel-2) 88%, transparent);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.timeline-tail.insert-active .insert-tail-note {
+  border-color: var(--accent);
+  border-style: solid;
+  background: var(--accent);
+  color: var(--on-accent);
 }
 /*
  * The header column, continued past the last row.
@@ -768,45 +1117,6 @@ input[type='range'] {
   background: var(--panel);
   border-right: 1px solid var(--line);
 }
-/*
- * Shown from the moment a drag starts rather than once the pointer is already on
- * them. Aiming for an edge you cannot see is the whole reason these were hard to
- * hit; a dashed outline the instant you pick media up makes them targets.
- */
-.timeline-tail.insert-ready,
-.ruler.insert-ready {
-  box-shadow: inset 0 0 0 1px var(--line-strong);
-  background-image: repeating-linear-gradient(
-    45deg,
-    transparent 0 6px,
-    rgb(127 127 127 / 10%) 6px 12px
-  );
-}
-.timeline-tail.insert-active,
-.ruler.insert-active {
-  box-shadow: inset 0 0 0 1px var(--accent);
-  background-color: var(--accent-wash);
-  background-image: none;
-}
-.timeline-tail .insert-note.hint {
-  background: transparent;
-  color: var(--muted);
-  border: 1px dashed var(--line-strong);
-}
-.timeline-tail .insert-note {
-  position: sticky;
-  left: calc(216px + 10px);
-  display: inline-block;
-  margin-top: 6px;
-  padding: 2px 7px;
-  border-radius: 4px;
-  background: var(--accent);
-  color: var(--on-accent);
-  font-size: 10.5px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
 .ruler {
   height: var(--ruler-h);
   position: relative;
@@ -854,9 +1164,11 @@ input[type='range'] {
   z-index: 5;
   flex: none;
   display: flex;
-  align-items: center;
-  gap: 3px;
-  padding: 0 6px;
+  flex-direction: column;
+  justify-content: center;
+  align-items: stretch;
+  gap: 0;
+  padding: 2px 6px;
   background: var(--panel);
   border-right: 1px solid var(--line);
   font-size: 12px;
@@ -864,6 +1176,26 @@ input[type='range'] {
 .track-header.selected {
   background: var(--panel-2);
   box-shadow: inset 2px 0 0 var(--accent);
+}
+.track-header-row {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  min-height: 0;
+}
+.track-header.expanded .track-header-row {
+  flex: 1 1 50%;
+}
+.track-header.compact .track-header-row.identity {
+  height: 100%;
+}
+.track-header-row.operations {
+  padding-left: 15px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 68%, transparent);
+}
+.track-header .track-menu-button {
+  flex: none;
 }
 .track-header .track-kind {
   color: var(--muted);
@@ -921,6 +1253,21 @@ input[type='range'] {
   display: flex;
   align-items: flex-start;
   overflow: hidden;
+}
+/*
+ * The clip where the drag began: the same picture or waveform, ghosted rather than
+ * replaced by an abstract hatch. It stays quieter than the moving clip and behind
+ * it, because this is a reference point rather than a destination.
+ */
+.clip.drag-origin {
+  top: 3px;
+  bottom: 3px;
+  border: 2px dotted color-mix(in srgb, var(--text) 72%, transparent);
+  opacity: 0.38;
+  filter: saturate(0.72);
+  cursor: default;
+  pointer-events: none;
+  z-index: 0;
 }
 .drop-ghost .ghost-note {
   margin-left: auto;
@@ -1340,6 +1687,15 @@ input[type='range'] {
   min-width: 44px;
   text-align: right;
 }
+.field .value-row input.range-number {
+  flex: 0 0 64px;
+  width: 64px;
+  min-width: 0;
+  padding-inline: 5px;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  text-align: right;
+}
 
 .unit-badge {
   margin: 0 0 10px;
@@ -1420,9 +1776,6 @@ input[type='range'] {
   margin-left: 2px;
   border-left: 1px solid var(--line);
 }
-.zoom-slider input[type='range'] {
-  width: 96px;
-}
 .zoom-slider button.icon {
   min-height: 18px;
   border-color: transparent;
@@ -1495,8 +1848,130 @@ input[type='range'] {
 .modal .actions {
   display: flex;
   gap: 8px;
+  align-items: center;
   justify-content: flex-end;
   margin-top: 16px;
+}
+.modal .actions .spacer {
+  flex: 1;
+}
+.modal .actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ------------------------------------------------------------------ projects */
+
+/*
+ * The project browser. Wider than the other dialogs and capped in height rather
+ * than growing: the list is the whole content, and it has no fixed length.
+ */
+.open-dialog {
+  width: 560px;
+  display: flex;
+  flex-direction: column;
+  max-height: min(560px, calc(100vh - 80px));
+}
+.dialog-note {
+  margin: -4px 0 12px;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.project-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+/* Focusable for the arrow keys, but the row highlight already says where you are. */
+.project-list:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.empty-note {
+  margin: 0;
+  padding: 20px 16px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+  text-align: center;
+}
+.project-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--line);
+  cursor: default;
+}
+.project-row:last-child {
+  border-bottom: none;
+}
+.project-row > svg {
+  flex: none;
+  color: var(--folder);
+}
+.project-row:hover {
+  background: var(--hover);
+}
+.project-row.focused {
+  background: var(--accent-soft);
+}
+.project-detail {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.project-name {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.project-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+/* Marks the row you are already in, so Open on it is obviously a no-op. */
+.project-badge {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.rename-field {
+  width: 100%;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 1px 4px;
+}
+.project-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+/* Row controls stay out of the way until the row is the one being considered. */
+.project-actions button.icon {
+  opacity: 0;
+}
+.project-row:hover .project-actions button.icon,
+.project-row.focused .project-actions button.icon,
+.project-actions button.icon:focus-visible {
+  opacity: 1;
 }
 
 .progress {
@@ -1883,23 +2358,71 @@ body.focus-mode .preview-panel .preview {
 }
 
 /* Faders in the track header and the transport, sized to sit among the icons. */
-.track-volume,
-.master-volume input[type='range'] {
+.range.track-volume > input[type='range'],
+.master-volume input[type='range'],
+.zoom-slider input[type='range'] {
   -webkit-appearance: none;
   appearance: none;
+  height: 24px;
+  background: transparent;
+  cursor: pointer;
+}
+.range.track-volume > input[type='range']::-webkit-slider-runnable-track,
+.master-volume input[type='range']::-webkit-slider-runnable-track,
+.zoom-slider input[type='range']::-webkit-slider-runnable-track {
   height: 3px;
   border-radius: 2px;
   background: var(--line-strong);
-  cursor: pointer;
 }
-.track-volume {
-  /* Shares what the name and the toggles leave, down to a usable stub. */
+.range.track-volume > input[type='range']::-moz-range-track,
+.master-volume input[type='range']::-moz-range-track,
+.zoom-slider input[type='range']::-moz-range-track {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line-strong);
+}
+/* The wrapper is what flexes now; the input inside it simply fills. */
+.range.track-volume {
   flex: 1 1 36px;
   min-width: 30px;
   margin: 0 2px;
 }
-.track-volume::-webkit-slider-thumb,
-.master-volume input[type='range']::-webkit-slider-thumb {
+.master-volume .range {
+  width: 72px;
+  flex: none;
+}
+.zoom-slider .range {
+  width: 96px;
+  flex: none;
+}
+.track-height-slider .range {
+  width: 72px;
+}
+.track-height-readout {
+  min-width: 54px;
+}
+
+/* The value beside a fader, where the strip is wide enough to keep one on show. */
+.master-readout,
+.zoom-readout {
+  font-family: ui-monospace, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  flex: none;
+}
+.master-readout {
+  min-width: 34px;
+  text-align: right;
+}
+.zoom-readout {
+  min-width: 52px;
+  text-align: right;
+}
+.range.track-volume > input[type='range']::-webkit-slider-thumb,
+.master-volume input[type='range']::-webkit-slider-thumb,
+.zoom-slider input[type='range']::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
   width: 10px;
@@ -1907,9 +2430,20 @@ body.focus-mode .preview-panel .preview {
   border-radius: 50%;
   background: var(--text);
   border: 1px solid var(--panel-2);
+  margin-top: -3.5px;
 }
-.track-volume:hover::-webkit-slider-thumb,
-.master-volume input[type='range']:hover::-webkit-slider-thumb {
+.range.track-volume > input[type='range']::-moz-range-thumb,
+.master-volume input[type='range']::-moz-range-thumb,
+.zoom-slider input[type='range']::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text);
+  border: 1px solid var(--panel-2);
+}
+.range.track-volume > input[type='range']:hover::-webkit-slider-thumb,
+.master-volume input[type='range']:hover::-webkit-slider-thumb,
+.zoom-slider input[type='range']:hover::-webkit-slider-thumb {
   background: var(--accent);
 }
 .master-volume {
@@ -1917,9 +2451,6 @@ body.focus-mode .preview-panel .preview {
   align-items: center;
   gap: 6px;
   color: var(--muted);
-}
-.master-volume input[type='range'] {
-  width: 72px;
 }
 
 /* Library tabs, and the type filter inside the Media tab. */
@@ -2006,7 +2537,7 @@ body.focus-mode .preview-panel .preview {
  */
 .panel-divider {
   flex: none;
-  width: 7px;
+  width: var(--divider-h);
   cursor: col-resize;
   background: transparent;
   position: relative;
@@ -2022,10 +2553,31 @@ body.focus-mode .preview-panel .preview {
 .panel-divider.dragging::before {
   background: var(--accent);
 }
+/*
+ * The seam between the middle row and the timeline.
+ *
+ * Same idea rotated: a thin painted line inside a hit area wide enough to grab.
+ */
+.panel-divider.horizontal {
+  width: auto;
+  height: var(--divider-h);
+  cursor: row-resize;
+  z-index: 9;
+}
+.panel-divider.horizontal::before {
+  inset: 3px 0;
+}
+
 /* While a divider is being dragged, nothing else should select or take the cursor. */
+body.resizing,
+body.resizing-y {
+  user-select: none;
+}
 body.resizing {
   cursor: col-resize;
-  user-select: none;
+}
+body.resizing-y {
+  cursor: row-resize;
 }
 
 /* ----------------------------------------------------------------- library */
@@ -2307,80 +2859,22 @@ body.resizing {
   font-size: 10px;
   font-weight: 600;
 }
-
-
-
 /*
- * The strips above and below the lanes that make a new track when something lands
- * in them.
+ * The dragged clip, shown against the track-facing edge of the adaptive tail.
  *
- * Always present. They are quiet enough to ignore when nothing is happening, and
- * only announce themselves once a drag is in flight — a target that appears only
- * mid-gesture cannot be found by looking, and one that opens on approach shifts the
- * lanes under the pointer.
- */
-.insert-gap {
-  display: flex;
-  flex: none;
-  /* One height, always. Growing it on drag would shift every lane under the pointer
-     mid-gesture, and the border and label already say when it is live. */
-  height: 22px;
-  overflow: hidden;
-}
-.insert-gap-header {
-  flex: none;
-  position: sticky;
-  left: 0;
-  z-index: 5;
-  background: var(--panel-2);
-  border-right: 1px solid var(--line);
-}
-.insert-gap-lane {
-  flex: 1;
-  /* The ghost is placed against this, and cropped by the gap's own overflow. */
-  position: relative;
-  display: flex;
-  align-items: center;
-  padding-left: 10px;
-  margin: 2px 2px 2px 0;
-  border: 1px dashed var(--line);
-  border-radius: 4px;
-  color: transparent;
-  font-size: 10.5px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-/* Idle it is a hairline; the label only earns its space once you are carrying something. */
-.insert-gap.dragging .insert-gap-lane {
-  border-color: var(--line-strong);
-  color: var(--muted);
-}
-.insert-gap.active .insert-gap-lane {
-  border-color: var(--accent);
-  border-style: solid;
-  background: var(--accent-wash);
-  color: var(--text);
-}
-
-
-/*
- * The dragged clip, shown inside the gap it will land in.
- *
- * Taller than the gap on purpose: it is anchored to the edge the new track appears
- * against and cropped by the gap, so it reads as arriving from beyond the lanes
+ * It is anchored to the edge the new track appears against and cropped by the tail,
+ * so it reads as arriving from beyond the lanes
  * rather than hovering over them.
  */
 .insert-ghost {
   position: absolute;
   border-radius: 4px;
-  border: 1px solid var(--accent);
+  border: 1px solid color-mix(in srgb, var(--text) 70%, transparent);
   box-shadow: 0 0 0 1px rgb(0 0 0 / 25%);
   overflow: hidden;
   pointer-events: none;
-  opacity: 0.92;
-  display: flex;
-  align-items: flex-start;
-  font-size: 11px;
+  opacity: 0.9;
+  background-color: var(--clip-bed);
 }
 .insert-ghost.video {
   background: linear-gradient(var(--video), var(--video-2));
@@ -2394,13 +2888,6 @@ body.resizing {
 .insert-ghost.solid {
   background: #444c56;
 }
-.insert-ghost .clip-name {
-  padding: 2px 5px;
-  color: var(--clip-text, #f4f7fb);
-  font-weight: 500;
-  white-space: nowrap;
-}
-
 /* Hidden rather than removed: it is still the clip being dragged, and the document
    has not changed — only where it is being drawn. */
 .clip.relocating {

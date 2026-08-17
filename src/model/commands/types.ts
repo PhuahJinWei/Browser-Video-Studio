@@ -19,11 +19,13 @@ import type {
   ClipId,
   CrossfadeCurve,
   EffectInstanceId,
+  FrameRate,
   MarkerId,
   Param,
   ParamMap,
   ParamValue,
   SequenceId,
+  Size,
   Time,
   TrackId,
   TrackKind,
@@ -118,6 +120,17 @@ export type ViewProps = Partial<{
 }>;
 
 export type Command =
+  // -- project --------------------------------------------------------------
+  /**
+   * Rename the project.
+   *
+   * Undoable like any other edit, and the only way the name changes while the
+   * project is open — the index that the project browser reads is derived from the
+   * document, so anything writing the name elsewhere would immediately disagree
+   * with it.
+   */
+  | { readonly type: 'setProjectName'; readonly name: string }
+
   // -- tracks ---------------------------------------------------------------
   | {
       readonly type: 'addTrack';
@@ -199,6 +212,22 @@ export type Command =
    * A sequence-wide parameter. Only the master fader for now, which the mixer has
    * always applied but nothing could reach.
    */
+  /**
+   * The sequence's own format: what resolution it composites at, and what rate it
+   * counts frames in.
+   *
+   * There was no way to change either, so a project was stuck at whatever the
+   * starter picked — 1920x1080 at 30 — however small or fast the footage actually
+   * was. Nothing here retimes anything: clip positions are exact rational seconds,
+   * so a change of frame rate alters how time is *counted and exported*, not where
+   * a clip sits.
+   */
+  | {
+      readonly type: 'setSequenceSettings';
+      readonly sequenceId: SequenceId;
+      readonly size?: Size;
+      readonly frameRate?: FrameRate;
+    }
   | {
       readonly type: 'setSequenceParam';
       readonly sequenceId: SequenceId;

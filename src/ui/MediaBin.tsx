@@ -7,10 +7,9 @@
  * before anything is put in it is held here, in this session, until it earns a home.
  */
 
-import { useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { assetsInFolderTree, childFolders } from '../model/selectors';
 import * as T from '../model/time';
-import { TRANSITION_TYPES } from '../model/types';
 import type { Asset, AssetId } from '../model/types';
 import { useContextMenu } from './ContextMenu';
 import {
@@ -25,14 +24,12 @@ import {
   IconList,
   IconPlus,
   IconSearch,
-  IconTransition,
   IconTrash,
   IconVideo,
 } from './Icons';
 import { useLayout } from './layout';
 import { useStudio } from './store';
 import { ASSET_DRAG_TYPE, HOVER_DELAY_MS, HoverCard, type HoverCardState } from './Timeline';
-import { TRANSITION_DRAG_TYPE, TRANSITION_LABELS } from './transitions';
 
 /**
  * Assets before the search field is worth a row of the panel.
@@ -87,7 +84,6 @@ export function MediaBin(): React.JSX.Element {
   const menu = useContextMenu();
 
   const [dragOver, setDragOver] = useState(false);
-  const [tab, setTab] = useState<'media' | 'transitions'>('media');
   const [filter, setFilter] = useState<MediaFilterId>('all');
   const [search, setSearch] = useState('');
   const [folder, setFolder] = useState('');
@@ -190,11 +186,11 @@ export function MediaBin(): React.JSX.Element {
   const [hoverCard, setHoverCard] = useState<HoverCardState | null>(null);
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const cancelHover = (): void => {
+  const cancelHover = useCallback((): void => {
     if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
     hoverTimer.current = null;
     setHoverCard(null);
-  };
+  }, []);
 
   const startHover = (
     event: React.PointerEvent,
@@ -206,6 +202,7 @@ export function MediaBin(): React.JSX.Element {
     hoverTimer.current = setTimeout(() => {
       if (useStudio.getState().draggingAssetId) return;
       setHoverCard({
+        subjectId: asset.id,
         clientX,
         clientY,
         title: asset.name,
@@ -214,6 +211,22 @@ export function MediaBin(): React.JSX.Element {
       });
     }, HOVER_DELAY_MS);
   };
+
+  /*
+   * Drop the card as soon as its card leaves the list.
+   *
+   * A card that is removed unmounts without ever sending `pointerleave`, so nothing
+   * told the hover to end and it stayed on screen describing media that had just been
+   * deleted. Watching the visible list rather than only the project catches every way
+   * a card can vanish from under the pointer — deleted, filtered out, searched past,
+   * or left behind by navigating into a folder.
+   */
+  useEffect(() => {
+    if (hoverCard && !visibleIds.includes(hoverCard.subjectId as AssetId)) cancelHover();
+  }, [visibleIds, hoverCard, cancelHover]);
+
+  // A pending card must not land after the panel has gone.
+  useEffect(() => cancelHover, [cancelHover]);
 
   /**
    * Shortcuts, while this panel has focus.
@@ -319,20 +332,14 @@ export function MediaBin(): React.JSX.Element {
         five labels legible, and transitions are a library rather than something
         you imported. Within Media the type filter does the narrowing.
       */}
-      <div className="panel-tabs">
-        {(['media', 'transitions'] as const).map((name) => (
-          <button
-            key={name}
-            className={`panel-tab${tab === name ? ' on' : ''}`}
-            onClick={() => setTab(name)}
-          >
-            {name === 'media' ? `Media${assets.length > 0 ? ` (${assets.length})` : ''}` : 'Transitions'}
-          </button>
-        ))}
-      </div>
-
-      {tab === 'media' && (
-        <>
+      {/*
+        No tab bar. It cost a row of height to switch between a media list and a
+        transitions list, and the transitions one has been superseded: every bare cut
+        in the timeline carries its own button now, which acts on the cut you are
+        pointing at rather than the one nearest where a dragged chip happened to land.
+        With that gone a single remaining tab was labelling the obvious.
+      */}
+      <>
           {/*
             One row for the things done *to* the library, rather than a mix of
             per-card buttons and a menu nobody finds. Delete is here because it acts
@@ -446,12 +453,10 @@ export function MediaBin(): React.JSX.Element {
               })}
             </div>
           )}
-        </>
-      )}
+      </>
 
-      {tab === 'media' ? (
-        <div
-          className={`panel-body bin-list ${libraryView}`}
+      <div
+        className={`panel-body bin-list ${libraryView}`}
           // Clicking the empty space below the cards drops the selection, the way
           // clicking bare lane does on the timeline.
           onPointerDown={(event) => {
@@ -525,12 +530,7 @@ export function MediaBin(): React.JSX.Element {
               )}
             </>
           )}
-        </div>
-      ) : (
-        <div className="panel-body">
-          <TransitionLibrary />
-        </div>
-      )}
+      </div>
 
       {dragOver && (
         <div className="bin-drop-overlay">
@@ -598,46 +598,6 @@ function FolderRow({
       <span className="name">{folderName(path)}</span>
       <span className="count">{count}</span>
     </button>
-  );
-}
-
-/**
- * The transition styles, draggable onto a cut.
- *
- * Right-clicking a clip is quicker once you know it is there, but nothing on
- * screen said transitions existed at all — which is the usual reason a feature
- * goes unused.
- */
-function TransitionLibrary(): React.JSX.Element {
-  const addTransitionNearPlayhead = useStudio((s) => s.addTransitionNearPlayhead);
-
-  return (
-    <div className="transition-library open">
-      <p className="hint">
-        Drag one onto a cut, or double-click to use the cut nearest the playhead.
-      </p>
-
-      {(
-        <div className="library-body">
-          {TRANSITION_TYPES.map((type) => (
-            <div
-              key={type}
-              className="transition-chip"
-              draggable
-              title={`Drag onto a cut, or double-click to use the cut nearest the playhead`}
-              onDragStart={(event) => {
-                event.dataTransfer.setData(TRANSITION_DRAG_TYPE, type);
-                event.dataTransfer.effectAllowed = 'copy';
-              }}
-              onDoubleClick={() => addTransitionNearPlayhead(type)}
-            >
-              <IconTransition size={13} />
-              <span>{TRANSITION_LABELS[type]}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
   );
 }
 

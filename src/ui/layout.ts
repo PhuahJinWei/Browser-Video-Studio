@@ -24,18 +24,39 @@ export const BIN_MAX = 520;
 export const INSPECTOR_MIN = 220;
 export const INSPECTOR_MAX = 520;
 
+/**
+ * How short and how tall the timeline may be dragged.
+ *
+ * The lower bound is the same one the grid used to enforce on its own; the upper is
+ * only a sanity limit, since the real ceiling is how much room the middle row needs
+ * and the stylesheet works that out against the window.
+ */
+export const TIMELINE_MIN = 160;
+export const TIMELINE_MAX = 1200;
+export const TIMELINE_VIDEO_RATIO_MIN = 0.2;
+export const TIMELINE_VIDEO_RATIO_MAX = 0.8;
+/** Room the preview and the side panels keep, whatever the timeline is dragged to. */
+export const MIDDLE_MIN = 180;
+
 export interface LayoutState {
   readonly binWidth: number;
   readonly inspectorWidth: number;
   readonly inspectorOpen: boolean;
   readonly libraryView: LibraryView;
   readonly theme: Theme;
+  readonly timelineHeight: number;
+  readonly timelineVideoRatio: number;
+  readonly timelineVideoScrollTop: number;
+  readonly timelineAudioScrollTop: number;
 
   setBinWidth: (px: number) => void;
   setInspectorWidth: (px: number) => void;
   setInspectorOpen: (open: boolean) => void;
   toggleInspector: () => void;
   setLibraryView: (view: LibraryView) => void;
+  setTimelineHeight: (px: number) => void;
+  setTimelineVideoRatio: (ratio: number) => void;
+  setTimelinePaneScroll: (kind: 'video' | 'audio', px: number) => void;
   setTheme: (theme: Theme) => void;
   toggleTheme: () => void;
 }
@@ -48,16 +69,33 @@ interface StoredLayout {
   inspectorOpen?: unknown;
   libraryView?: unknown;
   theme?: unknown;
+  timelineHeight?: unknown;
+  timelineVideoRatio?: unknown;
+  timelineVideoScrollTop?: unknown;
+  timelineAudioScrollTop?: unknown;
 }
 
 const DEFAULTS = {
-  binWidth: 240,
+  /*
+   * Wide enough to browse in rather than merely to list.
+   *
+   * The grid reflows cards to fill whatever width it is given, so a narrow default
+   * meant a single column of thumbnails and a lot of scrolling before anything had
+   * even been imported. The centre column keeps its own 300px floor, so this only
+   * takes room the preview was not using.
+   */
+  binWidth: 520,
   inspectorWidth: 280,
   // Open to begin with: a panel nobody knows about is the problem a collapsible one
   // is supposed to solve, not create. One click hides it for good.
   inspectorOpen: true,
   libraryView: 'grid' as LibraryView,
   theme: 'light' as Theme,
+  // Roughly the 45% the grid used to hardcode, at a common window height.
+  timelineHeight: 320,
+  timelineVideoRatio: 0.5,
+  timelineVideoScrollTop: 0,
+  timelineAudioScrollTop: 0,
 };
 
 /**
@@ -95,6 +133,22 @@ function load(): typeof DEFAULTS {
         typeof stored.inspectorOpen === 'boolean' ? stored.inspectorOpen : DEFAULTS.inspectorOpen,
       libraryView: stored.libraryView === 'list' ? 'list' : DEFAULTS.libraryView,
       theme: stored.theme === 'dark' ? 'dark' : DEFAULTS.theme,
+      timelineHeight:
+        typeof stored.timelineHeight === 'number'
+          ? clamp(stored.timelineHeight, TIMELINE_MIN, TIMELINE_MAX)
+          : DEFAULTS.timelineHeight,
+      timelineVideoRatio:
+        typeof stored.timelineVideoRatio === 'number'
+          ? clamp(stored.timelineVideoRatio, TIMELINE_VIDEO_RATIO_MIN, TIMELINE_VIDEO_RATIO_MAX)
+          : DEFAULTS.timelineVideoRatio,
+      timelineVideoScrollTop:
+        typeof stored.timelineVideoScrollTop === 'number'
+          ? Math.max(0, stored.timelineVideoScrollTop)
+          : DEFAULTS.timelineVideoScrollTop,
+      timelineAudioScrollTop:
+        typeof stored.timelineAudioScrollTop === 'number'
+          ? Math.max(0, stored.timelineAudioScrollTop)
+          : DEFAULTS.timelineAudioScrollTop,
     };
   } catch {
     // A corrupt or unavailable store is not worth failing to start over.
@@ -112,6 +166,10 @@ function save(state: LayoutState): void {
         inspectorOpen: state.inspectorOpen,
         libraryView: state.libraryView,
         theme: state.theme,
+        timelineHeight: state.timelineHeight,
+        timelineVideoRatio: state.timelineVideoRatio,
+        timelineVideoScrollTop: state.timelineVideoScrollTop,
+        timelineAudioScrollTop: state.timelineAudioScrollTop,
       }),
     );
   } catch {
@@ -121,6 +179,14 @@ function save(state: LayoutState): void {
 
 export const useLayout = create<LayoutState>((set, get) => {
   const persist = (): void => save(get());
+  let timelineMotionPersistTimer: ReturnType<typeof setTimeout> | null = null;
+  const persistTimelineMotion = (): void => {
+    if (timelineMotionPersistTimer !== null) clearTimeout(timelineMotionPersistTimer);
+    timelineMotionPersistTimer = setTimeout(() => {
+      timelineMotionPersistTimer = null;
+      persist();
+    }, 150);
+  };
   const initial = load();
   // The saved choice has to reach <html> before the first paint, not on a later
   // effect, or the app opens in light and swaps to dark in front of you.
@@ -148,6 +214,30 @@ export const useLayout = create<LayoutState>((set, get) => {
     setLibraryView: (view) => {
       set({ libraryView: view });
       persist();
+    },
+    setTimelineHeight: (px) => {
+      set({ timelineHeight: clamp(px, TIMELINE_MIN, TIMELINE_MAX) });
+      persist();
+    },
+    setTimelineVideoRatio: (ratio) => {
+      set({
+        timelineVideoRatio: clamp(
+          ratio,
+          TIMELINE_VIDEO_RATIO_MIN,
+          TIMELINE_VIDEO_RATIO_MAX,
+        ),
+      });
+      persistTimelineMotion();
+    },
+    setTimelinePaneScroll: (kind, px) => {
+      set(
+        kind === 'video'
+          ? { timelineVideoScrollTop: Math.max(0, px) }
+          : { timelineAudioScrollTop: Math.max(0, px) },
+      );
+      // Native scroll events can fire every frame. Saving synchronously for each
+      // pixel would turn a cheap pane scroll into repeated JSON/localStorage work.
+      persistTimelineMotion();
     },
     setTheme: (theme) => {
       set({ theme });

@@ -9,7 +9,7 @@
  *  - Additive evolution: bump SCHEMA_VERSION and add a migration; never repurpose a field.
  */
 
-export const SCHEMA_VERSION = 4 as const;
+export const SCHEMA_VERSION = 5 as const;
 
 // ---------------------------------------------------------------------------
 // Primitives

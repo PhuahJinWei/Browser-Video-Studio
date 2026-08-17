@@ -92,6 +92,9 @@ export interface CreateTrackOptions {
   readonly height?: number;
 }
 
+/** One model-level default for every timeline track kind. */
+export const DEFAULT_TRACK_HEIGHT = 72;
+
 export function createTrack(opts: CreateTrackOptions): Track {
   return {
     id: opts.id,
@@ -102,7 +105,9 @@ export function createTrack(opts: CreateTrackOptions): Track {
     solo: false,
     locked: false,
     hidden: false,
-    height: opts.height ?? (opts.kind === 'video' ? 72 : 56),
+    // Equal defaults give waveforms enough vertical resolution and make mixed A/V
+    // lanes predictable; either kind can still be collapsed to 36px by the user.
+    height: opts.height ?? DEFAULT_TRACK_HEIGHT,
     effects: [],
     gainDb: staticParam(0),
     pan: staticParam(0),

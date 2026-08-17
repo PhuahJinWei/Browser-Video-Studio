@@ -6,9 +6,10 @@
  * slider is one undo step rather than one per pixel.
  */
 
+import { useId, useState } from 'react';
 import { defaultParams, EFFECT_REGISTRY, effectDefinition, listEffects } from '../engine/effects';
 import type { Command } from '../model/commands';
-import { TRANSITION_LABELS } from './transitions';
+import { DEFAULT_TRANSITION_SECONDS, TRANSITION_LABELS } from './transitions';
 import type { ClipParamKey } from '../model/commands';
 import { staticParam } from '../model/params';
 import {
@@ -40,7 +41,16 @@ import type {
   Transition,
   VideoClip,
 } from '../model/types';
-import { formatGain, formatGainPercent } from './format';
+import {
+  formatGain,
+  formatPan,
+  formatPercent,
+  GAIN_PERCENT_MAX,
+  GAIN_PERCENT_UNITY,
+  gainDbToPercent,
+  percentToGainDb,
+} from './format';
+import { Fader, quantizeRangeValue } from './Fader';
 import { useStudio } from './store';
 
 const BLEND_MODES: readonly BlendMode[] = [
@@ -79,16 +89,169 @@ export function Inspector(): React.JSX.Element {
       <div className="panel-body">
         {transition && <TransitionInspector transition={transition} />}
         {!transition && track && <TrackInspector track={track} />}
+        {/*
+          Nothing selected is not nothing to show. The sequence's own format was
+          unreachable — fixed at whatever the starter guessed — and this is the panel
+          already asking "what are you looking at", so it belongs here rather than
+          behind a dialog nobody opens.
+        */}
         {!transition && !track && !unit && (
-          <p className="hint">
-            {selected.length > 1
-              ? `${selected.length} clips selected.`
-              : 'Select a clip, a track header or a transition to edit its properties.'}
-          </p>
+          <>
+            {selected.length > 1 && <p className="hint">{selected.length} clips selected.</p>}
+            <SequenceInspector />
+          </>
         )}
         {!transition && !track && unit && <UnitInspector unit={unit} />}
       </div>
     </div>
+  );
+}
+
+/** The rates worth offering; anything else can be typed into a project file. */
+const FRAME_RATES: readonly { label: string; value: T.FrameRate }[] = [
+  { label: '23.976', value: T.FPS_23_976 },
+  { label: '24', value: T.FPS_24 },
+  { label: '25', value: T.FPS_25 },
+  { label: '29.97', value: T.FPS_29_97 },
+  { label: '30', value: T.FPS_30 },
+  { label: '50', value: T.FPS_50 },
+  { label: '59.94', value: T.FPS_59_94 },
+  { label: '60', value: T.FPS_60 },
+];
+
+const SIZE_PRESETS: readonly { label: string; width: number; height: number }[] = [
+  { label: '4K', width: 3840, height: 2160 },
+  { label: '1080p', width: 1920, height: 1080 },
+  { label: '720p', width: 1280, height: 720 },
+  { label: 'Vertical', width: 1080, height: 1920 },
+  { label: 'Square', width: 1080, height: 1080 },
+];
+
+/**
+ * The sequence's own format.
+ *
+ * Shown when nothing is selected, which is also when someone is most likely to be
+ * asking why their footage has black all around it. The first clip into an empty
+ * sequence sets these automatically; this is how to disagree with that, and the only
+ * way to change them at all after something has been cut.
+ */
+function SequenceInspector(): React.JSX.Element {
+  const run = useStudio((s) => s.run);
+  const history = useStudio((s) => s.history);
+  const sequenceId = useStudio((s) => s.sequenceId);
+  const project = history.present.project;
+  const sequence = project.sequences[sequenceId]!;
+  const { size, frameRate } = sequence;
+
+  const setSize = (width: number, height: number): void => {
+    // Encoders reject odd dimensions for most codecs, and a zero is meaningless.
+    const even = (n: number): number => Math.max(2, Math.round(n / 2) * 2);
+    run(
+      { type: 'setSequenceSettings', sequenceId, size: { width: even(width), height: even(height) } },
+      'Set sequence size',
+    );
+  };
+
+  // Matching the media is the common case, so it gets a button rather than arithmetic.
+  const videoAssets = Object.values(project.assets).filter((a) => a.video?.size);
+  const firstVideo = videoAssets[0];
+  const matches =
+    firstVideo?.video &&
+    firstVideo.video.size.width === size.width &&
+    firstVideo.video.size.height === size.height;
+
+  return (
+    <>
+      <p className="unit-badge">Sequence · nothing selected</p>
+
+      <div className="field">
+        <label>Resolution</label>
+        <div className="value-row">
+          <input
+            type="number"
+            min={2}
+            step={2}
+            value={size.width}
+            onChange={(event) => setSize(Number(event.target.value), size.height)}
+          />
+          <span className="hint">×</span>
+          <input
+            type="number"
+            min={2}
+            step={2}
+            value={size.height}
+            onChange={(event) => setSize(size.width, Number(event.target.value))}
+          />
+        </div>
+      </div>
+
+      <div className="bin-filters" style={{ padding: '0 0 8px' }}>
+        {SIZE_PRESETS.map((preset) => (
+          <button
+            key={preset.label}
+            className={`bin-filter${
+              preset.width === size.width && preset.height === size.height ? ' on' : ''
+            }`}
+            onClick={() => setSize(preset.width, preset.height)}
+          >
+            {preset.label}
+          </button>
+        ))}
+        {firstVideo?.video && (
+          <button
+            className={`bin-filter${matches ? ' on' : ''}`}
+            title={`Match "${firstVideo.name}" — ${firstVideo.video.size.width}×${firstVideo.video.size.height}`}
+            onClick={() => {
+              const media = firstVideo.video!;
+              run(
+                {
+                  type: 'setSequenceSettings',
+                  sequenceId,
+                  size: media.size,
+                  ...(media.frameRate ? { frameRate: media.frameRate } : {}),
+                },
+                'Match sequence to media',
+              );
+            }}
+          >
+            Match media
+          </button>
+        )}
+      </div>
+
+      <div className="field">
+        <label>Frame rate</label>
+        <select
+          value={`${frameRate.num}/${frameRate.den}`}
+          onChange={(event) => {
+            const found = FRAME_RATES.find((r) => `${r.value.num}/${r.value.den}` === event.target.value);
+            if (found) {
+              run(
+                { type: 'setSequenceSettings', sequenceId, frameRate: found.value },
+                'Set sequence frame rate',
+              );
+            }
+          }}
+        >
+          {/* A project opened with an unusual rate keeps it rather than snapping. */}
+          {!FRAME_RATES.some((r) => r.value.num === frameRate.num && r.value.den === frameRate.den) && (
+            <option value={`${frameRate.num}/${frameRate.den}`}>
+              {T.fpsToNumber(frameRate).toFixed(3)} (current)
+            </option>
+          )}
+          {FRAME_RATES.map((rate) => (
+            <option key={rate.label} value={`${rate.value.num}/${rate.value.den}`}>
+              {rate.label} fps
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <p className="hint">
+        Clip positions are stored in exact seconds, so changing the rate re-counts
+        timecode and export without moving anything.
+      </p>
+    </>
   );
 }
 
@@ -170,6 +333,10 @@ function TransitionInspector({ transition }: { transition: Transition }): React.
 
       <Slider
         label="Duration"
+        // Not a neutral so much as the length a transition is created at, which is
+        // the value someone reaching for this slider is most likely heading back to.
+        neutral={DEFAULT_TRANSITION_SECONDS}
+        neutralSnapSteps={3}
         value={T.toSeconds(transition.duration)}
         min={0.04}
         max={Math.max(0.04, longest ? T.toSeconds(longest) : 4)}
@@ -260,6 +427,7 @@ function TransitionInspector({ transition }: { transition: Transition }): React.
       {isWipe && (
         <Slider
           label="Edge softness"
+          neutral={0}
           value={transitionSoftness(transition) * 100}
           min={0}
           max={20}
@@ -345,21 +513,28 @@ function TrackInspector({ track }: { track: Track }): React.JSX.Element {
         <>
           <Slider
             label="Volume"
-            value={staticValue(track.gainDb, 0)}
-            min={-60}
-            max={12}
-            step={0.5}
-            format={formatGainPercent}
-            detail={formatGain}
-            onChange={(value) => setTrackParam('gainDb', value, 'Set track volume')}
+            neutral={GAIN_PERCENT_UNITY}
+            neutralSnapSteps={5}
+            value={Math.round(gainDbToPercent(staticValue(track.gainDb, 0)))}
+            min={0}
+            max={GAIN_PERCENT_MAX}
+            step={1}
+            format={formatPercent}
+            detail={(percent) => formatGain(percentToGainDb(percent))}
+            onChange={(percent) =>
+              setTrackParam('gainDb', percentToGainDb(percent), 'Set track volume')
+            }
             onCommit={endGesture}
           />
           <Slider
             label="Pan"
+            neutral={0}
+            neutralSnapSteps={4}
             value={staticValue(track.pan, 0)}
             min={-1}
             max={1}
             step={0.01}
+            format={formatPan}
             onChange={(value) => setTrackParam('pan', value, 'Set track pan')}
             onCommit={endGesture}
           />
@@ -390,31 +565,26 @@ function TrackInspector({ track }: { track: Track }): React.JSX.Element {
         </div>
       </div>
 
-      <div className="field">
-        <label>Height</label>
-        <div className="value-row">
-          <input
-            type="range"
-            min={36}
-            max={160}
-            step={4}
-            value={track.height}
-            onChange={(event) =>
-              run(
-                {
-                  type: 'setTrackProps',
-                  trackId: track.id,
-                  props: { height: Number(event.target.value) },
-                },
-                'Set track height',
-                `height:${track.id}`,
-              )
-            }
-            onPointerUp={endGesture}
-          />
-          <output>{track.height}px</output>
-        </div>
-      </div>
+      <Slider
+        label="Height"
+        value={track.height}
+        min={36}
+        max={160}
+        step={4}
+        unit=" px"
+        onChange={(height) =>
+          run(
+            {
+              type: 'setTrackProps',
+              trackId: track.id,
+              props: { height },
+            },
+            'Set track height',
+            `height:${track.id}`,
+          )
+        }
+        onCommit={endGesture}
+      />
 
       <hr style={{ border: 0, borderTop: '1px solid var(--line)', margin: '14px 0' }} />
 
@@ -685,20 +855,29 @@ function VisualControls({
     <>
       <Slider
         label="Opacity"
+        neutral={1}
+        neutralSnapSteps={4}
         value={staticValue(clip.opacity, 1)}
         min={0}
         max={1}
         step={0.01}
+        format={(v) => formatPercent(v * 100)}
         onChange={(value) => setParam('opacity', value, 'Set opacity')}
         onCommit={onCommit}
       />
       <Slider
         label="Scale"
+        // 0 to 200%, so 100% lands in the middle of the travel rather than a quarter
+        // of the way along — the same reason the volume sliders are counted in
+        // percent. Caps enlargement at 2x, which is already past where upscaling
+        // stops looking like anything.
+        neutral={1}
+        neutralSnapSteps={4}
         value={staticValue(transform.scaleX, 1)}
-        min={0.05}
-        max={4}
+        min={0}
+        max={2}
         step={0.01}
-        unit="×"
+        format={(v) => formatPercent(v * 100)}
         onChange={(value) => {
           setParam('transform.scaleX', value, 'Set scale');
           setParam('transform.scaleY', value, 'Set scale');
@@ -707,31 +886,38 @@ function VisualControls({
       />
       <Slider
         label="Position X"
+        neutral={0}
         value={staticValue(transform.x, 0)}
         min={-1920}
         max={1920}
         step={1}
         unit=" px"
+        precisionInput
         onChange={(value) => setParam('transform.x', value, 'Move layer')}
         onCommit={onCommit}
       />
       <Slider
         label="Position Y"
+        neutral={0}
         value={staticValue(transform.y, 0)}
         min={-1080}
         max={1080}
         step={1}
         unit=" px"
+        precisionInput
         onChange={(value) => setParam('transform.y', value, 'Move layer')}
         onCommit={onCommit}
       />
       <Slider
         label="Rotation"
+        neutral={0}
+        neutralSnapSteps={4}
         value={staticValue(transform.rotation, 0)}
         min={-180}
         max={180}
         step={0.5}
         unit="°"
+        precisionInput
         onChange={(value) => setParam('transform.rotation', value, 'Rotate layer')}
         onCommit={onCommit}
       />
@@ -740,20 +926,24 @@ function VisualControls({
         <>
           <Slider
             label="Crop left"
+            neutral={0}
             value={staticValue(framed.crop.left, 0)}
             min={0}
             max={0.49}
             step={0.005}
-            onChange={(value) => setParam('crop.left', value, 'Crop')}
+            format={(v) => formatPercent(v * 100)}
+        onChange={(value) => setParam('crop.left', value, 'Crop')}
             onCommit={onCommit}
           />
           <Slider
             label="Crop right"
+            neutral={0}
             value={staticValue(framed.crop.right, 0)}
             min={0}
             max={0.49}
             step={0.005}
-            onChange={(value) => setParam('crop.right', value, 'Crop')}
+            format={(v) => formatPercent(v * 100)}
+        onChange={(value) => setParam('crop.right', value, 'Crop')}
             onCommit={onCommit}
           />
         </>
@@ -831,26 +1021,32 @@ function AudioControls({
     <>
       <Slider
         label="Gain"
-        value={staticValue(clip.gainDb, 0)}
-        min={-60}
-        max={12}
-        step={0.5}
-        format={formatGainPercent}
-        detail={formatGain}
-        onChange={(value) => setParam('gainDb', value, 'Set gain')}
+        neutral={GAIN_PERCENT_UNITY}
+        neutralSnapSteps={5}
+        value={Math.round(gainDbToPercent(staticValue(clip.gainDb, 0)))}
+        min={0}
+        max={GAIN_PERCENT_MAX}
+        step={1}
+        format={formatPercent}
+        detail={(percent) => formatGain(percentToGainDb(percent))}
+        onChange={(percent) => setParam('gainDb', percentToGainDb(percent), 'Set gain')}
         onCommit={onCommit}
       />
       <Slider
         label="Pan"
+        neutral={0}
+        neutralSnapSteps={4}
         value={staticValue(clip.pan, 0)}
         min={-1}
         max={1}
         step={0.01}
+        format={formatPan}
         onChange={(value) => setParam('pan', value, 'Set pan')}
         onCommit={onCommit}
       />
       <Slider
         label="Fade in"
+        neutral={0}
         value={T.toSeconds(clip.fadeIn)}
         min={0}
         max={5}
@@ -867,6 +1063,7 @@ function AudioControls({
       />
       <Slider
         label="Fade out"
+        neutral={0}
         value={T.toSeconds(clip.fadeOut)}
         min={0}
         max={5}
@@ -932,6 +1129,10 @@ function EffectCard({ effect }: { effect: EffectInstance }): React.JSX.Element {
               max={schema.max}
               step={schema.step}
               unit={schema.unit ? ` ${schema.unit}` : ''}
+              // The registry already declares what each parameter means by default,
+              // so every effect control gets its mark without knowing about any of them.
+              neutral={schema.default}
+              neutralSnapSteps={4}
               onChange={(next) =>
                 run(
                   { type: 'setEffectParam', effectId: effect.id, key, param: staticParam(next) },
@@ -956,6 +1157,9 @@ function Slider({
   unit = '',
   format,
   detail,
+  neutral,
+  neutralSnapSteps = 0,
+  precisionInput = false,
   onChange,
   onCommit,
 }: {
@@ -976,27 +1180,76 @@ function Slider({
   format?: (value: number) => string;
   /** Fuller value for the readout's tooltip, where there is room for both units. */
   detail?: (value: number) => string;
+  /**
+   * The value this control is expected to sit at — unity, centre, none.
+   *
+   * Marked on the track so it is obvious both that a parameter has been changed and
+   * where it came from. Omitted where there is no such value: a duration or a
+   * position has no natural resting point to point at.
+   */
+  neutral?: number;
+  /** Pointer detent around neutral, measured in slider steps. */
+  neutralSnapSteps?: number;
+  /** Adds typed entry where the range contains more precision than dragging can expose. */
+  precisionInput?: boolean;
   onChange: (value: number) => void;
   onCommit: () => void;
 }): React.JSX.Element {
+  const id = useId();
+  const [draft, setDraft] = useState<string | null>(null);
   const decimals = step < 0.01 ? 3 : step < 1 ? 2 : 0;
+  const renderValue = format ?? ((next: number) => `${next.toFixed(decimals)}${unit}`);
+
+  const commitTyped = (raw: string): void => {
+    const parsed = raw.trim() === '' ? Number.NaN : Number(raw);
+    if (Number.isFinite(parsed)) onChange(quantizeRangeValue(parsed, min, max, step));
+    setDraft(null);
+    onCommit();
+  };
+
   return (
     <div className="field">
-      <label>{label}</label>
+      <label htmlFor={id}>{label}</label>
       <div className="value-row">
-        <input
-          type="range"
+        <Fader
+          id={id}
           min={min}
           max={max}
           step={step}
           value={value}
-          onChange={(event) => onChange(Number(event.target.value))}
-          onPointerUp={onCommit}
-          onKeyUp={onCommit}
+          neutralSnapSteps={neutralSnapSteps}
+          format={renderValue}
+          onChange={onChange}
+          onCommit={onCommit}
+          {...(neutral === undefined
+            ? {}
+            : { neutral, onReset: () => onChange(neutral) })}
         />
-        <output {...(detail ? { title: detail(value) } : {})}>
-          {format ? format(value) : `${value.toFixed(decimals)}${unit}`}
-        </output>
+        {precisionInput ? (
+          <input
+            className="range-number"
+            type="number"
+            min={min}
+            max={max}
+            step={step}
+            value={draft ?? value.toFixed(decimals)}
+            aria-label={`${label} value`}
+            {...(detail ? { title: detail(value) } : {})}
+            onFocus={() => setDraft(String(value))}
+            onChange={(event) => setDraft(event.target.value)}
+            onBlur={(event) => commitTyped(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') event.currentTarget.blur();
+              if (event.key === 'Escape') {
+                event.currentTarget.value = String(value);
+                event.currentTarget.blur();
+              }
+              event.stopPropagation();
+            }}
+          />
+        ) : (
+          <output {...(detail ? { title: detail(value) } : {})}>{renderValue(value)}</output>
+        )}
       </div>
     </div>
   );

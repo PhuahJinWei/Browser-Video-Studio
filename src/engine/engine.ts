@@ -9,7 +9,7 @@
 
 import { renderListAt } from '../model/selectors';
 import * as T from '../model/time';
-import type { AssetId, Project, SequenceId, Size, Time } from '../model/types';
+import type { AssetId, AssetKind, Project, SequenceId, Size, Time } from '../model/types';
 import { AudioPlayer } from './audio';
 import { Compositor, type DrawLayer } from './compositor';
 import { foldEffects, NEUTRAL_EFFECTS } from './effects';
@@ -115,6 +115,25 @@ export class Engine {
 
   get hasCanvas(): boolean {
     return this.compositor !== null;
+  }
+
+  /**
+   * Follow a change of sequence resolution.
+   *
+   * The canvas element resizes on its own — it is bound to the sequence in the
+   * preview's markup — but the compositor's render targets are allocated once at the
+   * size it was created with. Without this they stay at the old resolution and the
+   * blit stretches whatever was last composited across the new canvas.
+   */
+  setSize(size: Size): void {
+    const compositor = this.compositor;
+    if (!compositor) return;
+    if (this.attachedCanvas) {
+      this.attachedCanvas.width = size.width;
+      this.attachedCanvas.height = size.height;
+    }
+    compositor.resize(size);
+    this.requestRender(this.lastRequestedAt ?? this.playbackPosition);
   }
 
   setSequence(sequenceId: SequenceId): void {
@@ -444,8 +463,17 @@ export class Engine {
     if (at) this.requestRender(at);
   }
 
-  async openAsset(assetId: AssetId, blob: Blob): Promise<void> {
-    if (blob.type.startsWith('image/')) await this.media.openImage(assetId, blob);
+  /**
+   * Hand the bytes for an asset to the decoder that suits it.
+   *
+   * The kind comes from the document, never from `blob.type`. Media cached in OPFS
+   * is keyed by asset id with no file extension, so a still read back off disk
+   * arrives with an empty type and would be sent to the demuxer — which rejects it,
+   * taking the rest of the reopen down with it. The document has always known what
+   * each asset is; this asks it.
+   */
+  async openAsset(assetId: AssetId, blob: Blob, kind: AssetKind): Promise<void> {
+    if (kind === 'image') await this.media.openImage(assetId, blob);
     else await this.media.open(assetId, blob);
   }
 
