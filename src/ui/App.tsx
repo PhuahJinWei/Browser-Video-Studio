@@ -16,6 +16,7 @@ import { staticParam } from '../model/params';
 import { DEFAULT_TRACK_HEIGHT } from '../model/factories';
 import * as T from '../model/time';
 import { ContextMenuProvider } from './ContextMenu';
+import { DialogProvider, useDialog } from './Dialog';
 import { ExportDialog } from './ExportDialog';
 import { OpenDialog } from './OpenDialog';
 import {
@@ -64,9 +65,11 @@ export function App(): React.JSX.Element {
   if (!capabilities) return <div className="unsupported">Checking browser capabilities…</div>;
   if (!canRun(capabilities)) return <Unsupported capabilities={capabilities} />;
   return (
-    <ContextMenuProvider>
-      <Studio />
-    </ContextMenuProvider>
+    <DialogProvider>
+      <ContextMenuProvider>
+        <Studio />
+      </ContextMenuProvider>
+    </DialogProvider>
   );
 }
 
@@ -91,6 +94,7 @@ function Unsupported({ capabilities }: { capabilities: readonly CapabilityResult
 }
 
 function Studio(): React.JSX.Element {
+  const dialog = useDialog();
   const [showExport, setShowExport] = useState(false);
   const [showOpen, setShowOpen] = useState(false);
 
@@ -126,7 +130,11 @@ function Studio(): React.JSX.Element {
   const importViaPicker = useStudio((s) => s.importViaPicker);
   const playhead = useStudio((s) => s.playhead);
   const duration = useStudio((s) => s.duration);
-  const grabScreenshot = useStudio((s) => s.grabScreenshot);
+  const captureFrame = useStudio((s) => s.captureFrame);
+  const previewAssetId = useStudio((s) => s.previewAssetId);
+  const setSourcePreviewTime = useStudio((s) => s.setSourcePreviewTime);
+  const setSourceMark = useStudio((s) => s.setSourceMark);
+  const editSourceToTimeline = useStudio((s) => s.editSourceToTimeline);
   const addTitle = useStudio((s) => s.addTitle);
   const addSolid = useStudio((s) => s.addSolid);
   const canAddTransition = useStudio((s) => s.canAddTransitionNearPlayhead);
@@ -156,6 +164,19 @@ function Studio(): React.JSX.Element {
       if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
 
       const mod = event.ctrlKey || event.metaKey;
+      if (previewAssetId && !mod && !event.altKey) {
+        const sourceKey = event.key.toLowerCase();
+        if (sourceKey === 'i' || sourceKey === 'o') {
+          event.preventDefault();
+          setSourceMark(sourceKey === 'i' ? 'in' : 'out');
+          return;
+        }
+        if (event.key === ',' || event.key === '.') {
+          event.preventDefault();
+          editSourceToTimeline(event.key === ',' ? 'insert' : 'overwrite');
+          return;
+        }
+      }
       if (mod && event.key.toLowerCase() === 'z') {
         event.preventDefault();
         if (event.shiftKey) redoEdit();
@@ -223,34 +244,49 @@ function Studio(): React.JSX.Element {
           case 'S':
             // Shift+S grabs the frame, next to the key that cuts it.
             event.preventDefault();
-            void grabScreenshot();
+            void captureFrame();
             return;
           default:
             break;
         }
       }
 
-      const frame = T.frameDuration(sequence.frameRate);
+      const source = previewAssetId ? project.assets[previewAssetId] : null;
+      const activeFrameRate = source?.video?.frameRate ?? sequence.frameRate;
+      const frame = T.frameDuration(activeFrameRate);
+      const sourceDuration = source?.video?.duration ?? source?.audio?.duration ?? T.TIME_ZERO;
+      const sourceAt = useStudio.getState().sourcePreviewTime;
       switch (event.key) {
         case ' ':
           event.preventDefault();
-          void togglePlay();
+          if (source) window.dispatchEvent(new Event('bvs:toggle-source-preview'));
+          else void togglePlay();
           break;
         case 'ArrowLeft':
           event.preventDefault();
-          setPlayhead(T.sub(playhead(), event.shiftKey ? T.mulInt(frame, 10) : frame));
+          if (source) {
+            setSourcePreviewTime(T.sub(sourceAt, event.shiftKey ? T.mulInt(frame, 10) : frame));
+          } else {
+            setPlayhead(T.sub(playhead(), event.shiftKey ? T.mulInt(frame, 10) : frame));
+          }
           break;
         case 'ArrowRight':
           event.preventDefault();
-          setPlayhead(T.add(playhead(), event.shiftKey ? T.mulInt(frame, 10) : frame));
+          if (source) {
+            setSourcePreviewTime(T.add(sourceAt, event.shiftKey ? T.mulInt(frame, 10) : frame));
+          } else {
+            setPlayhead(T.add(playhead(), event.shiftKey ? T.mulInt(frame, 10) : frame));
+          }
           break;
         case 'Home':
           event.preventDefault();
-          setPlayhead(T.TIME_ZERO);
+          if (source) setSourcePreviewTime(T.TIME_ZERO);
+          else setPlayhead(T.TIME_ZERO);
           break;
         case 'End':
           event.preventDefault();
-          setPlayhead(duration());
+          if (source) setSourcePreviewTime(sourceDuration);
+          else setPlayhead(duration());
           break;
         case 'Delete':
         case 'Backspace':
@@ -280,7 +316,11 @@ function Studio(): React.JSX.Element {
     sequence.frameRate,
     sequenceId,
     setPlayhead,
-    grabScreenshot,
+    captureFrame,
+    previewAssetId,
+    setSourcePreviewTime,
+    setSourceMark,
+    editSourceToTimeline,
     togglePlay,
     undoEdit,
   ]);
@@ -460,10 +500,10 @@ function Studio(): React.JSX.Element {
             <button
               className="action"
               title="Add a title at the playhead"
-              onClick={() => {
-                const text = prompt('Title text', 'Hello');
+              onClick={() => void (async () => {
+                const text = await dialog.prompt({ title: 'Add title', inputLabel: 'Title text', initialValue: 'Hello', confirmLabel: 'Add title' });
                 if (text) addTitle(text);
-              }}
+              })()}
             >
               <IconText size={18} />
               <span>Title</span>
@@ -471,10 +511,10 @@ function Studio(): React.JSX.Element {
             <button
               className="action"
               title="Add a colour background at the playhead"
-              onClick={() => {
-                const fill = prompt('Fill colour (any CSS colour)', '#1f6feb');
+              onClick={() => void (async () => {
+                const fill = await dialog.prompt({ title: 'Add colour', inputLabel: 'CSS colour', initialValue: '#1f6feb', confirmLabel: 'Add colour' });
                 if (fill) addSolid(fill);
-              }}
+              })()}
             >
               <IconSwatch size={18} />
               <span>Colour</span>
@@ -504,11 +544,11 @@ function Studio(): React.JSX.Element {
           <span className="toolgroup">
             <button
               className="action"
-              title="Save the current frame as a PNG (Shift+S)"
-              onClick={() => void grabScreenshot()}
+              title="Capture the current frame to the Library (Shift+S)"
+              onClick={() => void captureFrame()}
             >
               <IconCamera size={18} />
-              <span>Frame</span>
+              <span>Capture</span>
             </button>
           </span>
 

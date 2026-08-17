@@ -11,7 +11,14 @@ import { defaultParams, EFFECT_REGISTRY, effectDefinition, listEffects } from '.
 import type { Command } from '../model/commands';
 import { DEFAULT_TRANSITION_SECONDS, TRANSITION_LABELS } from './transitions';
 import type { ClipParamKey } from '../model/commands';
-import { staticParam } from '../model/params';
+import { evalNumber, removeKeyframe, staticParam, upsertKeyframe } from '../model/params';
+import {
+  encoderSafeSequenceSize,
+  matchableVideoAssets,
+  preferredSequenceReference,
+  sequenceMatchesReference,
+  settingsForReference,
+} from '../model/sequenceFormat';
 import {
   isAudioClip,
   isMediaClip,
@@ -28,6 +35,7 @@ import * as T from '../model/time';
 import { TRANSITION_TYPES } from '../model/types';
 import type {
   AudioClip,
+  AssetId,
   BlendMode,
   Clip,
   ClipId,
@@ -139,26 +147,39 @@ function SequenceInspector(): React.JSX.Element {
   const run = useStudio((s) => s.run);
   const history = useStudio((s) => s.history);
   const sequenceId = useStudio((s) => s.sequenceId);
+  const selectedAssetIds = useStudio((s) => s.selectedAssetIds);
+  const previewAssetId = useStudio((s) => s.previewAssetId);
   const project = history.present.project;
   const sequence = project.sequences[sequenceId]!;
   const { size, frameRate } = sequence;
+  const [chosenReferenceId, setChosenReferenceId] = useState<AssetId | null>(null);
 
   const setSize = (width: number, height: number): void => {
-    // Encoders reject odd dimensions for most codecs, and a zero is meaningless.
-    const even = (n: number): number => Math.max(2, Math.round(n / 2) * 2);
+    const safe = encoderSafeSequenceSize({ width, height });
     run(
-      { type: 'setSequenceSettings', sequenceId, size: { width: even(width), height: even(height) } },
+      { type: 'setSequenceSettings', sequenceId, size: safe },
       'Set sequence size',
     );
   };
 
-  // Matching the media is the common case, so it gets a button rather than arithmetic.
-  const videoAssets = Object.values(project.assets).filter((a) => a.video?.size);
-  const firstVideo = videoAssets[0];
-  const matches =
-    firstVideo?.video &&
-    firstVideo.video.size.width === size.width &&
-    firstVideo.video.size.height === size.height;
+  const videoAssets = matchableVideoAssets(project, sequenceId);
+  const automaticReference = preferredSequenceReference(project, sequenceId, [
+    ...selectedAssetIds,
+    previewAssetId,
+  ]);
+  const chosenReference = chosenReferenceId
+    ? videoAssets.find((asset) => asset.id === chosenReferenceId) ?? null
+    : null;
+  const reference = chosenReference ?? automaticReference;
+  const referenceSettings = reference ? settingsForReference(sequence, reference) : null;
+  const matchesReference = reference ? sequenceMatchesReference(sequence, reference) : false;
+
+  const formatFps = (rate: T.FrameRate): string => {
+    const known = FRAME_RATES.find((candidate) =>
+      candidate.value.num === rate.num && candidate.value.den === rate.den,
+    );
+    return `${known?.label ?? T.fpsToNumber(rate).toFixed(3).replace(/0+$/, '').replace(/\.$/, '')} fps`;
+  };
 
   return (
     <>
@@ -197,26 +218,6 @@ function SequenceInspector(): React.JSX.Element {
             {preset.label}
           </button>
         ))}
-        {firstVideo?.video && (
-          <button
-            className={`bin-filter${matches ? ' on' : ''}`}
-            title={`Match "${firstVideo.name}" — ${firstVideo.video.size.width}×${firstVideo.video.size.height}`}
-            onClick={() => {
-              const media = firstVideo.video!;
-              run(
-                {
-                  type: 'setSequenceSettings',
-                  sequenceId,
-                  size: media.size,
-                  ...(media.frameRate ? { frameRate: media.frameRate } : {}),
-                },
-                'Match sequence to media',
-              );
-            }}
-          >
-            Match media
-          </button>
-        )}
       </div>
 
       <div className="field">
@@ -246,6 +247,67 @@ function SequenceInspector(): React.JSX.Element {
           ))}
         </select>
       </div>
+
+      {reference?.video && referenceSettings && (
+        <div className="field sequence-reference">
+          <label htmlFor="sequence-reference-video">Reference video</label>
+          <select
+            id="sequence-reference-video"
+            value={reference.id}
+            onChange={(event) => setChosenReferenceId(event.target.value as AssetId)}
+            title="Choose the video whose format the sequence should match"
+          >
+            {videoAssets.map((asset) => {
+              const source = asset.video!;
+              const safe = encoderSafeSequenceSize(source.size);
+              const fps = source.frameRate ? formatFps(source.frameRate) : 'VFR / unknown fps';
+              return (
+                <option key={asset.id} value={asset.id}>
+                  {asset.name} — {safe.width}×{safe.height} · {fps}
+                </option>
+              );
+            })}
+          </select>
+          <div className="sequence-reference-summary">
+            {referenceSettings.size.width}×{referenceSettings.size.height}
+            {' · '}
+            {reference.video.frameRate
+              ? formatFps(referenceSettings.frameRate)
+              : `VFR / unknown · keeps ${formatFps(sequence.frameRate)}`}
+          </div>
+          <button
+            className={`sequence-match${matchesReference ? ' matched' : ''}`}
+            disabled={matchesReference}
+            title={
+              matchesReference
+                ? `The sequence already matches "${reference.name}"`
+                : `Set the sequence format from "${reference.name}"`
+            }
+            onClick={() => {
+              run(
+                {
+                  type: 'setSequenceSettings',
+                  sequenceId,
+                  size: referenceSettings.size,
+                  frameRate: referenceSettings.frameRate,
+                },
+                `Match sequence to ${reference.name}`,
+              );
+            }}
+          >
+            {matchesReference
+              ? 'Source format matched'
+              : reference.video.frameRate
+                ? 'Match resolution and frame rate'
+                : 'Match resolution'}
+          </button>
+          <p className="hint sequence-reference-hint">
+            {reference.video.frameRate
+              ? 'Changes the sequence resolution and frame rate; clip timing stays unchanged.'
+              : 'This source has no fixed frame rate, so only the sequence resolution will change.'}
+          </p>
+        </div>
+      )}
 
       <p className="hint">
         Clip positions are stored in exact seconds, so changing the rate re-counts
@@ -678,15 +740,6 @@ function UnitInspector({ unit }: { unit: SelectedUnit }): React.JSX.Element {
     .map((id) => project.effects[id])
     .filter((e): e is EffectInstance => e !== undefined);
 
-  const paramSetter =
-    (targetId: ClipId) =>
-    (key: ClipParamKey, value: number, label: string): void =>
-      run(
-        { type: 'setClipParam', clipId: targetId, key, param: staticParam(value) },
-        label,
-        `${key}:${targetId}`,
-      );
-
   return (
     <>
       <div className="field">
@@ -772,76 +825,79 @@ function UnitInspector({ unit }: { unit: SelectedUnit }): React.JSX.Element {
       </div>
 
       {unit.visual && (
-        <VisualControls
-          clip={unit.visual}
-          setParam={paramSetter(unit.visual.id)}
-          onCommit={endGesture}
-        />
+        <details className="inspector-group" open>
+          <summary>Video</summary>
+          <div className="inspector-group-body">
+            <VisualControls
+              clip={unit.visual}
+              onCommit={endGesture}
+            />
+          </div>
+        </details>
       )}
       {unit.audio && (
-        <>
-          {unit.visual && <p className="section-label">Audio</p>}
+        <details className="inspector-group" open>
+          <summary>Audio</summary>
+          <div className="inspector-group-body">
           <AudioControls
             clip={unit.audio}
-            setParam={paramSetter(unit.audio.id)}
             onCommit={endGesture}
           />
-        </>
+          </div>
+        </details>
       )}
 
-      <hr style={{ border: 0, borderTop: '1px solid var(--line)', margin: '14px 0' }} />
-
-      <div className="field">
-        <label>Effects</label>
-        {effects.length === 0 && <p className="hint">None.</p>}
-        {effects.map((effect) => (
-          <EffectCard key={effect.id} effect={effect} />
-        ))}
-        <select
-          value=""
-          onChange={(event) => {
-            const type = event.target.value;
-            if (!type) return;
-            // Audio effects belong on the audio half of a linked pair.
-            const target =
-              EFFECT_REGISTRY[type]?.category === 'audio'
-                ? (unit.audio ?? clip)
-                : (unit.visual ?? clip);
-            run(
-              {
-                type: 'addEffect',
-                owner: { kind: 'clip', clipId: target.id },
-                effectType: type,
-                params: defaultParams(type),
-              },
-              `Add ${EFFECT_REGISTRY[type]?.label ?? type}`,
-            );
-          }}
-        >
-          <option value="">Add effect…</option>
-          {listEffects()
-            .filter((definition) =>
-              definition.category === 'audio' ? Boolean(unit.audio) : Boolean(unit.visual),
-            )
-            .map((definition) => (
-              <option key={definition.type} value={definition.type}>
-                {definition.label}
-              </option>
-            ))}
-        </select>
-      </div>
+      <details className="inspector-group" open={effects.length > 0}>
+        <summary>Effects{effects.length > 0 ? ` (${effects.length})` : ''}</summary>
+        <div className="inspector-group-body field">
+          {effects.length === 0 && <p className="hint">None.</p>}
+          {effects.map((effect) => (
+            <EffectCard key={effect.id} effect={effect} />
+          ))}
+          <select
+            value=""
+            onChange={(event) => {
+              const type = event.target.value;
+              if (!type) return;
+              // Audio effects belong on the audio half of a linked pair.
+              const target =
+                EFFECT_REGISTRY[type]?.category === 'audio'
+                  ? (unit.audio ?? clip)
+                  : (unit.visual ?? clip);
+              run(
+                {
+                  type: 'addEffect',
+                  owner: { kind: 'clip', clipId: target.id },
+                  effectType: type,
+                  params: defaultParams(type),
+                },
+                `Add ${EFFECT_REGISTRY[type]?.label ?? type}`,
+              );
+            }}
+          >
+            <option value="">Add effect…</option>
+            {listEffects()
+              .filter((definition) =>
+                definition.category === 'audio' ? Boolean(unit.audio) : Boolean(unit.visual),
+              )
+              .map((definition) => (
+                <option key={definition.type} value={definition.type}>
+                  {definition.label}
+                </option>
+              ))}
+          </select>
+        </div>
+      </details>
     </>
   );
 }
 
 interface ControlProps {
-  setParam: (key: ClipParamKey, value: number, label: string) => void;
   onCommit: () => void;
 }
 
 function VisualControls({
   clip,
-  setParam,
   onCommit,
 }: ControlProps & { clip: VideoClip | TitleClip | SolidClip }): React.JSX.Element {
   const run = useStudio((s) => s.run);
@@ -853,19 +909,24 @@ function VisualControls({
 
   return (
     <>
-      <Slider
+      <ParamSlider
+        clip={clip}
+        param={clip.opacity}
+        paramKey="opacity"
         label="Opacity"
         neutral={1}
         neutralSnapSteps={4}
-        value={staticValue(clip.opacity, 1)}
         min={0}
         max={1}
         step={0.01}
         format={(v) => formatPercent(v * 100)}
-        onChange={(value) => setParam('opacity', value, 'Set opacity')}
         onCommit={onCommit}
       />
-      <Slider
+      <ParamSlider
+        clip={clip}
+        param={transform.scaleX}
+        paramKey="transform.scaleX"
+        linked={{ param: transform.scaleY, key: 'transform.scaleY' }}
         label="Scale"
         // 0 to 200%, so 100% lands in the middle of the travel rather than a quarter
         // of the way along — the same reason the volume sliders are counted in
@@ -873,77 +934,77 @@ function VisualControls({
         // stops looking like anything.
         neutral={1}
         neutralSnapSteps={4}
-        value={staticValue(transform.scaleX, 1)}
         min={0}
         max={2}
         step={0.01}
         format={(v) => formatPercent(v * 100)}
-        onChange={(value) => {
-          setParam('transform.scaleX', value, 'Set scale');
-          setParam('transform.scaleY', value, 'Set scale');
-        }}
         onCommit={onCommit}
       />
-      <Slider
+      <ParamSlider
+        clip={clip}
+        param={transform.x}
+        paramKey="transform.x"
         label="Position X"
         neutral={0}
-        value={staticValue(transform.x, 0)}
         min={-1920}
         max={1920}
         step={1}
         unit=" px"
         precisionInput
-        onChange={(value) => setParam('transform.x', value, 'Move layer')}
         onCommit={onCommit}
       />
-      <Slider
+      <ParamSlider
+        clip={clip}
+        param={transform.y}
+        paramKey="transform.y"
         label="Position Y"
         neutral={0}
-        value={staticValue(transform.y, 0)}
         min={-1080}
         max={1080}
         step={1}
         unit=" px"
         precisionInput
-        onChange={(value) => setParam('transform.y', value, 'Move layer')}
         onCommit={onCommit}
       />
-      <Slider
+      <ParamSlider
+        clip={clip}
+        param={transform.rotation}
+        paramKey="transform.rotation"
         label="Rotation"
         neutral={0}
         neutralSnapSteps={4}
-        value={staticValue(transform.rotation, 0)}
         min={-180}
         max={180}
         step={0.5}
         unit="°"
         precisionInput
-        onChange={(value) => setParam('transform.rotation', value, 'Rotate layer')}
         onCommit={onCommit}
       />
 
       {framed && (
         <>
-          <Slider
+          <ParamSlider
+            clip={clip}
+            param={framed.crop.left}
+            paramKey="crop.left"
             label="Crop left"
             neutral={0}
-            value={staticValue(framed.crop.left, 0)}
             min={0}
             max={0.49}
             step={0.005}
             format={(v) => formatPercent(v * 100)}
-        onChange={(value) => setParam('crop.left', value, 'Crop')}
             onCommit={onCommit}
           />
-          <Slider
+          <ParamSlider
+            clip={clip}
+            param={framed.crop.right}
+            paramKey="crop.right"
             label="Crop right"
             neutral={0}
-            value={staticValue(framed.crop.right, 0)}
             min={0}
             max={0.49}
             step={0.005}
             format={(v) => formatPercent(v * 100)}
-        onChange={(value) => setParam('crop.right', value, 'Crop')}
             onCommit={onCommit}
           />
         </>
@@ -1012,36 +1073,39 @@ function cssHex(color: string): string {
 
 function AudioControls({
   clip,
-  setParam,
   onCommit,
 }: ControlProps & { clip: AudioClip }): React.JSX.Element {
   const run = useStudio((s) => s.run);
 
   return (
     <>
-      <Slider
+      <ParamSlider
+        clip={clip}
+        param={clip.gainDb}
+        paramKey="gainDb"
         label="Gain"
         neutral={GAIN_PERCENT_UNITY}
         neutralSnapSteps={5}
-        value={Math.round(gainDbToPercent(staticValue(clip.gainDb, 0)))}
+        toDisplay={(value) => Math.round(gainDbToPercent(value))}
+        fromDisplay={percentToGainDb}
         min={0}
         max={GAIN_PERCENT_MAX}
         step={1}
         format={formatPercent}
         detail={(percent) => formatGain(percentToGainDb(percent))}
-        onChange={(percent) => setParam('gainDb', percentToGainDb(percent), 'Set gain')}
         onCommit={onCommit}
       />
-      <Slider
+      <ParamSlider
+        clip={clip}
+        param={clip.pan}
+        paramKey="pan"
         label="Pan"
         neutral={0}
         neutralSnapSteps={4}
-        value={staticValue(clip.pan, 0)}
         min={-1}
         max={1}
         step={0.01}
         format={formatPan}
-        onChange={(value) => setParam('pan', value, 'Set pan')}
         onCommit={onCommit}
       />
       <Slider
@@ -1148,6 +1212,120 @@ function EffectCard({ effect }: { effect: EffectInstance }): React.JSX.Element {
   );
 }
 
+interface SliderAnimation {
+  readonly enabled: boolean;
+  readonly active: boolean;
+  readonly count: number;
+  readonly canGoPrevious: boolean;
+  readonly canGoNext: boolean;
+  readonly onToggle: () => void;
+  readonly onPrevious: () => void;
+  readonly onNext: () => void;
+}
+
+interface SliderProps {
+  readonly label: string;
+  readonly value: number;
+  readonly min: number;
+  readonly max: number;
+  readonly step: number;
+  readonly unit?: string;
+  readonly format?: (value: number) => string;
+  readonly detail?: (value: number) => string;
+  readonly neutral?: number;
+  readonly neutralSnapSteps?: number;
+  readonly precisionInput?: boolean;
+  readonly animation?: SliderAnimation;
+  readonly onChange: (value: number) => void;
+  readonly onCommit: () => void;
+}
+
+/** A numeric clip property connected to the document's existing keyframe track. */
+function ParamSlider({
+  clip,
+  param,
+  paramKey,
+  linked,
+  toDisplay = (value) => value,
+  fromDisplay = (value) => value,
+  ...slider
+}: Omit<SliderProps, 'value' | 'onChange' | 'animation'> & {
+  readonly clip: VideoClip | TitleClip | SolidClip | AudioClip;
+  readonly param: Param<number>;
+  readonly paramKey: ClipParamKey;
+  readonly linked?: { readonly param: Param<number>; readonly key: ClipParamKey };
+  readonly toDisplay?: (value: number) => number;
+  readonly fromDisplay?: (value: number) => number;
+}): React.JSX.Element {
+  const runMany = useStudio((s) => s.runMany);
+  const setPlayhead = useStudio((s) => s.setPlayhead);
+  const playhead = useStudio((s) => {
+    const sequence = s.history.present.project.sequences[s.sequenceId];
+    return sequence?.view.playhead ?? T.TIME_ZERO;
+  });
+  const at = T.clamp(T.sub(playhead, clip.start), T.TIME_ZERO, clip.duration);
+  const value = evalNumber(param, at);
+  const keyframes = param.kind === 'keyframed' ? param.keyframes : [];
+  const active = keyframes.some((item) => T.eq(item.at, at));
+  const previous = [...keyframes].reverse().find((item) => T.lt(item.at, at));
+  const next = keyframes.find((item) => T.gt(item.at, at));
+
+  const command = (key: ClipParamKey, track: Param<number>) => ({
+    type: 'setClipParam' as const,
+    clipId: clip.id,
+    key,
+    param: track,
+  });
+  const setTracks = (primary: Param<number>, paired?: Param<number>): void => {
+    runMany(
+      [command(paramKey, primary), ...(linked && paired ? [command(linked.key, paired)] : [])],
+      `Set ${slider.label}`,
+      `param:${clip.id}:${paramKey}`,
+    );
+  };
+  const change = (displayValue: number): void => {
+    const documentValue = fromDisplay(displayValue);
+    const primary = param.kind === 'keyframed'
+      ? upsertKeyframe(param, at, documentValue)
+      : staticParam(documentValue);
+    const paired = linked
+      ? linked.param.kind === 'keyframed'
+        ? upsertKeyframe(linked.param, at, documentValue)
+        : staticParam(documentValue)
+      : undefined;
+    setTracks(primary, paired);
+  };
+  const toggle = (): void => {
+    const toggleTrack = (track: Param<number>): Param<number> => {
+      const here = evalNumber(track, at);
+      return track.kind === 'keyframed' && track.keyframes.some((item) => T.eq(item.at, at))
+        ? removeKeyframe(track, at)
+        : upsertKeyframe(track, at, here);
+    };
+    setTracks(toggleTrack(param), linked ? toggleTrack(linked.param) : undefined);
+    slider.onCommit();
+  };
+  const go = (relative: T.Time): void => setPlayhead(T.add(clip.start, relative));
+
+  return (
+    <Slider
+      {...slider}
+      value={toDisplay(value)}
+      onChange={change}
+      animation={{
+        enabled: param.kind === 'keyframed',
+        active,
+        count: keyframes.length,
+        canGoPrevious: Boolean(previous),
+        canGoNext: Boolean(next),
+        onToggle: toggle,
+        onPrevious: () => previous && go(previous.at),
+        onNext: () => next && go(next.at),
+      }}
+    />
+  );
+}
+
 function Slider({
   label,
   value,
@@ -1160,41 +1338,10 @@ function Slider({
   neutral,
   neutralSnapSteps = 0,
   precisionInput = false,
+  animation,
   onChange,
   onCommit,
-}: {
-  label: string;
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  unit?: string;
-  /**
-   * Overrides the readout without touching the track.
-   *
-   * The slider's own value stays in whatever unit the document stores, so the
-   * spacing of the travel is unchanged — only the number under it is translated.
-   * That matters for gain: decibels are already logarithmic, and re-scaling the
-   * track to percent would crowd every quiet adjustment into its bottom sliver.
-   */
-  format?: (value: number) => string;
-  /** Fuller value for the readout's tooltip, where there is room for both units. */
-  detail?: (value: number) => string;
-  /**
-   * The value this control is expected to sit at — unity, centre, none.
-   *
-   * Marked on the track so it is obvious both that a parameter has been changed and
-   * where it came from. Omitted where there is no such value: a duration or a
-   * position has no natural resting point to point at.
-   */
-  neutral?: number;
-  /** Pointer detent around neutral, measured in slider steps. */
-  neutralSnapSteps?: number;
-  /** Adds typed entry where the range contains more precision than dragging can expose. */
-  precisionInput?: boolean;
-  onChange: (value: number) => void;
-  onCommit: () => void;
-}): React.JSX.Element {
+}: SliderProps): React.JSX.Element {
   const id = useId();
   const [draft, setDraft] = useState<string | null>(null);
   const decimals = step < 0.01 ? 3 : step < 1 ? 2 : 0;
@@ -1209,7 +1356,33 @@ function Slider({
 
   return (
     <div className="field">
-      <label htmlFor={id}>{label}</label>
+      <div className="field-label-row">
+        <label htmlFor={id}>{label}</label>
+        {animation && (
+          <span className="keyframe-controls" title={`${animation.count} keyframe(s)`}>
+            <button
+              className="icon"
+              disabled={!animation.canGoPrevious}
+              aria-label={`Previous ${label} keyframe`}
+              title="Previous keyframe"
+              onClick={animation.onPrevious}
+            >‹</button>
+            <button
+              className={`icon keyframe-toggle${animation.active ? ' active' : ''}`}
+              aria-label={animation.active ? `Remove ${label} keyframe here` : `Add ${label} keyframe here`}
+              title={animation.active ? 'Remove keyframe here' : 'Add keyframe here'}
+              onClick={animation.onToggle}
+            >{animation.active ? '◆' : '◇'}</button>
+            <button
+              className="icon"
+              disabled={!animation.canGoNext}
+              aria-label={`Next ${label} keyframe`}
+              title="Next keyframe"
+              onClick={animation.onNext}
+            >›</button>
+          </span>
+        )}
+      </div>
       <div className="value-row">
         <Fader
           id={id}

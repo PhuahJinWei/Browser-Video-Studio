@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { suggestBitrate, type ExportSettings } from '../engine/export';
+import { useEffect, useState } from 'react';
+import { detectExportSupport, suggestBitrate, type ExportSettings, type ExportSupport } from '../engine/export';
 import { sequenceDuration } from '../model/selectors';
 import * as T from '../model/time';
 import { Fader } from './Fader';
@@ -16,16 +16,35 @@ export function ExportDialog({ onClose }: { onClose: () => void }): React.JSX.El
   const history = useStudio((s) => s.history);
   const sequenceId = useStudio((s) => s.sequenceId);
   const runExport = useStudio((s) => s.runExport);
+  const cancelExport = useStudio((s) => s.cancelExport);
   const exportProgress = useStudio((s) => s.exportProgress);
+  const exportBusy = useStudio((s) => s.exportBusy);
 
   const project = history.present.project;
   const sequence = project.sequences[sequenceId]!;
   const [settings, setSettings] = useState<ExportSettings>(() =>
     defaultExportSettings(project, sequenceId),
   );
+  const [support, setSupport] = useState<ExportSupport | null>(null);
+
+  useEffect(() => {
+    let current = true;
+    setSupport(null);
+    void detectExportSupport(settings).then((result) => {
+      if (!current) return;
+      setSupport(result);
+      if (!result[settings.container]) {
+        const fallback = settings.container === 'mp4' ? 'webm' : 'mp4';
+        if (result[fallback]) setSettings((value) => ({ ...value, container: fallback }));
+      }
+    });
+    return () => {
+      current = false;
+    };
+  }, [settings.size.width, settings.size.height, settings.frameRate.num, settings.frameRate.den, settings.bitrate, settings.includeAudio, settings.container]);
 
   const duration = sequenceDuration(project, sequenceId);
-  const busy = exportProgress !== null;
+  const busy = exportBusy;
   const empty = !T.isPositive(duration);
 
   const applyHeight = (height: number): void => {
@@ -50,9 +69,16 @@ export function ExportDialog({ onClose }: { onClose: () => void }): React.JSX.El
               setSettings((s) => ({ ...s, container: event.target.value as 'mp4' | 'webm' }))
             }
           >
-            <option value="mp4">MP4 · H.264 + AAC</option>
-            <option value="webm">WebM · VP9 + Opus</option>
+            <option value="mp4" disabled={support?.mp4 === false}>MP4 · H.264 + AAC</option>
+            <option value="webm" disabled={support?.webm === false}>WebM · VP9 + Opus</option>
           </select>
+          <p className="hint" style={{ marginTop: 4 }}>
+            {support === null
+              ? 'Checking encoders for these settings…'
+              : support[settings.container]
+                ? 'This browser can encode the selected format at these settings.'
+                : support[`${settings.container}Reason`]}
+          </p>
         </div>
 
         <div className="field">
@@ -154,12 +180,12 @@ export function ExportDialog({ onClose }: { onClose: () => void }): React.JSX.El
         )}
 
         <div className="actions">
-          <button onClick={onClose} disabled={busy}>
-            {busy ? 'Working…' : 'Cancel'}
+          <button onClick={busy ? cancelExport : onClose}>
+            {busy ? 'Cancel export' : 'Cancel'}
           </button>
           <button
             className="primary"
-            disabled={busy || empty}
+            disabled={busy || empty || support === null || !support[settings.container]}
             onClick={() => void runExport(settings)}
           >
             Export

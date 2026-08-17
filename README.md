@@ -24,10 +24,13 @@ Import → edit → play → export, end to end, entirely on your machine.
 - **Keyboard follows focus.** `Ctrl+A`, `Delete`, `Escape` and `Enter` act on the library when it has focus and on the timeline otherwise, and selecting all in the library means the assets you can actually see rather than every asset in the project.
 - **Library** with folders, a search that looks across all of them, multi-select (click, Ctrl, Shift), and grid or list view. Deleting media that is still cut into the timeline says so and offers to take the clips too, rather than silently refusing. Media that could not be found when a project reopened is marked, on the card and on the clip.
 - **Preview** composited on the GPU — transform, opacity, crop, eight blend modes, colour adjustment and gaussian blur.
+- **Source monitor editing.** Double-click media to preview the original, mark In and Out, then insert or overwrite the marked range at the program playhead. `I`, `O`, `,` and `.` provide the desktop-style shortcuts.
+- **Clip keyframes** for transform, opacity, crop, gain and pan, with add/remove and previous/next navigation directly in the inspector.
 - **Titles** rendered to a canvas and composited like any other layer.
 - **Playback** with A/V sync driven by the audio clock. Seeking mid-playback re-bases the transport and keeps rolling.
 - **Fullscreen preview**, falling back to an in-page focus mode where the browser disallows fullscreen.
-- **Export** to MP4 (H.264 + AAC) or WebM (VP9 + Opus) at any resolution and bitrate.
+- **Export** to MP4 (H.264 + AAC) or WebM (VP9 + Opus) at any resolution and bitrate. Chromium's file-system picker streams large exports directly to disk; other environments use a normal download fallback.
+- **Editing proxies.** Generate or remove a 720p-or-smaller proxy from a media item's context menu. Sequential preview uses it while frame-accurate seeks, audio and final export continue to use the original.
 - **Group and link.** Clicking a clip selects everything linked or grouped with it, so delete and the inspector act on the whole unit; Alt-click isolates one member. Ctrl+G / Ctrl+Shift+G group and ungroup.
 - **Undo/redo** where a whole drag collapses into one step.
 - **Autosave** to OPFS — reload the page and your project comes back, media included.
@@ -36,7 +39,7 @@ Import → edit → play → export, end to end, entirely on your machine.
 
 ### Not yet built
 
-Transitions, keyframe editing UI (the model supports keyframes; nothing exposes them yet), proxies for 4K, nested sequences, speed ramps, and everything in L4–L5 below.
+Nested sequences, speed ramps, advanced audio DSP, colour management, scopes, collaboration, a WASM codec fallback, and everything in L4–L5 below. Proxy creation is currently manual, and effect parameters do not yet expose their model-level keyframes in the inspector.
 
 ## Develop
 
@@ -53,6 +56,7 @@ npm test
 ```
 
 `npm run typecheck` type-checks without emitting; `npm run build` produces the static site in `dist/`.
+`npm run test:e2e` runs the Chromium real-media workflow (install its browser once with `npx playwright install chromium`).
 
 Testing the engine needs real media. `src/dev/testMedia.ts` generates a test-pattern clip in the browser so no binary fixtures are checked in and ffmpeg is not required:
 
@@ -82,8 +86,8 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design, where th
 | | |
 |---|---|
 | **L1** | ✅ Built — import, timeline, playback, effects, export, autosave |
-| **L2** | Transitions, keyframe editor, text styling, multi-select marquee |
-| **L3** | Proxies for 4K, nested sequences, speed ramps, audio DSP, WASM codec fallback |
+| **L2** | ✅ Transitions and core clip keyframes built; text styling and multi-select marquee remain |
+| **L3** | Editing proxies built; nested sequences, speed ramps, audio DSP and WASM codec fallback remain |
 | **L4** | On-device AI: background segmentation, Whisper captions, scene detection, silence removal |
 | **L5** | Node-graph effects, GPU scopes, colour management |
 

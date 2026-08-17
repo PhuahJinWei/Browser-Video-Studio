@@ -15,6 +15,8 @@ import {
   Mp4OutputFormat,
   Output,
   Quality,
+  StreamTarget,
+  type StreamTargetChunk,
   VideoSample,
   VideoSampleSource,
   type VideoCodec,
@@ -62,7 +64,9 @@ export interface ExportSettings {
 }
 
 export interface ExportResult {
-  readonly blob: Blob;
+  /** Present for download fallback; null when bytes were streamed straight to disk. */
+  readonly blob: Blob | null;
+  readonly byteLength: number;
   readonly fileName: string;
   readonly durationSeconds: number;
   readonly framesEncoded: number;
@@ -80,11 +84,85 @@ export interface ExportOptions {
   readonly settings: ExportSettings;
   readonly onProgress?: (progress: ExportProgress) => void;
   readonly signal?: AbortSignal;
+  /** Optional seekable output stream, normally a File System Access destination. */
+  readonly destination?: ExportDestination;
+}
+
+export interface ExportDestination {
+  readonly writable: WritableStream<StreamTargetChunk>;
+  /** Mark the destination aborted before the muxer closes it. */
+  readonly cancel: () => void;
+  readonly byteLength: () => number;
+}
+
+export interface ExportSupport {
+  readonly mp4: boolean;
+  readonly webm: boolean;
+  readonly mp4Reason: string | null;
+  readonly webmReason: string | null;
+}
+
+/** Probe the exact resolution/rate requested instead of assuming boot-time 1080p support. */
+export async function detectExportSupport(settings: ExportSettings): Promise<ExportSupport> {
+  if (typeof VideoEncoder === 'undefined') {
+    return {
+      mp4: false,
+      webm: false,
+      mp4Reason: 'VideoEncoder is unavailable',
+      webmReason: 'VideoEncoder is unavailable',
+    };
+  }
+
+  const videoConfig = {
+    width: settings.size.width,
+    height: settings.size.height,
+    bitrate: settings.bitrate,
+    framerate: T.fpsToNumber(settings.frameRate),
+  };
+  const supportsVideo = async (codec: string): Promise<boolean> => {
+    try {
+      return (await VideoEncoder.isConfigSupported({ codec, ...videoConfig })).supported === true;
+    } catch {
+      return false;
+    }
+  };
+  const supportsAudio = async (codec: string): Promise<boolean> => {
+    if (!settings.includeAudio) return true;
+    if (typeof AudioEncoder === 'undefined') return false;
+    try {
+      return (
+        await AudioEncoder.isConfigSupported({
+          codec,
+          sampleRate: 48_000,
+          numberOfChannels: 2,
+          bitrate: 192_000,
+        })
+      ).supported === true;
+    } catch {
+      return false;
+    }
+  };
+
+  const h264Codec = settings.size.width <= 1280 && settings.size.height <= 720
+    ? 'avc1.42001f'
+    : 'avc1.42002a';
+  const [h264, aac, vp9, opus] = await Promise.all([
+    supportsVideo(h264Codec),
+    supportsAudio('mp4a.40.2'),
+    supportsVideo('vp09.00.10.08'),
+    supportsAudio('opus'),
+  ]);
+  return {
+    mp4: h264 && aac,
+    webm: vp9 && opus,
+    mp4Reason: h264 ? (aac ? null : 'AAC encoding is unavailable') : 'H.264 is unavailable for these settings',
+    webmReason: vp9 ? (opus ? null : 'Opus encoding is unavailable') : 'VP9 is unavailable for these settings',
+  };
 }
 
 /** Render, encode and mux a sequence. Resolves with the finished file. */
 export async function exportSequence(options: ExportOptions): Promise<ExportResult> {
-  const { project, sequenceId, media, settings, onProgress, signal } = options;
+  const { project, sequenceId, media, settings, onProgress, signal, destination } = options;
   const sequence = project.sequences[sequenceId];
   if (!sequence) throw new ExportError(`No sequence "${sequenceId}"`);
 
@@ -129,9 +207,16 @@ export async function exportSequence(options: ExportOptions): Promise<ExportResu
   // A compositor with no canvas: renders offscreen and reads back.
   const compositor = await Compositor.create(null, settings.size);
 
+  const target = destination
+    ? new StreamTarget(destination.writable, { chunked: true })
+    : new BufferTarget();
   const output = new Output({
-    format: settings.container === 'mp4' ? new Mp4OutputFormat() : new WebMOutputFormat(),
-    target: new BufferTarget(),
+    // A disk target can seek, so a regular MP4 keeps the broadest player support
+    // without accumulating media chunks in memory for fast-start placement.
+    format: settings.container === 'mp4'
+      ? new Mp4OutputFormat({ fastStart: destination ? false : 'in-memory' })
+      : new WebMOutputFormat(),
+    target,
   });
 
   const videoSource = new VideoSampleSource({
@@ -211,18 +296,21 @@ export async function exportSequence(options: ExportOptions): Promise<ExportResu
     throwIfAborted();
     await output.finalize();
 
-    const target = output.target as BufferTarget;
-    if (!target.buffer) throw new ExportError('Muxer produced no output');
-    const blob = new Blob([target.buffer], { type: codecs.mime });
+    const buffer = target instanceof BufferTarget ? target.buffer : null;
+    if (!destination && !buffer) throw new ExportError('Muxer produced no output');
+    const blob = buffer ? new Blob([buffer], { type: codecs.mime }) : null;
+    const byteLength = blob?.size ?? destination?.byteLength() ?? 0;
 
     report('done');
     return {
       blob,
+      byteLength,
       fileName: `${sequence.name || 'sequence'}.${codecs.extension}`,
       durationSeconds: T.toSeconds(duration),
       framesEncoded,
     };
   } catch (error) {
+    destination?.cancel();
     await output.cancel().catch(() => undefined);
     throw error;
   } finally {

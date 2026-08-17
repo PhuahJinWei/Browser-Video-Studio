@@ -9,6 +9,8 @@ export interface ScrubberProps {
   readonly title?: string;
   /** Normalised keyboard increment. Defaults to one percent. */
   readonly step?: number;
+  /** Optional selected source range, normalised to this rail. */
+  readonly range?: { readonly start: number; readonly end: number };
 }
 
 export function clampScrubValue(value: number): number {
@@ -38,6 +40,7 @@ export function Scrubber({
   ariaValueText,
   title,
   step = 0.01,
+  range,
 }: ScrubberProps): React.JSX.Element {
   const railRef = useRef<HTMLDivElement>(null);
   const activePointer = useRef<number | null>(null);
@@ -111,6 +114,15 @@ export function Scrubber({
       }}
     >
       <div className="scrub-rail" ref={railRef}>
+        {range && (
+          <div
+            className="scrub-range"
+            style={{
+              left: `${clampScrubValue(range.start) * 100}%`,
+              width: `${Math.max(0, clampScrubValue(range.end) - clampScrubValue(range.start)) * 100}%`,
+            }}
+          />
+        )}
         <div className="scrub-fill" style={{ width: `${progress * 100}%` }} />
         <div className="scrub-knob" style={{ left: `${progress * 100}%` }} />
       </div>

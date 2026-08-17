@@ -93,7 +93,7 @@ export interface CreateTrackOptions {
 }
 
 /** One model-level default for every timeline track kind. */
-export const DEFAULT_TRACK_HEIGHT = 72;
+export const DEFAULT_TRACK_HEIGHT = 100;
 
 export function createTrack(opts: CreateTrackOptions): Track {
   return {

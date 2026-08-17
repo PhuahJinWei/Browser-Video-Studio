@@ -48,6 +48,9 @@ export interface LayoutState {
   readonly timelineVideoRatio: number;
   readonly timelineVideoScrollTop: number;
   readonly timelineAudioScrollTop: number;
+  /** Local listening level; unlike sequence master gain this never affects export. */
+  readonly monitorVolume: number;
+  readonly monitorMuted: boolean;
 
   setBinWidth: (px: number) => void;
   setInspectorWidth: (px: number) => void;
@@ -57,8 +60,11 @@ export interface LayoutState {
   setTimelineHeight: (px: number) => void;
   setTimelineVideoRatio: (ratio: number) => void;
   setTimelinePaneScroll: (kind: 'video' | 'audio', px: number) => void;
+  setMonitorVolume: (volume: number) => void;
+  setMonitorMuted: (muted: boolean) => void;
   setTheme: (theme: Theme) => void;
   toggleTheme: () => void;
+  resetWorkspace: () => void;
 }
 
 const STORAGE_KEY = 'bvs.layout.v1';
@@ -73,18 +79,13 @@ interface StoredLayout {
   timelineVideoRatio?: unknown;
   timelineVideoScrollTop?: unknown;
   timelineAudioScrollTop?: unknown;
+  monitorVolume?: unknown;
+  monitorMuted?: unknown;
 }
 
 const DEFAULTS = {
-  /*
-   * Wide enough to browse in rather than merely to list.
-   *
-   * The grid reflows cards to fill whatever width it is given, so a narrow default
-   * meant a single column of thumbnails and a lot of scrolling before anything had
-   * even been imported. The centre column keeps its own 300px floor, so this only
-   * takes room the preview was not using.
-   */
-  binWidth: 520,
+  /* Two useful thumbnail columns without making the source/program monitor secondary. */
+  binWidth: 340,
   inspectorWidth: 280,
   // Open to begin with: a panel nobody knows about is the problem a collapsible one
   // is supposed to solve, not create. One click hides it for good.
@@ -96,6 +97,8 @@ const DEFAULTS = {
   timelineVideoRatio: 0.5,
   timelineVideoScrollTop: 0,
   timelineAudioScrollTop: 0,
+  monitorVolume: 1,
+  monitorMuted: false,
 };
 
 /**
@@ -149,6 +152,12 @@ function load(): typeof DEFAULTS {
         typeof stored.timelineAudioScrollTop === 'number'
           ? Math.max(0, stored.timelineAudioScrollTop)
           : DEFAULTS.timelineAudioScrollTop,
+      monitorVolume:
+        typeof stored.monitorVolume === 'number'
+          ? clamp(stored.monitorVolume, 0, 1)
+          : DEFAULTS.monitorVolume,
+      monitorMuted:
+        typeof stored.monitorMuted === 'boolean' ? stored.monitorMuted : DEFAULTS.monitorMuted,
     };
   } catch {
     // A corrupt or unavailable store is not worth failing to start over.
@@ -170,6 +179,8 @@ function save(state: LayoutState): void {
         timelineVideoRatio: state.timelineVideoRatio,
         timelineVideoScrollTop: state.timelineVideoScrollTop,
         timelineAudioScrollTop: state.timelineAudioScrollTop,
+        monitorVolume: state.monitorVolume,
+        monitorMuted: state.monitorMuted,
       }),
     );
   } catch {
@@ -239,6 +250,14 @@ export const useLayout = create<LayoutState>((set, get) => {
       // pixel would turn a cheap pane scroll into repeated JSON/localStorage work.
       persistTimelineMotion();
     },
+    setMonitorVolume: (volume) => {
+      set({ monitorVolume: clamp(volume, 0, 1) });
+      persist();
+    },
+    setMonitorMuted: (muted) => {
+      set({ monitorMuted: muted });
+      persist();
+    },
     setTheme: (theme) => {
       set({ theme });
       applyTheme(theme);
@@ -248,6 +267,24 @@ export const useLayout = create<LayoutState>((set, get) => {
       const theme: Theme = get().theme === 'dark' ? 'light' : 'dark';
       set({ theme });
       applyTheme(theme);
+      persist();
+    },
+    resetWorkspace: () => {
+      const current = get();
+      set({
+        binWidth: DEFAULTS.binWidth,
+        inspectorWidth: DEFAULTS.inspectorWidth,
+        inspectorOpen: DEFAULTS.inspectorOpen,
+        libraryView: DEFAULTS.libraryView,
+        timelineHeight: DEFAULTS.timelineHeight,
+        timelineVideoRatio: DEFAULTS.timelineVideoRatio,
+        timelineVideoScrollTop: 0,
+        timelineAudioScrollTop: 0,
+        // Theme and listening level are preferences, not panel geometry.
+        theme: current.theme,
+        monitorVolume: current.monitorVolume,
+        monitorMuted: current.monitorMuted,
+      });
       persist();
     },
   };

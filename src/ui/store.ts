@@ -11,8 +11,16 @@ import { create } from 'zustand';
 import { planTransition, type PlannedCut } from '../model/planTransition';
 import { DEFAULT_TRANSITION_SECONDS } from './transitions';
 import { Engine, type EngineTelemetry } from '../engine/engine';
-import { exportSequence, suggestBitrate, type ExportProgress, type ExportSettings } from '../engine/export';
+import {
+  exportSequence,
+  suggestBitrate,
+  type ExportDestination,
+  type ExportProgress,
+  type ExportSettings,
+} from '../engine/export';
+import type { StreamTargetChunk } from 'mediabunny';
 import { isImageFile, MediaLibrary } from '../engine/media';
+import { generateProxy as encodeProxy } from '../engine/proxy';
 import {
   densityForZoom,
   PreviewCache,
@@ -47,6 +55,7 @@ import {
 } from '../model/selectors';
 import * as T from '../model/time';
 import { staticParam } from '../model/params';
+import { encoderSafeSequenceSize } from '../model/sequenceFormat';
 import type {
   Asset,
   AssetId,
@@ -64,14 +73,26 @@ import type {
   TransitionId,
 } from '../model/types';
 import {
+  PROJECT_FILE_EXTENSION,
+  projectFileName,
+  projectFileSize,
+  readProjectFile,
+  writeProjectFile,
+} from '../storage/projectFile';
+import {
   Autosaver,
   deleteMedia,
+  deleteProxy,
   deleteProject,
   listProjects,
+  loadMedia,
+  loadProxy,
   loadMostRecent,
   loadProject,
   renameProject as renameStoredProject,
   saveMedia,
+  saveProxy,
+  saveProject,
   type LoadedProject,
   type ProjectSummary,
   type SaveState,
@@ -101,6 +122,86 @@ function safeFileName(name: string): string {
     .replace(/[. ]+$/, '')
     .slice(0, 180)
     .trim() || 'untitled';
+}
+
+interface BrowserFileWritable {
+  write(chunk: { readonly type: 'write'; readonly position: number; readonly data: Uint8Array }): Promise<void>;
+  close(): Promise<void>;
+  abort(reason?: unknown): Promise<void>;
+}
+
+interface BrowserFileHandle {
+  createWritable(): Promise<BrowserFileWritable>;
+}
+
+type SaveFilePicker = (options: {
+  readonly suggestedName: string;
+  readonly types: readonly {
+    readonly description: string;
+    readonly accept: Readonly<Record<string, readonly string[]>>;
+  }[];
+}) => Promise<BrowserFileHandle>;
+
+/**
+ * Choose a seekable destination while the Export click still owns user activation.
+ * Browsers without File System Access fall back to the ordinary Blob download.
+ */
+async function chooseExportDestination(
+  fileName: string,
+  container: ExportSettings['container'],
+): Promise<ExportDestination | 'fallback' | 'cancelled'> {
+  const picker = (globalThis as typeof globalThis & { showSaveFilePicker?: SaveFilePicker })
+    .showSaveFilePicker;
+  if (!picker) return 'fallback';
+
+  try {
+    const mime = container === 'mp4' ? 'video/mp4' : 'video/webm';
+    const extension = container === 'mp4' ? '.mp4' : '.webm';
+    const handle = await picker({
+      suggestedName: safeFileName(fileName),
+      types: [{ description: `${container.toUpperCase()} video`, accept: { [mime]: [extension] } }],
+    });
+    const file = await handle.createWritable();
+    let aborted = false;
+    let bytes = 0;
+    let stream: WritableStream<StreamTargetChunk>;
+    stream = new WritableStream<StreamTargetChunk>({
+      write: async (chunk) => {
+        if (aborted) throw new DOMException('Export cancelled', 'AbortError');
+        bytes = Math.max(bytes, chunk.position + chunk.data.byteLength);
+        await file.write({ type: 'write', position: chunk.position, data: chunk.data });
+      },
+      close: async () => {
+        if (aborted) await file.abort('Export cancelled');
+        else await file.close();
+      },
+      abort: async (reason) => {
+        aborted = true;
+        await file.abort(reason);
+      },
+    });
+    return {
+      writable: stream,
+      cancel: () => {
+        aborted = true;
+        // When the muxer has not locked the stream yet this closes the native file
+        // immediately; otherwise output.cancel() reaches the `close` branch above.
+        void stream.abort('Export cancelled').catch(() => undefined);
+      },
+      byteLength: () => bytes,
+    };
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') return 'cancelled';
+    throw error;
+  }
+}
+
+/** Bytes in the units a person thinks in, for anything about to hand over a file. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1000) return `${bytes} B`;
+  if (bytes < 1e6) return `${(bytes / 1e3).toFixed(0)} KB`;
+  if (bytes < 1e9) return `${(bytes / 1e6).toFixed(1)} MB`;
+  return `${(bytes / 1e9).toFixed(2)} GB`;
 }
 
 /** Files above this size are not copied into OPFS; reopening asks for them again. */
@@ -143,6 +244,12 @@ export interface StudioState {
   selectedAssetIds: readonly AssetId[];
   /** Where a Shift-click in the library measures from. */
   assetSelectionAnchor: AssetId | null;
+  /** Null is the edited program; an id opens that library asset in the source monitor. */
+  previewAssetId: AssetId | null;
+  /** Current source-monitor position, kept here so global capture commands use what is visible. */
+  sourcePreviewTime: Time;
+  /** Per-source edit marks; source metadata, not timeline document state. */
+  sourceMarks: ReadonlyMap<AssetId, { readonly inPoint: Time | null; readonly outPoint: Time | null }>;
   engine: Engine | null;
   /** Source blobs, kept so the engine can reopen assets. */
   mediaFiles: ReadonlyMap<AssetId, File>;
@@ -151,6 +258,8 @@ export interface StudioState {
   /** Bumped whenever a preview finishes, so the timeline re-renders. */
   previewVersion: number;
   exportProgress: ExportProgress | null;
+  exportBusy: boolean;
+  proxyProgress: ReadonlyMap<AssetId, number>;
   /**
    * Asset currently being dragged out of the media bin.
    *
@@ -269,15 +378,26 @@ export interface StudioState {
   /** Place an asset on a track created for it at `index` — the media-bin half of the same gesture. */
   dropAssetOnNewTrack: (assetId: AssetId, kind: TrackKind, index: number) => void;
 
-  /** Save the frame under the playhead as a PNG, at full sequence resolution. */
-  grabScreenshot: () => Promise<void>;
+  /** Capture the visible program/source frame into the media library. */
+  captureFrame: () => Promise<void>;
+  previewAsset: (assetId: AssetId) => void;
+  showProgramPreview: () => void;
+  setSourcePreviewTime: (at: Time) => void;
+  setSourceMark: (edge: 'in' | 'out') => void;
+  clearSourceMarks: () => void;
+  editSourceToTimeline: (mode: 'insert' | 'overwrite') => void;
+  downloadAsset: (assetId: AssetId) => Promise<void>;
+  /** Replace missing bytes without changing the asset id used by timeline clips. */
+  relinkAsset: (assetId: AssetId) => Promise<void>;
+  generateProxy: (assetId: AssetId) => Promise<void>;
+  removeProxy: (assetId: AssetId) => Promise<void>;
 
   attachEngine: (canvas: HTMLCanvasElement) => Promise<void>;
   /** `folder` files the imports straight into a media-bin folder as they land. */
   importFiles: (
     files: readonly File[],
     options?: { readonly folder?: string },
-  ) => Promise<void>;
+  ) => Promise<readonly AssetId[]>;
   importViaPicker: () => Promise<void>;
   addAssetToTimeline: (assetId: AssetId) => Promise<void>;
   addTitle: (text: string) => void;
@@ -316,6 +436,7 @@ export interface StudioState {
   newProject: () => void;
   togglePlay: () => Promise<void>;
   runExport: (settings: ExportSettings) => Promise<void>;
+  cancelExport: () => void;
   setStatus: (status: string) => void;
   setError: (error: string | null) => void;
   toggleTelemetry: () => void;
@@ -331,6 +452,12 @@ export interface StudioState {
   renameStoredProject: (id: ProjectId, name: string) => Promise<void>;
   /** Erase a project and its cached media. Moves on if it was the one open. */
   deleteStoredProject: (id: ProjectId) => Promise<void>;
+  /** Download a project and its media as one file. */
+  saveProjectToFile: (id: ProjectId) => Promise<void>;
+  /** Read a project file, store it as a new project, and open it. */
+  openProjectFile: (file: File) => Promise<boolean>;
+  /** Ask for a project file and open it. Returns false if nothing was picked. */
+  openProjectFileViaPicker: () => Promise<boolean>;
 }
 
 /**
@@ -373,6 +500,19 @@ const DENSITY_DEBOUNCE_MS = 100;
 let densityTimer: ReturnType<typeof setTimeout> | null = null;
 /** Bumped per pass, so an older sweep stops when a newer zoom starts one. */
 let densityRun = 0;
+let exportController: AbortController | null = null;
+const proxyControllers = new Map<AssetId, AbortController>();
+
+/** Ask the browser not to evict project media under storage pressure. */
+async function requestDurableStorage(): Promise<boolean | null> {
+  if (!navigator.storage?.persist) return null;
+  try {
+    if (await navigator.storage.persisted?.()) return true;
+    return await navigator.storage.persist();
+  } catch {
+    return null;
+  }
+}
 
 export const useStudio = create<StudioState>((set, get) => ({
   history: initHistory(initial.project),
@@ -383,12 +523,17 @@ export const useStudio = create<StudioState>((set, get) => ({
   selectionAnchor: null,
   selectedAssetIds: [],
   assetSelectionAnchor: null,
+  previewAssetId: null,
+  sourcePreviewTime: T.TIME_ZERO,
+  sourceMarks: new Map(),
   engine: null,
   mediaFiles: new Map(),
   telemetry: null,
   previews: null,
   previewVersion: 0,
   exportProgress: null,
+  exportBusy: false,
+  proxyProgress: new Map(),
   draggingAssetId: null,
   status: 'Import media to begin.',
   error: null,
@@ -577,6 +722,293 @@ export const useStudio = create<StudioState>((set, get) => ({
     });
   },
 
+  previewAsset: (assetId) => {
+    const asset = get().project().assets[assetId];
+    if (!asset || asset.status.state === 'missing') return;
+    void get().engine?.pause();
+    set({
+      previewAssetId: assetId,
+      sourcePreviewTime: T.TIME_ZERO,
+      selectedAssetIds: [assetId],
+      assetSelectionAnchor: assetId,
+      status: `Previewing source "${asset.name}".`,
+      error: null,
+    });
+  },
+
+  showProgramPreview: () => {
+    if (get().previewAssetId === null) return;
+    set({ previewAssetId: null, sourcePreviewTime: T.TIME_ZERO });
+    get().engine?.requestRender(get().playhead());
+  },
+
+  setSourcePreviewTime: (at) => {
+    const asset = get().previewAssetId ? get().project().assets[get().previewAssetId!] : null;
+    const duration = asset?.video?.duration ?? asset?.audio?.duration ?? T.TIME_ZERO;
+    set({ sourcePreviewTime: T.clamp(at, T.TIME_ZERO, duration) });
+  },
+
+  setSourceMark: (edge) => {
+    const state = get();
+    const assetId = state.previewAssetId;
+    if (!assetId) return;
+    const duration = state.project().assets[assetId]?.video?.duration
+      ?? state.project().assets[assetId]?.audio?.duration
+      ?? T.TIME_ZERO;
+    const at = T.clamp(state.sourcePreviewTime, T.TIME_ZERO, duration);
+    const current = state.sourceMarks.get(assetId) ?? { inPoint: null, outPoint: null };
+    let next = edge === 'in' ? { ...current, inPoint: at } : { ...current, outPoint: at };
+    // Keep the range meaningful: moving one edge through the other clears the
+    // stale opposite edge instead of silently creating a negative selection.
+    if (next.inPoint && next.outPoint && !T.lt(next.inPoint, next.outPoint)) {
+      next = edge === 'in'
+        ? { inPoint: at, outPoint: null }
+        : { inPoint: null, outPoint: at };
+    }
+    const marks = new Map(state.sourceMarks);
+    marks.set(assetId, next);
+    set({ sourceMarks: marks, status: `Marked source ${edge === 'in' ? 'In' : 'Out'} at ${T.formatDuration(at, { decimals: 2 })}.` });
+  },
+
+  clearSourceMarks: () => {
+    const assetId = get().previewAssetId;
+    if (!assetId) return;
+    const marks = new Map(get().sourceMarks);
+    marks.delete(assetId);
+    set({ sourceMarks: marks, status: 'Cleared source In/Out marks.' });
+  },
+
+  editSourceToTimeline: (mode) => {
+    const state = get();
+    const assetId = state.previewAssetId;
+    if (!assetId) return;
+    const project = state.project();
+    const asset = project.assets[assetId];
+    if (!asset || asset.status.state === 'missing') return;
+    const sequence = getSequence(project, state.sequenceId);
+    const marks = state.sourceMarks.get(assetId);
+    const total = asset.video?.duration ?? asset.audio?.duration ?? T.TIME_ZERO;
+    const sourceIn = marks?.inPoint ?? T.TIME_ZERO;
+    const sourceOut = marks?.outPoint ?? total;
+    const duration = asset.kind === 'image' ? total : T.sub(sourceOut, sourceIn);
+    if (!T.isPositive(duration)) {
+      set({ error: 'Source In must be before Source Out.' });
+      return;
+    }
+
+    const selected = state.selectedTrackId ? project.tracks[state.selectedTrackId] : null;
+    const selectedCompatible = selected && (
+      (selected.kind === 'video' && Boolean(asset.video)) ||
+      (selected.kind === 'audio' && Boolean(asset.audio))
+    );
+    const trackId = selectedCompatible
+      ? selected.id
+      : asset.video
+        ? sequence.videoTrackIds[0]
+        : sequence.audioTrackIds[0];
+    if (!trackId) {
+      set({ error: 'No compatible target track is available.' });
+      return;
+    }
+
+    try {
+      const placement = planPlacement(project, state.sequenceId, asset, trackId, {
+        start: state.playhead(),
+        sourceIn,
+        duration,
+        mode,
+      });
+      state.runMany(placement.commands, `${mode === 'insert' ? 'Insert' : 'Overwrite'} source`);
+      set({
+        status: `${mode === 'insert' ? 'Inserted' : 'Overwrote with'} ${T.formatDuration(duration, { decimals: 2 })} from "${asset.name}".`,
+      });
+      state.engine?.requestRender(placement.start);
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) });
+    }
+  },
+
+  downloadAsset: async (assetId) => {
+    const state = get();
+    const asset = state.project().assets[assetId];
+    if (!asset) return;
+
+    try {
+      const file = state.mediaFiles.get(assetId) ?? (await loadMedia(state.project().id, assetId));
+      if (!file) throw new Error('The original media is not available');
+      downloadBlob(file, safeFileName(asset.source?.fileName ?? asset.name));
+      set({ status: `Downloaded "${asset.name}".`, error: null });
+    } catch (err) {
+      set({ error: `Could not download "${asset.name}": ${err instanceof Error ? err.message : String(err)}` });
+    }
+  },
+
+  relinkAsset: async (assetId) => {
+    const original = get().project().assets[assetId];
+    if (!original) return;
+    const previousFile = get().mediaFiles.get(assetId) ?? null;
+    let decoderWasClosed = false;
+
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = original.kind === 'image' ? 'image/*' : original.kind === 'audio' ? 'audio/*' : 'video/*,audio/*';
+    const file = await new Promise<File | null>((resolve) => {
+      input.addEventListener('change', () => resolve(input.files?.[0] ?? null), { once: true });
+      input.addEventListener('cancel', () => resolve(null), { once: true });
+      input.click();
+    });
+    if (!file) return;
+
+    set({ status: `Checking replacement for "${original.name}"…`, error: null });
+    try {
+      const candidate = isImageFile(file)
+        ? await MediaLibrary.importImage(assetId, file, file.name)
+        : await MediaLibrary.importFile(assetId, file, file.name);
+
+      const sameStreams =
+        Boolean(candidate.video) === Boolean(original.video) &&
+        Boolean(candidate.audio) === Boolean(original.audio) &&
+        Boolean(candidate.image) === Boolean(original.image);
+      if (!sameStreams) {
+        throw new Error('Replacement must contain the same video, audio, and still-image streams.');
+      }
+
+      let requiredSeconds = 0;
+      for (const clip of Object.values(get().project().clips)) {
+        if (!('assetId' in clip) || clip.assetId !== assetId) continue;
+        const sourceIn = T.toSeconds(clip.sourceIn);
+        const sourceOut = sourceIn + T.toSeconds(clip.duration) * clip.speed;
+        requiredSeconds = Math.max(requiredSeconds, sourceIn, sourceOut);
+      }
+      const candidateDuration = T.toSeconds(candidate.video?.duration ?? candidate.audio?.duration ?? T.TIME_ZERO);
+      if (!candidate.image && candidateDuration + 1e-3 < requiredSeconds) {
+        throw new Error(
+          `Replacement is too short (${candidateDuration.toFixed(2)} s); this edit uses media through ${requiredSeconds.toFixed(2)} s.`,
+        );
+      }
+
+      const replacement: Asset = {
+        ...candidate,
+        id: original.id,
+        name: original.name,
+        createdAt: original.createdAt,
+        folder: original.folder,
+        status: { state: 'ready' },
+      };
+
+      get().engine?.media.close(assetId);
+      decoderWasClosed = true;
+      await get().engine?.openAsset(assetId, file, replacement.kind);
+      const nextFiles = new Map(get().mediaFiles);
+      nextFiles.set(assetId, file);
+      set({ mediaFiles: nextFiles });
+      get().previews?.dispose();
+      set({ previews: null, previewVersion: get().previewVersion + 1 });
+      get().run({ type: 'replaceAsset', assetId, asset: replacement }, `Relink "${original.name}"`);
+      await deleteProxy(get().project().id, assetId);
+
+      const copied = await saveMedia(get().project().id, assetId, file, MEDIA_COPY_LIMIT_BYTES).catch(() => false);
+      const durable = copied ? await requestDurableStorage() : null;
+      set({
+        status: copied
+          ? `Relinked "${original.name}".${durable === false ? ' Browser storage is not guaranteed against eviction.' : ''}`
+          : `Relinked "${original.name}", but the source is session-only; choose it again after reopening.`,
+      });
+      void get().buildPreviews();
+    } catch (err) {
+      if (decoderWasClosed && previousFile) {
+        get().engine?.media.close(assetId);
+        await get().engine?.openAsset(assetId, previousFile, original.kind).catch(() => undefined);
+      }
+      set({
+        error: `Could not relink "${original.name}": ${err instanceof Error ? err.message : String(err)}`,
+        status: 'Relink failed.',
+      });
+    }
+  },
+
+  generateProxy: async (assetId) => {
+    if (proxyControllers.has(assetId)) return;
+    const state = get();
+    const asset = state.project().assets[assetId];
+    if (!asset?.video || asset.kind !== 'video') return;
+    const file = state.mediaFiles.get(assetId) ?? await loadMedia(state.project().id, assetId);
+    if (!file) {
+      set({ error: `Relink "${asset.name}" before generating a proxy.` });
+      return;
+    }
+
+    const controller = new AbortController();
+    proxyControllers.set(assetId, controller);
+    const progress = new Map(get().proxyProgress);
+    progress.set(assetId, 0);
+    set({ proxyProgress: progress, status: `Generating proxy for "${asset.name}"…`, error: null });
+    try {
+      const result = await encodeProxy(file, asset.video.size, {
+        signal: controller.signal,
+        onProgress: (fraction) => {
+          const next = new Map(get().proxyProgress);
+          next.set(assetId, fraction);
+          set({ proxyProgress: next });
+        },
+      });
+      await saveProxy(get().project().id, assetId, result.blob);
+      await get().engine?.openProxy(assetId, result.blob);
+      const current = get().project().assets[assetId];
+      if (current) {
+        get().run(
+          {
+            type: 'replaceAsset',
+            assetId,
+            asset: {
+              ...current,
+              derived: {
+                ...current.derived,
+                proxyPath: `proxies/${assetId}`,
+                proxySize: result.size,
+              },
+            },
+          },
+          `Generate proxy for "${asset.name}"`,
+        );
+      }
+      set({
+        status: `Proxy ready for "${asset.name}" — ${result.size.width}×${result.size.height}, ${(result.blob.size / 1e6).toFixed(1)} MB.`,
+      });
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        set({ error: `Could not generate proxy for "${asset.name}": ${error instanceof Error ? error.message : String(error)}` });
+      }
+    } finally {
+      proxyControllers.delete(assetId);
+      const next = new Map(get().proxyProgress);
+      next.delete(assetId);
+      set({ proxyProgress: next });
+    }
+  },
+
+  removeProxy: async (assetId) => {
+    proxyControllers.get(assetId)?.abort();
+    proxyControllers.delete(assetId);
+    get().engine?.media.closeProxy(assetId);
+    await deleteProxy(get().project().id, assetId);
+    const asset = get().project().assets[assetId];
+    if (asset?.derived.proxyPath) {
+      get().run(
+        {
+          type: 'replaceAsset',
+          assetId,
+          asset: {
+            ...asset,
+            derived: { ...asset.derived, proxyPath: null, proxySize: null },
+          },
+        },
+        `Remove proxy for "${asset.name}"`,
+      );
+      set({ status: `Removed proxy for "${asset.name}"; preview uses the original.` });
+    }
+  },
+
   assetUsage: (assetIds) => {
     const usage = clipsUsingAssets(get().project(), assetIds);
     return new Map([...usage].map(([id, clips]) => [id, clips.length]));
@@ -613,8 +1045,12 @@ export const useStudio = create<StudioState>((set, get) => ({
       set({
         mediaFiles: files,
         selectedAssetIds: get().selectedAssetIds.filter((id) => !removed.includes(id)),
+        ...(get().previewAssetId && removed.includes(get().previewAssetId!)
+          ? { previewAssetId: null, sourcePreviewTime: T.TIME_ZERO }
+          : {}),
       });
       for (const assetId of removed) void deleteMedia(project.id, assetId);
+      for (const assetId of removed) void deleteProxy(project.id, assetId);
     }
 
     if (blocked.length > 0) {
@@ -832,12 +1268,14 @@ export const useStudio = create<StudioState>((set, get) => ({
   },
 
   importFiles: async (files, options) => {
-    if (files.length === 0) return;
+    if (files.length === 0) return [];
     set({ status: `Importing ${files.length} file(s)…`, error: null });
 
     const nextFiles = new Map(get().mediaFiles);
     const commands: Command[] = [];
+    const importedIds: AssetId[] = [];
     const failures: string[] = [];
+    const sessionOnly: string[] = [];
     const folder = options?.folder ? normaliseFolder(options.folder) : '';
 
     for (const file of files) {
@@ -850,10 +1288,12 @@ export const useStudio = create<StudioState>((set, get) => ({
         // appears at the root for a frame and the whole import is one undo step.
         const asset = folder ? { ...probed, folder } : probed;
         commands.push({ type: 'addAsset', asset });
+        importedIds.push(assetId);
         nextFiles.set(assetId, file);
         await get().engine?.openAsset(assetId, file, asset.kind);
         // Copy beside the project so it reopens after a reload.
-        await saveMedia(get().project().id, assetId, file, MEDIA_COPY_LIMIT_BYTES).catch(() => false);
+        const copied = await saveMedia(get().project().id, assetId, file, MEDIA_COPY_LIMIT_BYTES).catch(() => false);
+        if (!copied) sessionOnly.push(file.name);
       } catch (err) {
         failures.push(`${file.name}: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -863,13 +1303,20 @@ export const useStudio = create<StudioState>((set, get) => ({
       set({ mediaFiles: nextFiles });
       get().runMany(commands, `Import ${commands.length} file(s)`);
     }
+    const durable = commands.length > sessionOnly.length ? await requestDurableStorage() : null;
+    const durabilityNote = sessionOnly.length
+      ? ` ${sessionOnly.length} source(s) are session-only and must be relinked after reopening.`
+      : durable === false
+        ? ' Browser storage is not guaranteed against eviction; keep a project-file backup.'
+        : '';
     set({
-      status: `${commands.length} imported${failures.length ? `, ${failures.length} failed` : ''}.`,
+      status: `${commands.length} imported${failures.length ? `, ${failures.length} failed` : ''}.${durabilityNote}`,
       error: failures.length > 0 ? failures.join('\n') : null,
     });
     // Filmstrips and waveforms are built in the background; the timeline picks them
     // up when they land rather than blocking the import on them.
     void get().buildPreviews();
+    return importedIds;
   },
 
   /**
@@ -1142,7 +1589,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     });
   },
 
-  grabScreenshot: async () => {
+  captureFrame: async () => {
     const state = get();
     const engine = state.engine;
     if (!engine) {
@@ -1151,23 +1598,25 @@ export const useStudio = create<StudioState>((set, get) => ({
     }
 
     try {
-      const at = state.playhead();
       const project = state.project();
       const sequence = getSequence(project, state.sequenceId);
-
-      const blob = await engine.grabStill(at);
-      const stamp = T.toTimecode(at, sequence.frameRate);
+      const source = state.previewAssetId ? project.assets[state.previewAssetId] : null;
+      const at = source ? state.sourcePreviewTime : state.playhead();
+      const blob = source
+        ? await engine.grabAssetStill(source.id, at)
+        : await engine.grabStill(at);
+      const frameRate = source?.video?.frameRate ?? sequence.frameRate;
+      const stamp = T.toTimecode(at, frameRate);
 
       /*
        * Two grabs at the same frame would otherwise be the same file twice, which is
        * confusing in a list sorted by name. Counted by name rather than by location,
        * since the still lands wherever the library already is.
        */
-      const base = safeFileName(`${project.name} ${stamp}`);
+      const subject = source ? source.name.replace(/\.[^.]+$/, '') : project.name;
+      const base = safeFileName(`${subject} ${stamp}`);
       const taken = Object.values(project.assets).filter((a) => a.name.startsWith(base)).length;
       const fileName = `${base}${taken > 0 ? ` (${taken + 1})` : ''}.png`;
-
-      downloadBlob(blob, fileName);
 
       /*
        * The still also joins the library.
@@ -1179,16 +1628,26 @@ export const useStudio = create<StudioState>((set, get) => ({
        * Filed alongside everything else rather than in a folder of its own: taking a
        * picture should not quietly reorganise someone's library.
        */
-      await get().importFiles([new File([blob], fileName, { type: 'image/png' })]);
+      const [capturedId] = await get().importFiles([
+        new File([blob], fileName, { type: 'image/png' }),
+      ]);
+      if (capturedId) {
+        set({ selectedAssetIds: [capturedId], assetSelectionAnchor: capturedId });
+        window.dispatchEvent(
+          new CustomEvent('bvs:reveal-asset', { detail: { assetId: capturedId } }),
+        );
+      }
+
+      const size = source?.image?.size ?? source?.video?.size ?? sequence.size;
 
       set({
         status:
-          `Saved ${fileName} — ${sequence.size.width}×${sequence.size.height}, ` +
-          `${(blob.size / 1e6).toFixed(1)} MB, and added to the library.`,
+          `Captured ${fileName} to the Library — ${size.width}×${size.height}, ` +
+          `${(blob.size / 1e6).toFixed(1)} MB.`,
         error: null,
       });
     } catch (err) {
-      set({ error: `Could not save the frame: ${err instanceof Error ? err.message : String(err)}` });
+      set({ error: `Could not capture the frame: ${err instanceof Error ? err.message : String(err)}` });
     }
   },
 
@@ -1204,6 +1663,9 @@ export const useStudio = create<StudioState>((set, get) => ({
       selection: [],
       selectedAssetIds: [],
       assetSelectionAnchor: null,
+      previewAssetId: null,
+      sourcePreviewTime: T.TIME_ZERO,
+      sourceMarks: new Map(),
       mediaFiles: new Map(),
       previews: null,
       previewVersion: 0,
@@ -1249,31 +1711,65 @@ export const useStudio = create<StudioState>((set, get) => ({
       set({ error: 'Engine is not ready' });
       return;
     }
-    await state.engine.pause();
-    set({ exportProgress: null, error: null, status: 'Exporting…' });
+    if (exportController) return;
+    const sequence = state.project().sequences[state.sequenceId];
+    const extension = settings.container === 'mp4' ? 'mp4' : 'webm';
+    let destination: ExportDestination | undefined;
+    try {
+      const chosen = await chooseExportDestination(
+        `${sequence?.name || 'sequence'}.${extension}`,
+        settings.container,
+      );
+      if (chosen === 'cancelled') {
+        set({ status: 'Export cancelled.' });
+        return;
+      }
+      if (chosen !== 'fallback') destination = chosen;
+    } catch (err) {
+      set({ error: `Could not open the export destination: ${err instanceof Error ? err.message : String(err)}` });
+      return;
+    }
+
+    exportController = new AbortController();
+    set({ exportProgress: null, exportBusy: true, error: null, status: 'Exporting…' });
 
     try {
+      await state.engine.pause();
       const result = await exportSequence({
         project: state.project(),
         sequenceId: state.sequenceId,
         media: state.engine.media,
         settings,
+        signal: exportController.signal,
+        ...(destination ? { destination } : {}),
         onProgress: (progress) => set({ exportProgress: progress }),
       });
 
-      downloadBlob(result.blob, result.fileName);
+      if (result.blob) downloadBlob(result.blob, result.fileName);
 
       set({
-        status: `Exported ${result.fileName} — ${result.framesEncoded} frames, ${(result.blob.size / 1e6).toFixed(1)} MB.`,
+        status: `${destination ? 'Saved' : 'Exported'} ${result.fileName} — ${result.framesEncoded} frames, ${(result.byteLength / 1e6).toFixed(1)} MB.`,
         exportProgress: null,
+        exportBusy: false,
       });
     } catch (err) {
+      const cancelled = exportController?.signal.aborted === true;
+      destination?.cancel();
       set({
-        error: err instanceof Error ? err.message : String(err),
+        error: cancelled ? null : err instanceof Error ? err.message : String(err),
         exportProgress: null,
-        status: 'Export failed.',
+        exportBusy: false,
+        status: cancelled ? 'Export cancelled.' : 'Export failed.',
       });
+    } finally {
+      exportController = null;
     }
+  },
+
+  cancelExport: () => {
+    if (!exportController) return;
+    set({ status: 'Cancelling export…' });
+    exportController.abort();
   },
 
   setStatus: (status) => set({ status }),
@@ -1425,6 +1921,93 @@ export const useStudio = create<StudioState>((set, get) => ({
     get().newProject();
     set({ status: 'Project deleted. Started a new one.' });
   },
+
+  saveProjectToFile: async (id) => {
+    try {
+      let project: Project;
+      let media: ReadonlyMap<AssetId, File>;
+
+      if (id === get().project().id) {
+        // The open project is saved from memory, unwritten edits included — waiting
+        // on the debounce would hand over a file a few seconds out of date.
+        project = get().project();
+        media = get().mediaFiles;
+      } else {
+        const loaded = await loadProject(id);
+        if (!loaded) {
+          set({ error: 'That project is no longer in browser storage.' });
+          return;
+        }
+        project = loaded.project;
+        media = loaded.media;
+      }
+
+      const size = projectFileSize(project, media);
+      set({ status: `Packing "${project.name}" (${formatBytes(size)})…`, error: null });
+
+      const blob = writeProjectFile(project, media);
+      downloadBlob(blob, projectFileName(project.name));
+
+      const short = Object.keys(project.assets).length - media.size;
+      set({
+        status:
+          `Saved "${project.name}" — ${formatBytes(blob.size)}` +
+          (short > 0 ? `, without ${short} file(s) that were never cached.` : '.'),
+      });
+    } catch (err) {
+      set({
+        error: `Could not save that project: ${err instanceof Error ? err.message : err}`,
+        status: 'Nothing was saved.',
+      });
+    }
+  },
+
+  openProjectFile: async (file) => {
+    try {
+      set({ status: `Reading ${file.name}…`, error: null });
+      const read = await readProjectFile(file);
+
+      /*
+       * Filed as a new project rather than restored over whatever shares its id.
+       * Opening a file is not meant to overwrite anything, and the same file opened
+       * twice — or a copy sent to someone who already has the original — must not
+       * quietly replace the work already here.
+       */
+      const project: Project = { ...read.project, id: ids.project() };
+
+      await flushAutosave();
+      await saveProject(project);
+      for (const [assetId, media] of read.media) {
+        await saveMedia(project.id, assetId, media, MEDIA_COPY_LIMIT_BYTES).catch(() => false);
+      }
+
+      await adopt(set, get, { ...read, project }, 'Opened');
+      return true;
+    } catch (err) {
+      set({
+        error: `Could not open ${file.name}: ${err instanceof Error ? err.message : err}`,
+        // Cleared, or the status line goes on saying "Reading…" underneath the
+        // failure and reads as a job still in progress.
+        status: 'Nothing was opened.',
+      });
+      return false;
+    }
+  },
+
+  openProjectFileViaPicker: async () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = PROJECT_FILE_EXTENSION;
+
+    const file = await new Promise<File | null>((resolve) => {
+      input.addEventListener('change', () => resolve(input.files?.[0] ?? null), { once: true });
+      // A cancelled dialog fires no 'change' event; 'cancel' covers that.
+      input.addEventListener('cancel', () => resolve(null), { once: true });
+      input.click();
+    });
+
+    return file ? get().openProjectFile(file) : false;
+  },
 }));
 
 /**
@@ -1448,6 +2031,30 @@ async function adopt(
     project = apply(project, { type: 'setAssetStatus', assetId, status: { state: 'missing' } }, ids);
   }
 
+  const proxies = new Map<AssetId, File>();
+  for (const asset of Object.values(project.assets)) {
+    if (!asset.derived.proxyPath) continue;
+    const proxy = await loadProxy(project.id, asset.id);
+    if (proxy) {
+      proxies.set(asset.id, proxy);
+      continue;
+    }
+    // Project files intentionally omit disposable proxies. Do not leave metadata
+    // claiming one exists after such a project is opened on another machine.
+    project = apply(
+      project,
+      {
+        type: 'replaceAsset',
+        assetId: asset.id,
+        asset: {
+          ...asset,
+          derived: { ...asset.derived, proxyPath: null, proxySize: null },
+        },
+      },
+      ids,
+    );
+  }
+
   const sequenceId = project.activeSequenceId;
   get().previews?.dispose();
   set({
@@ -1459,6 +2066,9 @@ async function adopt(
     selectionAnchor: null,
     selectedAssetIds: [],
     assetSelectionAnchor: null,
+    previewAssetId: null,
+    sourcePreviewTime: T.TIME_ZERO,
+    sourceMarks: new Map(),
     mediaFiles: loaded.media,
     previews: null,
     previewVersion: 0,
@@ -1492,6 +2102,13 @@ async function adopt(
       await engine.openAsset(assetId, file, kind);
     } catch {
       unreadable.push(assetId);
+    }
+  }
+  for (const [assetId, proxy] of proxies) {
+    try {
+      await engine.openProxy(assetId, proxy);
+    } catch {
+      engine.media.closeProxy(assetId);
     }
   }
 
@@ -1718,7 +2335,8 @@ export function formatToAdopt(
   );
   if (!empty) return null;
 
-  const size = asset.video?.size;
+  const sourceSize = asset.video?.size;
+  const size = sourceSize ? encoderSafeSequenceSize(sourceSize) : null;
   if (!size || size.width <= 0 || size.height <= 0) return null;
 
   const frameRate = asset.video?.frameRate ?? sequence.frameRate;
@@ -1758,10 +2376,16 @@ export function planPlacement(
   sequenceId: SequenceId,
   asset: Asset,
   trackId: TrackId,
+  options: {
+    readonly start?: Time;
+    readonly sourceIn?: Time;
+    readonly duration?: Time;
+    readonly mode?: 'insert' | 'overwrite';
+  } = {},
 ): PlacementPlan {
   const sequence = getSequence(project, sequenceId);
   const track = project.tracks[trackId]!;
-  const duration = (asset.video?.duration ?? asset.audio?.duration)!;
+  const duration = options.duration ?? (asset.video?.duration ?? asset.audio?.duration)!;
 
   const partnerKind: TrackKind = track.kind === 'video' ? 'audio' : 'video';
   const needsPartner = partnerKind === 'audio' ? Boolean(asset.audio) : Boolean(asset.video);
@@ -1803,7 +2427,7 @@ export function planPlacement(
 
   const usesPartner = needsPartner && Boolean(partnerTrackId);
   // A track that is about to be created is empty, so it cannot move the start.
-  const start = appendPointFor(project, sequenceId, trackId, usesPartner && !createdTrackName);
+  const start = options.start ?? appendPointFor(project, sequenceId, trackId, usesPartner && !createdTrackName);
   const linkGroupId = `lg_${asset.id}_${start.num}_${start.den}`;
 
   // A still becomes an image clip, which trims without a source bound.
@@ -1827,6 +2451,7 @@ export function planPlacement(
     assetId: asset.id,
     start,
     duration,
+    ...(options.sourceIn ? { sourceIn: options.sourceIn } : {}),
     name: asset.name,
     // Only the picture needs an id up front, to scale it in the same batch.
     ...(kind === 'audio' ? {} : { clipId: visualClipId }),
@@ -1836,14 +2461,14 @@ export function planPlacement(
   commands.push({
     type: 'insertClip',
     trackId,
-    mode: 'overwrite',
+    mode: options.mode ?? 'overwrite',
     clip: clipFor(track.kind === 'video' ? visualKind : 'audio'),
   });
   if (usesPartner && partnerTrackId) {
     commands.push({
       type: 'insertClip',
       trackId: partnerTrackId,
-      mode: 'overwrite',
+      mode: options.mode ?? 'overwrite',
       clip: clipFor(partnerKind === 'video' ? visualKind : 'audio'),
     });
   }

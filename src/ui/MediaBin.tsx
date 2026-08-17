@@ -12,16 +12,19 @@ import { assetsInFolderTree, childFolders } from '../model/selectors';
 import * as T from '../model/time';
 import type { Asset, AssetId } from '../model/types';
 import { useContextMenu } from './ContextMenu';
+import { useDialog } from './Dialog';
 import {
   IconAlert,
   IconAudio,
   IconClose,
+  IconDownload,
   IconFile,
   IconFolder,
   IconFolderPlus,
   IconFolderUp,
   IconGrid,
   IconList,
+  IconLink,
   IconPlus,
   IconSearch,
   IconTrash,
@@ -80,8 +83,9 @@ export function MediaBin(): React.JSX.Element {
   const assetUsage = useStudio((s) => s.assetUsage);
   const moveAssetsToFolder = useStudio((s) => s.moveAssetsToFolder);
   const renameAssetFolder = useStudio((s) => s.renameAssetFolder);
-  const addAssetToTimeline = useStudio((s) => s.addAssetToTimeline);
+  const previewAsset = useStudio((s) => s.previewAsset);
   const menu = useContextMenu();
+  const dialog = useDialog();
 
   const [dragOver, setDragOver] = useState(false);
   const [filter, setFilter] = useState<MediaFilterId>('all');
@@ -95,6 +99,19 @@ export function MediaBin(): React.JSX.Element {
    * session. They vanish on reload unless something was put in them.
    */
   const [pendingFolders, setPendingFolders] = useState<readonly string[]>([]);
+
+  // Global capture commands can create a still while this panel is filtered or in
+  // another folder. Reveal the result so "captured to Library" is visible, not just
+  // a status message about an item the user cannot see.
+  useEffect(() => {
+    const reveal = (): void => {
+      setFolder('');
+      setFilter('all');
+      setSearch('');
+    };
+    window.addEventListener('bvs:reveal-asset', reveal);
+    return () => window.removeEventListener('bvs:reveal-asset', reveal);
+  }, []);
 
   const libraryView = useLayout((s) => s.libraryView);
   const setLibraryView = useLayout((s) => s.setLibraryView);
@@ -140,7 +157,7 @@ export function MediaBin(): React.JSX.Element {
    * refusal discards the whole batch, so the question has to be asked before the
    * command runs rather than reported after it fails.
    */
-  const deleteSelected = (): void => {
+  const deleteSelected = async (): Promise<void> => {
     if (selectedHere.length === 0) return;
 
     const usage = assetUsage(selectedHere);
@@ -153,17 +170,19 @@ export function MediaBin(): React.JSX.Element {
         used.length === selectedHere.length
           ? `${used.length === 1 ? 'That file is' : `All ${used.length} are`}`
           : `${used.length} of ${selectedHere.length} are`;
-      withClips = confirm(
-        `${subject} used in the timeline by ${clipCount} clip${clipCount === 1 ? '' : 's'}.\n\n` +
-          `OK removes those clips as well. Cancel leaves everything alone.`,
-      );
+      withClips = await dialog.confirm({
+        title: 'Remove media and timeline clips?',
+        message: `${subject} used in the timeline by ${clipCount} clip${clipCount === 1 ? '' : 's'}. Removing the media also removes those clips.`,
+        confirmLabel: 'Remove all',
+        danger: true,
+      });
       if (!withClips) return;
     }
     removeAssets(selectedHere, { withClips });
   };
 
-  const newFolder = (): void => {
-    const answer = prompt('Folder name', 'New folder');
+  const newFolder = async (): Promise<void> => {
+    const answer = await dialog.prompt({ title: 'New folder', inputLabel: 'Folder name', initialValue: 'New folder', confirmLabel: 'Create' });
     const name = answer?.trim().replace(/\//g, '-');
     if (!name) return;
 
@@ -269,7 +288,7 @@ export function MediaBin(): React.JSX.Element {
     if (event.key === 'Enter' && selectedHere.length > 0) {
       event.preventDefault();
       event.stopPropagation();
-      for (const id of selectedHere) void addAssetToTimeline(id);
+      previewAsset(selectedHere[0]!);
     }
   };
 
@@ -340,6 +359,44 @@ export function MediaBin(): React.JSX.Element {
         With that gone a single remaining tab was labelling the obvious.
       */}
       <>
+          <div className="bin-header">
+            {assets.length > 0 && !query ? (
+              <div className="bin-crumbs">
+                <button
+                  className={`bin-crumb${folder === '' ? ' on' : ''}`}
+                  onClick={() => setFolder('')}
+                >
+                  Library
+                </button>
+                {crumbs.map((segment, index) => {
+                  const path = crumbs.slice(0, index + 1).join('/');
+                  return (
+                    <span key={path} style={{ display: 'contents' }}>
+                      <span className="sep">/</span>
+                      <button
+                        className={`bin-crumb${path === folder ? ' on' : ''}`}
+                        onClick={() => setFolder(path)}
+                        onDoubleClick={() => void (async () => {
+                          const answer = await dialog.prompt({ title: 'Rename folder', inputLabel: 'Folder name', initialValue: folderName(path), confirmLabel: 'Rename' });
+                          const name = answer?.trim().replace(/\//g, '-');
+                          if (!name || name === folderName(path)) return;
+                          const parent = path.slice(0, path.lastIndexOf('/'));
+                          const next = parent ? `${parent}/${name}` : name;
+                          renameAssetFolder(path, next);
+                          setFolder(next);
+                        })()}
+                        title="Double-click to rename"
+                      >
+                        {segment}
+                      </button>
+                    </span>
+                  );
+                })}
+              </div>
+            ) : (
+              <span className="bin-header-title">{query ? 'Search results' : 'Library'}</span>
+            )}
+
           {/*
             One row for the things done *to* the library, rather than a mix of
             per-card buttons and a menu nobody finds. Delete is here because it acts
@@ -365,7 +422,6 @@ export function MediaBin(): React.JSX.Element {
               <IconTrash />
             </button>
             {selectedHere.length > 0 && <span className="count">{selectedHere.length} selected</span>}
-            <span className="spacer" />
             <button
               className="icon"
               title={libraryView === 'grid' ? 'Show as a list' : 'Show as a grid'}
@@ -373,6 +429,7 @@ export function MediaBin(): React.JSX.Element {
             >
               {libraryView === 'grid' ? <IconList /> : <IconGrid />}
             </button>
+          </div>
           </div>
 
           {/* Kept while a search is live, or deleting assets would hide the field
@@ -395,41 +452,6 @@ export function MediaBin(): React.JSX.Element {
                   <IconClose size={11} />
                 </button>
               )}
-            </div>
-          )}
-
-          {assets.length > 0 && !query && (
-            <div className="bin-crumbs">
-              <button
-                className={`bin-crumb${folder === '' ? ' on' : ''}`}
-                onClick={() => setFolder('')}
-              >
-                Library
-              </button>
-              {crumbs.map((segment, index) => {
-                const path = crumbs.slice(0, index + 1).join('/');
-                return (
-                  <span key={path} style={{ display: 'contents' }}>
-                    <span className="sep">/</span>
-                    <button
-                      className={`bin-crumb${path === folder ? ' on' : ''}`}
-                      onClick={() => setFolder(path)}
-                      onDoubleClick={() => {
-                        const answer = prompt('Rename folder', folderName(path));
-                        const name = answer?.trim().replace(/\//g, '-');
-                        if (!name || name === folderName(path)) return;
-                        const parent = path.slice(0, path.lastIndexOf('/'));
-                        const next = parent ? `${parent}/${name}` : name;
-                        renameAssetFolder(path, next);
-                        setFolder(next);
-                      }}
-                      title="Double-click to rename"
-                    >
-                      {segment}
-                    </button>
-                  </span>
-                );
-              })}
             </div>
           )}
 
@@ -494,15 +516,15 @@ export function MediaBin(): React.JSX.Element {
                         moveAssetsToFolder(ids, path);
                         setPendingFolders((current) => current.filter((p) => p !== path));
                       }}
-                      onRename={() => {
-                        const answer = prompt('Rename folder', name);
+                      onRename={() => void (async () => {
+                        const answer = await dialog.prompt({ title: 'Rename folder', inputLabel: 'Folder name', initialValue: name, confirmLabel: 'Rename' });
                         const next = answer?.trim().replace(/\//g, '-');
                         if (!next || next === name) return;
                         renameAssetFolder(path, folder ? `${folder}/${next}` : next);
                         setPendingFolders((current) =>
                           current.map((p) => (p === path ? (folder ? `${folder}/${next}` : next) : p)),
                         );
-                      }}
+                      })()}
                     />
                   );
                 })}
@@ -628,6 +650,12 @@ function AssetCard({
   onHoverEnd: () => void;
 }): React.JSX.Element {
   const addAssetToTimeline = useStudio((s) => s.addAssetToTimeline);
+  const previewAsset = useStudio((s) => s.previewAsset);
+  const downloadAsset = useStudio((s) => s.downloadAsset);
+  const relinkAsset = useStudio((s) => s.relinkAsset);
+  const generateProxy = useStudio((s) => s.generateProxy);
+  const removeProxy = useStudio((s) => s.removeProxy);
+  const proxyProgress = useStudio((s) => s.proxyProgress.get(asset.id));
   const setDraggingAsset = useStudio((s) => s.setDraggingAsset);
   const previews = useStudio((s) => s.previews);
   // Previews land asynchronously; this re-renders the card when one does, and again
@@ -652,7 +680,12 @@ function AssetCard({
   rows.push({ label: 'Kind', value: ASSET_KIND_LABELS[asset.kind] ?? asset.kind });
   if (duration) rows.push({ label: 'Duration', value: T.formatDuration(duration, { decimals: 2 }) });
   if (asset.video) {
-    rows.push({ label: 'Size', value: `${asset.video.size.width}×${asset.video.size.height}` });
+    // Stills carry a nominal video stream for timeline placement, but their image
+    // metadata below is the authoritative size. Reporting both produces duplicate
+    // rows (and duplicate React keys) for every captured frame.
+    if (!asset.image) {
+      rows.push({ label: 'Size', value: `${asset.video.size.width}×${asset.video.size.height}` });
+    }
     if (asset.video.frameRate) {
       rows.push({ label: 'Frame rate', value: `${T.fpsToNumber(asset.video.frameRate).toFixed(2)} fps` });
     }
@@ -669,8 +702,12 @@ function AssetCard({
     rows.push({ label: 'Size on disk', value: `${(asset.source.byteLength / 1e6).toFixed(1)} MB` });
   }
   rows.push({ label: 'Folder', value: asset.folder || 'Library' });
-  if (missing) rows.push({ label: 'Media', value: 'Missing — re-import it' });
+  if (missing) rows.push({ label: 'Media', value: 'Missing — relink the source file' });
   if (progress !== null) rows.push({ label: 'Preview', value: `${Math.round(progress * 100)}%` });
+  if (proxyProgress !== undefined) rows.push({ label: 'Proxy', value: `${Math.round(proxyProgress * 100)}%` });
+  else if (asset.derived.proxySize) {
+    rows.push({ label: 'Proxy', value: `${asset.derived.proxySize.width}×${asset.derived.proxySize.height} · active for playback` });
+  }
 
   const onContextMenu = (event: React.MouseEvent): void => {
     // Right-clicking outside the selection acts on what was clicked, which is what
@@ -679,12 +716,40 @@ function AssetCard({
     const count = useStudio.getState().selectedAssetIds.length;
 
     menu.open(event, [
+      ...(missing
+        ? [{
+            label: 'Relink media…',
+            icon: <IconLink />,
+            onSelect: () => void relinkAsset(asset.id),
+          }]
+        : []),
       {
         label: 'Add to timeline',
         icon: <IconPlus />,
         disabled: missing,
         onSelect: () => void addAssetToTimeline(asset.id),
       },
+      {
+        label: 'Download original…',
+        icon: <IconDownload />,
+        disabled: missing || count > 1,
+        onSelect: () => void downloadAsset(asset.id),
+      },
+      ...(asset.kind === 'video' && !missing
+        ? [{
+            label: proxyProgress !== undefined
+              ? 'Cancel proxy generation'
+              : asset.derived.proxyPath
+                ? 'Remove proxy'
+                : 'Generate editing proxy',
+            icon: <IconVideo />,
+            onSelect: () => void (
+              proxyProgress !== undefined || asset.derived.proxyPath
+                ? removeProxy(asset.id)
+                : generateProxy(asset.id)
+            ),
+          }]
+        : []),
       'separator',
       {
         label: count > 1 ? `Remove ${count} from project` : 'Remove from project',
@@ -721,7 +786,7 @@ function AssetCard({
       onPointerEnter={(event) => onHoverStart(event, asset, rows)}
       onPointerLeave={onHoverEnd}
       onContextMenu={onContextMenu}
-      onDoubleClick={() => void addAssetToTimeline(asset.id)}
+      onDoubleClick={() => previewAsset(asset.id)}
       // No `title`: the hover card replaces it, and both at once shows a styled card
       // with the browser's own tooltip appearing on top a moment later.
     >
@@ -750,10 +815,18 @@ function AssetCard({
             <IconAlert size={9} /> Missing
           </span>
         )}
+        {asset.derived.proxyPath && !missing && (
+          <span className="bin-badge-proxy">Proxy</span>
+        )}
         {/* Only while it is actually being built; a bar left at full reads as stuck. */}
         {progress !== null && (
           <div className="bin-progress">
             <div style={{ width: `${Math.round(progress * 100)}%` }} />
+          </div>
+        )}
+        {proxyProgress !== undefined && (
+          <div className="bin-progress proxy">
+            <div style={{ width: `${Math.round(proxyProgress * 100)}%` }} />
           </div>
         )}
       </div>

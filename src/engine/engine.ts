@@ -40,6 +40,8 @@ export class Engine {
   private attachedCanvas: HTMLCanvasElement | null = null;
   private attaching: Promise<void> | null = null;
   private player: AudioPlayer | null = null;
+  /** Output-only listening gain; deliberately downstream of the project mix. */
+  private monitorGain = 1;
   private rafHandle: number | null = null;
   private clockTimer: ReturnType<typeof setInterval> | null = null;
   private playbackPosition: Time = T.TIME_ZERO;
@@ -54,6 +56,10 @@ export class Engine {
   private lastRenderedAt: Time | null = null;
   /** Most recent time asked for, whether or not that render has finished yet. */
   private lastRequestedAt: Time | null = null;
+  /** Last position handed to the transport, so identical ones cost nothing. */
+  private lastReported: Time | null = null;
+  /** Registered once, to resume the audio device on the first gesture. */
+  private audioArmed = false;
 
   private readonly telemetry: EngineTelemetry = {
     fps: 0,
@@ -88,6 +94,10 @@ export class Engine {
    * this is the normal path, not an edge case.
    */
   async attachCanvas(canvas: HTMLCanvasElement, size: Size): Promise<void> {
+    // Start the audio device opening alongside the GPU one. Both are slow, neither
+    // waits on the other, and this is the last moment before the user can press Play.
+    this.warmUpAudio();
+
     if (this.compositor && this.attachedCanvas === canvas) {
       this.compositor.resize(size);
       return;
@@ -157,7 +167,14 @@ export class Engine {
    * Gather every layer visible at `at`, decoding the frames they need.
    * The returned `VideoFrame`s are owned by the caller and must be closed.
    */
-  async collectLayers(at: Time): Promise<{ layers: DrawLayer[]; owned: VideoFrame[] }> {
+  async collectLayers(
+    at: Time,
+    /**
+     * True when `at` is stepping forward frame by frame, as playback does, so the
+     * decoders can walk with it instead of seeking from a keyframe every time.
+     */
+    sequential = false,
+  ): Promise<{ layers: DrawLayer[]; owned: VideoFrame[] }> {
     const project = this.getProject();
     const sequence = project.sequences[this.sequenceId];
     if (!sequence) return { layers: [], owned: [] };
@@ -222,7 +239,10 @@ export class Engine {
       }
 
       if (!layer.sourceTime) continue;
-      const sample = await this.media.getFrame(layer.clip.assetId, layer.sourceTime).catch(() => null);
+      const sample = await (sequential
+        ? this.media.sequentialFrame(layer.clip.id, layer.clip.assetId, layer.sourceTime)
+        : this.media.getFrame(layer.clip.assetId, layer.sourceTime)
+      ).catch(() => null);
       if (!sample) continue;
 
       const frame = sample.toVideoFrame();
@@ -250,7 +270,7 @@ export class Engine {
     if (!compositor) return;
 
     const started = performance.now();
-    const { layers, owned } = await this.collectLayers(at);
+    const { layers, owned } = await this.collectLayers(at, this.telemetry.playing);
     const decoded = performance.now();
 
     try {
@@ -343,6 +363,43 @@ export class Engine {
     return out.convertToBlob({ type, ...(quality !== undefined ? { quality } : {}) });
   }
 
+  /** Capture an unedited source frame for the asset currently open in the source monitor. */
+  async grabAssetStill(assetId: AssetId, at: Time, type = 'image/png', quality?: number): Promise<Blob> {
+    const asset = this.getProject().assets[assetId];
+    if (!asset?.video) throw new Error('That source has no picture to capture');
+
+    let image: CanvasImageSource;
+    let owned: VideoFrame | null = null;
+    if (asset.kind === 'image') {
+      const still = this.media.getStill(assetId);
+      if (!still) throw new Error('That still is not available');
+      image = still;
+    } else {
+      const sample = await this.media.getFrame(assetId, at);
+      if (!sample) throw new Error('No source frame exists at this position');
+      owned = sample.toVideoFrame();
+      sample.close();
+      image = owned;
+    }
+
+    const width = asset.image?.size.width ?? asset.video.size.width;
+    const height = asset.image?.size.height ?? asset.video.size.height;
+    const out = new OffscreenCanvas(width, height);
+    const ctx = out.getContext('2d');
+    if (!ctx) {
+      owned?.close();
+      throw new Error('Could not prepare the captured frame');
+    }
+    try {
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, width, height);
+      ctx.drawImage(image, 0, 0, width, height);
+      return await out.convertToBlob({ type, ...(quality !== undefined ? { quality } : {}) });
+    } finally {
+      owned?.close();
+    }
+  }
+
   private async drainRenderQueue(): Promise<void> {
     this.rendering = true;
     try {
@@ -365,6 +422,54 @@ export class Engine {
   }
 
   /**
+   * Open the audio output device now, rather than on the first press of Play.
+   *
+   * Both halves of the cost land on whoever asks first: the constructor blocks the
+   * main thread acquiring the device, and the clock then stays at zero for a good
+   * while after. Spending that at load, when nothing is waiting on it, is the whole
+   * of the fix -- there is no way to make the device open faster, only to open it
+   * somewhere the delay does not show.
+   */
+  warmUpAudio(): void {
+    this.player ??= new AudioPlayer(this.media, this.getProject, this.sequenceId);
+    this.player.setMonitorGain(this.monitorGain);
+    void this.player.warmUp();
+
+    // Autoplay policy holds a context created before any gesture suspended, and its
+    // clock with it, so the first gesture anywhere is the earliest this can succeed.
+    if (this.audioArmed) return;
+    this.audioArmed = true;
+    const resume = (): void => void this.player?.warmUp();
+    window.addEventListener('pointerdown', resume, { once: true, capture: true });
+    window.addEventListener('keydown', resume, { once: true, capture: true });
+  }
+
+  /**
+   * Where the transport is now.
+   *
+   * The audio clock leads whenever it is running. While the device is still opening
+   * the transport deliberately stands still: running the picture on wall time and
+   * then handing over to an audio clock that starts from zero is what used to drag
+   * the play head backwards a second into every first play.
+   */
+  private positionNow(): Time {
+    const player = this.player;
+    if (!player) return this.playbackPosition;
+
+    const clock = player.clockState();
+    if (clock === 'live') return player.currentTime();
+    if (clock === 'pending') {
+      // Keep the fallback anchored to now, so if the device turns out to be blocked
+      // rather than slow the picture starts from here instead of leaping to wherever
+      // wall time had wandered while it waited.
+      this.playOriginWall = performance.now();
+      return this.playOrigin;
+    }
+    const wallElapsed = (performance.now() - this.playOriginWall) / 1000;
+    return T.add(this.playOrigin, T.fromSeconds(wallElapsed, 1_000_000));
+  }
+
+  /**
    * Begin playback from `from`. `onPosition` reports the position derived from the
    * audio clock — the caller moves the playhead.
    *
@@ -378,22 +483,18 @@ export class Engine {
     if (this.telemetry.playing) return;
 
     this.player ??= new AudioPlayer(this.media, this.getProject, this.sequenceId);
+    this.player.setMonitorGain(this.monitorGain);
     this.telemetry.playing = true;
     this.playUntil = until;
     this.playbackPosition = from;
     this.playOrigin = from;
     this.playOriginWall = performance.now();
+    this.lastReported = from;
     await this.player.start(from);
 
     const advance = (): void => {
       if (!this.telemetry.playing || !this.player) return;
-
-      // The audio clock is authoritative; wall time covers a silent or blocked
-      // AudioContext (autoplay policy) so the picture still runs at the right rate.
-      const audioTime = this.player.currentTime();
-      const wallElapsed = (performance.now() - this.playOriginWall) / 1000;
-      const fallback = T.add(this.playOrigin, T.fromSeconds(wallElapsed, 1_000_000));
-      const position = T.gt(audioTime, this.playOrigin) ? audioTime : fallback;
+      const position = this.positionNow();
 
       if (T.gte(position, this.playUntil)) {
         this.playbackPosition = this.playUntil;
@@ -403,12 +504,26 @@ export class Engine {
       }
 
       this.playbackPosition = position;
-      onPosition(position);
+      // Reporting the same position again still writes the document and re-renders
+      // the whole timeline, and the clock stands still on purpose while the audio
+      // device opens -- which is exactly when the transport can least afford it.
+      if (this.lastReported === null || !T.eq(position, this.lastReported)) {
+        this.lastReported = position;
+        onPosition(position);
+      }
     };
 
     const draw = (): void => {
       if (!this.telemetry.playing) return;
-      this.requestRender(this.playbackPosition);
+      // Read the clock here rather than reusing the timer's copy: sampled every
+      // CLOCK_INTERVAL_MS, that value is up to a whole tick stale by the time a
+      // frame is drawn, and frames landing on a coarser grid than they are shown at
+      // is judder whatever the decoder does.
+      const at = this.positionNow();
+      this.playbackPosition = at;
+      if (this.lastRequestedAt === null || !T.eq(at, this.lastRequestedAt)) {
+        this.requestRender(at);
+      }
       this.rafHandle = requestAnimationFrame(draw);
     };
 
@@ -426,6 +541,7 @@ export class Engine {
    */
   async seek(at: Time): Promise<void> {
     this.playbackPosition = at;
+    this.lastReported = at;
 
     if (this.telemetry.playing && this.player) {
       this.playOrigin = at;
@@ -446,9 +562,18 @@ export class Engine {
       this.clockTimer = null;
     }
     await this.player?.stop();
+    // Sequential decoders are only worth their open decoder while something is
+    // walking them; what comes next is scrubbing, which wants random access.
+    this.media.releaseCursors();
     // Land on the exact position the transport stopped at.
     this.requestRender(this.playbackPosition);
     this.emitTelemetry();
+  }
+
+  /** Change only what the local monitor hears, never the document or export mix. */
+  setMonitorGain(gain: number): void {
+    this.monitorGain = Math.max(0, Math.min(1, gain));
+    this.player?.setMonitorGain(this.monitorGain);
   }
 
   /**
@@ -475,6 +600,10 @@ export class Engine {
   async openAsset(assetId: AssetId, blob: Blob, kind: AssetKind): Promise<void> {
     if (kind === 'image') await this.media.openImage(assetId, blob);
     else await this.media.open(assetId, blob);
+  }
+
+  async openProxy(assetId: AssetId, blob: Blob): Promise<void> {
+    await this.media.openProxy(assetId, blob);
   }
 
   async destroy(): Promise<void> {

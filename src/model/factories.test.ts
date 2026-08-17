@@ -4,6 +4,7 @@ import type { TrackId } from './types';
 
 describe('track defaults', () => {
   it('starts audio and video tracks at the same readable height', () => {
+    expect(DEFAULT_TRACK_HEIGHT).toBe(100);
     const id = 'track' as TrackId;
     expect(createTrack({ id, kind: 'video' }).height).toBe(DEFAULT_TRACK_HEIGHT);
     expect(createTrack({ id, kind: 'audio' }).height).toBe(DEFAULT_TRACK_HEIGHT);

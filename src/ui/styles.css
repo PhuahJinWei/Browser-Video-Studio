@@ -559,6 +559,8 @@ button.action.tint-danger:hover:not(:disabled) svg {
 /* The whole panel is the drop target, so it needs to anchor the overlay. */
 .media-bin {
   position: relative;
+  container-type: inline-size;
+  container-name: media-bin;
 }
 /* Focus decides where Ctrl+A and Delete go, so it has to be visible. */
 .media-bin:focus {
@@ -704,6 +706,60 @@ button.action.tint-danger:hover:not(:disabled) svg {
   container-name: preview-panel;
 }
 
+.inspector-group {
+  margin: 10px -2px 0;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--panel) 94%, var(--line));
+}
+.inspector-group > summary {
+  cursor: pointer;
+  padding: 7px 9px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  user-select: none;
+}
+.inspector-group[open] > summary {
+  border-bottom: 1px solid var(--line);
+}
+.inspector-group-body {
+  padding: 9px;
+}
+.inspector-group-body > :first-child {
+  margin-top: 0;
+}
+.inspector-group-body > :last-child {
+  margin-bottom: 0;
+}
+.field-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.keyframe-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+}
+.keyframe-controls .icon {
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  padding: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.keyframe-controls .keyframe-toggle {
+  color: var(--accent);
+}
+.keyframe-controls .keyframe-toggle.active {
+  background: var(--accent-wash);
+}
+
 .preview {
   flex: 1;
   display: flex;
@@ -802,6 +858,85 @@ button.action.tint-danger:hover:not(:disabled) svg {
   column-gap: 10px;
   min-width: 0;
 }
+.scrub-range {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  border-left: 2px solid var(--accent);
+  border-right: 2px solid var(--accent);
+  background: var(--accent-wash);
+  pointer-events: none;
+}
+
+/* A bin item opens as source media over the program canvas. The canvas stays
+   attached underneath so returning to the edit does not rebuild the GPU pipeline. */
+.source-monitor {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: #000;
+}
+.source-media {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.source-monitor-label {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  max-width: max-content;
+  padding: 3px 4px 3px 7px;
+  border: 1px solid rgb(255 255 255 / 20%);
+  border-radius: 6px;
+  background: rgb(10 14 20 / 76%);
+  color: #fff;
+  backdrop-filter: blur(6px);
+}
+.source-badge {
+  color: #9fc2ff;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.source-name {
+  max-width: min(42vw, 380px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+.source-monitor-label button {
+  color: #fff;
+}
+.source-audio {
+  width: min(76%, 720px);
+  height: 42%;
+  min-height: 100px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 100% 70%;
+  color: #d7e1ed;
+}
+.source-audio span,
+.source-unavailable {
+  color: #c4ced9;
+  font-size: 12px;
+}
 .transport-buttons button {
   flex: none;
 }
@@ -811,6 +946,18 @@ button.action.tint-danger:hover:not(:disabled) svg {
   align-items: center;
   gap: 3px;
 }
+.source-edit-tools {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-right: 4px;
+  padding-right: 7px;
+  border-right: 1px solid var(--line);
+}
+.source-edit-tools button:not(.icon) {
+  min-width: 32px;
+  padding-inline: 6px;
+}
 .transport-playback {
   grid-area: playback;
   justify-self: center;
@@ -818,16 +965,6 @@ button.action.tint-danger:hover:not(:disabled) svg {
 .transport-utilities {
   grid-area: utilities;
   justify-self: end;
-}
-.transport-buttons button.icon.play {
-  min-width: 32px;
-  min-height: 28px;
-  color: var(--text);
-  background: var(--accent-dim);
-  border-color: var(--accent);
-}
-.transport-buttons button.icon.play:hover:not(:disabled) {
-  background: var(--accent);
 }
 .transport-time {
   grid-area: time;
@@ -843,6 +980,52 @@ button.action.tint-danger:hover:not(:disabled) svg {
   color: var(--muted);
 }
 
+.preview-volume {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--muted);
+}
+.preview-volume .range {
+  width: 64px;
+  flex: none;
+}
+.preview-volume input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 24px;
+  background: transparent;
+  cursor: pointer;
+}
+.preview-volume input[type='range']::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line-strong);
+}
+.preview-volume input[type='range']::-moz-range-track {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line-strong);
+}
+.preview-volume input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 10px;
+  height: 10px;
+  margin-top: -3.5px;
+  border: 1px solid var(--panel-2);
+  border-radius: 50%;
+  background: var(--text);
+}
+.preview-volume input[type='range']::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--panel-2);
+  border-radius: 50%;
+  background: var(--text);
+}
+
 /* A narrow monitor gets one uninterrupted playback row, then status and utilities. */
 @container preview-panel (max-width: 620px) {
   .transport-buttons {
@@ -851,6 +1034,9 @@ button.action.tint-danger:hover:not(:disabled) svg {
       'playback playback'
       'time utilities';
     row-gap: 5px;
+  }
+  .preview-volume .range {
+    width: 52px;
   }
 }
 
@@ -1192,7 +1378,6 @@ body.resizing-track-sections {
 }
 .track-header-row.operations {
   padding-left: 15px;
-  border-top: 1px solid color-mix(in srgb, var(--line) 68%, transparent);
 }
 .track-header .track-menu-button {
   flex: none;
@@ -1695,6 +1880,36 @@ body.resizing-track-sections {
   font-family: ui-monospace, Menlo, monospace;
   font-size: 11px;
   text-align: right;
+}
+
+.sequence-reference {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.sequence-reference select {
+  min-width: 0;
+}
+.sequence-reference-summary {
+  margin: 4px 0 7px;
+  color: var(--muted);
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+button.sequence-match {
+  width: 100%;
+  justify-content: center;
+}
+button.sequence-match.matched:disabled {
+  opacity: 1;
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.sequence-reference-hint {
+  margin: 6px 0 0;
+  font-size: 11px;
 }
 
 .unit-badge {
@@ -2367,6 +2582,32 @@ body.focus-mode .preview-panel .preview {
   background: transparent;
   cursor: pointer;
 }
+.studio-dialog-backdrop {
+  z-index: 100;
+}
+.studio-dialog-message {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+  white-space: pre-line;
+}
+.studio-dialog-field {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.studio-dialog-field input {
+  width: 100%;
+}
+.studio-dialog .actions button.primary {
+  border-color: var(--accent);
+}
+.studio-dialog .actions button.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
 .range.track-volume > input[type='range']::-webkit-slider-runnable-track,
 .master-volume input[type='range']::-webkit-slider-runnable-track,
 .zoom-slider input[type='range']::-webkit-slider-runnable-track {
@@ -2482,7 +2723,7 @@ body.focus-mode .preview-panel .preview {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  padding: 8px 10px 0;
+  padding: 6px 10px 0;
   flex: 0 0 auto;
 }
 .bin-filter {
@@ -2713,16 +2954,29 @@ body.resizing-y {
   background: transparent;
 }
 
-/* The action row under the tabs: import, delete, new folder, view. */
+/* One stable row: location on the left, library actions on the right. */
+.bin-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px 10px 0;
+  flex: 0 0 auto;
+}
+.bin-header-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 2px 5px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+}
 .bin-actions {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 8px 10px 0;
+  padding: 0;
   flex: 0 0 auto;
-}
-.bin-actions .spacer {
-  flex: 1;
 }
 .bin-actions .count {
   font-size: 11px;
@@ -2730,18 +2984,26 @@ body.resizing-y {
   font-variant-numeric: tabular-nums;
 }
 
-/* Breadcrumbs. The root is always reachable in one click, however deep you are. */
+/* Breadcrumbs stay one row; long paths scroll instead of growing the header. */
 .bin-crumbs {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
   gap: 2px;
-  padding: 8px 10px 0;
+  min-width: 0;
+  padding: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  white-space: nowrap;
   font-size: 11px;
   color: var(--muted);
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+}
+.bin-crumbs::-webkit-scrollbar {
+  display: none;
 }
 .bin-crumb {
+  flex: none;
   padding: 2px 5px;
   border: 0;
   border-radius: 4px;
@@ -2758,7 +3020,15 @@ body.resizing-y {
   font-weight: 600;
 }
 .bin-crumbs .sep {
+  flex: none;
   opacity: 0.5;
+}
+
+/* Selection state remains available through button state at the narrowest width. */
+@container media-bin (max-width: 320px) {
+  .bin-actions .count {
+    display: none;
+  }
 }
 
 .bin-folder {
@@ -2826,6 +3096,9 @@ body.resizing-y {
   background: var(--accent);
   transition: width 0.2s linear;
 }
+.bin-progress.proxy > div {
+  background: var(--warning, #d97706);
+}
 /* Queued but not started: previews run one asset at a time, and the wait is real. */
 .bin-thumb-placeholder.pending {
   animation: pending-pulse 1.6s ease-in-out infinite;
@@ -2858,6 +3131,19 @@ body.resizing-y {
   color: #fff;
   font-size: 10px;
   font-weight: 600;
+}
+.bin-badge-proxy {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgb(16 24 32 / 82%);
+  color: #b9d5ff;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 /*
  * The dragged clip, shown against the track-facing edge of the adaptive tail.

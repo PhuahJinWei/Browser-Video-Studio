@@ -10,8 +10,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ProjectId } from '../model/types';
 import type { ProjectSummary } from '../storage/projectStore';
-import { IconFile, IconFolder, IconText, IconTrash } from './Icons';
+import { IconDownload, IconFile, IconFolder, IconText, IconTrash } from './Icons';
 import { useStudio } from './store';
+import { useDialog } from './Dialog';
 
 /**
  * "3 minutes ago" up to a week, then the date.
@@ -48,10 +49,13 @@ function contentsOf(project: ProjectSummary): string {
 }
 
 export function OpenDialog({ onClose }: { onClose: () => void }): React.JSX.Element {
+  const dialog = useDialog();
   const listStoredProjects = useStudio((s) => s.listStoredProjects);
   const openStoredProject = useStudio((s) => s.openStoredProject);
   const renameStoredProject = useStudio((s) => s.renameStoredProject);
   const deleteStoredProject = useStudio((s) => s.deleteStoredProject);
+  const saveProjectToFile = useStudio((s) => s.saveProjectToFile);
+  const openProjectFileViaPicker = useStudio((s) => s.openProjectFileViaPicker);
   const newProject = useStudio((s) => s.newProject);
   const currentId = useStudio((s) => s.history.present.project.id);
 
@@ -103,17 +107,37 @@ export function OpenDialog({ onClose }: { onClose: () => void }): React.JSX.Elem
      * else — the media went in when it was imported and this is the only place it
      * lives — so the count is spelled out rather than left to be remembered.
      */
-    const warning =
-      `Delete "${project.name}"?\n\n` +
-      `${contentsOf(project)}. This erases the project and its stored media. ` +
-      `It cannot be undone.`;
-    if (!confirm(warning)) return;
+    if (!await dialog.confirm({
+      title: `Delete “${project.name}”?`,
+      message: `${contentsOf(project)}. This erases the project and its stored media. It cannot be undone.`,
+      confirmLabel: 'Delete project',
+      danger: true,
+    })) return;
 
     setBusy(true);
     await deleteStoredProject(project.id);
     const left = await refresh();
     setFocused(left[0]?.id ?? null);
     setBusy(false);
+  };
+
+  const saveToFile = async (project: ProjectSummary): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    await saveProjectToFile(project.id);
+    setBusy(false);
+  };
+
+  const openFromFile = async (): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    // Closed only when a file was actually opened, so a cancelled picker or a file
+    // that would not read leaves the list where it was.
+    if (await openProjectFileViaPicker()) onClose();
+    else {
+      await refresh();
+      setBusy(false);
+    }
   };
 
   const commitRename = async (id: ProjectId, name: string): Promise<void> => {
@@ -162,8 +186,8 @@ export function OpenDialog({ onClose }: { onClose: () => void }): React.JSX.Elem
       <div className="modal open-dialog" onClick={(event) => event.stopPropagation()}>
         <h3>Open project</h3>
         <p className="dialog-note">
-          Projects are kept in this browser on this device. Export a video to take one
-          anywhere else.
+          Projects are kept in this browser on this device, and go when its site data
+          does. Save one to a file to keep a copy of your own or move it elsewhere.
         </p>
 
         <div className="project-list" ref={listRef} tabIndex={0} onKeyDown={onListKeyDown}>
@@ -226,6 +250,17 @@ export function OpenDialog({ onClose }: { onClose: () => void }): React.JSX.Elem
                     <IconText size={15} />
                   </button>
                   <button
+                    className="icon"
+                    title="Save to a file, media included"
+                    disabled={busy}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void saveToFile(project);
+                    }}
+                  >
+                    <IconDownload size={15} />
+                  </button>
+                  <button
                     className="icon tint-danger"
                     title={isCurrent ? 'Delete this project and open the next one' : 'Delete'}
                     disabled={busy}
@@ -255,14 +290,21 @@ export function OpenDialog({ onClose }: { onClose: () => void }): React.JSX.Elem
         <div className="actions">
           <button
             disabled={busy}
-            onClick={() => {
-              if (confirm('Start a new project? This one is kept on disk.')) {
+            onClick={() => void (async () => {
+              if (await dialog.confirm({
+                title: 'Start a new project?',
+                message: 'Your current project is kept safely on this device.',
+                confirmLabel: 'New project',
+              })) {
                 newProject();
                 onClose();
               }
-            }}
+            })()}
           >
             <IconFile size={15} /> New project
+          </button>
+          <button disabled={busy} onClick={() => void openFromFile()}>
+            <IconFolder size={15} /> Open a file…
           </button>
           <span className="spacer" />
           <button onClick={onClose}>Close</button>

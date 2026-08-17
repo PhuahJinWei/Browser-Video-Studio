@@ -239,6 +239,18 @@ const CHUNK_SECONDS = 0.2;
 const SCHEDULE_INTERVAL_MS = 50;
 
 /**
+ * How far the audio clock is trusted.
+ *
+ * `pending` is the one that matters: an `AudioContext` reports `running` from the
+ * moment it is created, but its `currentTime` stays frozen at 0 until the operating
+ * system has actually opened the output device -- measured at ~550 ms here, on top
+ * of ~440 ms blocked inside the constructor. Anything that treats a frozen clock as
+ * a stopped one runs the picture ahead of sound that has not started, then snaps it
+ * back when the device wakes.
+ */
+export type AudioClockState = 'pending' | 'live' | 'blocked';
+
+/**
  * Schedules mixed audio onto an `AudioContext` and exposes the resulting clock.
  *
  * The audio clock is the master during playback: video frames are chosen to match it,
@@ -246,6 +258,8 @@ const SCHEDULE_INTERVAL_MS = 50;
  */
 export class AudioPlayer {
   private context: AudioContext | null = null;
+  private output: GainNode | null = null;
+  private monitorGain = 1;
   private timer: ReturnType<typeof setInterval> | null = null;
   private scheduled: AudioBufferSourceNode[] = [];
 
@@ -278,8 +292,47 @@ export class AudioPlayer {
     if (!this.context) {
       const sequence = getSequence(this.getProject(), this.sequenceId);
       this.context = new AudioContext({ sampleRate: sequence.sampleRate, latencyHint: 'interactive' });
+      this.output = this.context.createGain();
+      this.output.gain.value = this.monitorGain;
+      this.output.connect(this.context.destination);
     }
     return this.context;
+  }
+
+  /**
+   * Open the output device before anything needs it.
+   *
+   * Constructing an `AudioContext` blocks the main thread while the device is
+   * acquired, and the clock then takes longer still to start ticking. Doing it at
+   * load, and resuming on the first gesture, moves both out of the way of the first
+   * press of Play -- which is the only time the user ever saw it.
+   */
+  async warmUp(): Promise<void> {
+    const context = this.ensureContext();
+    // Autoplay policy: a context created before any gesture starts suspended, and
+    // resume() only succeeds once one has happened. Failing here is expected and
+    // costs nothing -- the next call, from the gesture itself, is the one that works.
+    if (context.state === 'suspended') await context.resume().catch(() => undefined);
+  }
+
+  /**
+   * Whether the clock this reports can be believed yet.
+   *
+   * Distinguishing 'pending' from 'blocked' is the whole point: one is a device that
+   * is about to start, the other is one that never will.
+   */
+  clockState(): AudioClockState {
+    if (!this.running || !this.context) return 'blocked';
+    if (this.context.state !== 'running') return 'blocked';
+    return this.context.currentTime >= this.originContext ? 'live' : 'pending';
+  }
+
+  /** Listening level after the project mix. It never changes export audio. */
+  setMonitorGain(gain: number): void {
+    this.monitorGain = Math.max(0, Math.min(1, gain));
+    if (this.context && this.output) {
+      this.output.gain.setValueAtTime(this.monitorGain, this.context.currentTime);
+    }
   }
 
   /** Timeline position currently being heard. */
@@ -323,7 +376,9 @@ export class AudioPlayer {
       node.disconnect();
     }
     this.scheduled = [];
-    if (this.context && this.context.state === 'running') await this.context.suspend();
+    // The context is deliberately left running. Suspending it releases the output
+    // device, and re-acquiring it on the next play costs the same near-second the
+    // first one did -- for silence that nobody is listening to in between.
   }
 
   async close(): Promise<void> {
@@ -357,15 +412,23 @@ export class AudioPlayer {
       if (this.generation !== generation) return;
 
       if (buffer) {
-        const node = context.createBufferSource();
-        node.buffer = buffer;
-        node.connect(context.destination);
-        node.start(Math.max(context.currentTime, chunkStartContext));
-        node.onended = () => {
-          this.scheduled = this.scheduled.filter((n) => n !== node);
-          node.disconnect();
-        };
-        this.scheduled.push(node);
+        const now = context.currentTime;
+        // A chunk that missed its slot has to start part-way in. Starting it whole
+        // and late replays material the clock has already passed, and pushes every
+        // chunk behind it further out -- the drift compounds rather than recovering.
+        const late = now - chunkStartContext;
+        if (late < CHUNK_SECONDS) {
+          const node = context.createBufferSource();
+          node.buffer = buffer;
+          node.connect(this.output ?? context.destination);
+          if (late > 0) node.start(now, late);
+          else node.start(chunkStartContext);
+          node.onended = () => {
+            this.scheduled = this.scheduled.filter((n) => n !== node);
+            node.disconnect();
+          };
+          this.scheduled.push(node);
+        }
       }
 
       this.renderedTo = T.add(this.renderedTo, duration);

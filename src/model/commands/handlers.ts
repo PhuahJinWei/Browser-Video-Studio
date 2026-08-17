@@ -665,6 +665,12 @@ function handleAddAsset(d: Draft, cmd: Extract<Command, { type: 'addAsset' }>): 
   d.assets[cmd.asset.id] = cmd.asset;
 }
 
+function handleReplaceAsset(d: Draft, cmd: Extract<Command, { type: 'replaceAsset' }>): void {
+  if (!d.assets[cmd.assetId]) throw new ModelError(`No asset with id "${cmd.assetId}"`);
+  if (cmd.asset.id !== cmd.assetId) throw new ModelError('A relink cannot change an asset id');
+  d.assets[cmd.assetId] = cmd.asset;
+}
+
 function handleRemoveAsset(d: Draft, cmd: Extract<Command, { type: 'removeAsset' }>): void {
   const users = Object.values(d.clips).filter((c) => isMediaClip(c) && c.assetId === cmd.assetId);
   if (users.length > 0) {
@@ -1128,6 +1134,8 @@ export function runCommand(d: Draft, command: Command, ids: IdSource): void {
       return handleSetEffectEnabled(d, command);
     case 'addAsset':
       return handleAddAsset(d, command);
+    case 'replaceAsset':
+      return handleReplaceAsset(d, command);
     case 'removeAsset':
       return handleRemoveAsset(d, command);
     case 'setAssetStatus':

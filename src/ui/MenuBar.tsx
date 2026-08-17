@@ -16,6 +16,7 @@ import {
   IconExport,
   IconEye,
   IconEyeOff,
+  IconDownload,
   IconFile,
   IconFolder,
   IconFullscreen,
@@ -43,6 +44,7 @@ import {
 import * as T from '../model/time';
 import { useLayout } from './layout';
 import { useStudio } from './store';
+import { useDialog } from './Dialog';
 
 /**
  * A dropdown anchored under its title.
@@ -116,6 +118,7 @@ export function MenuBar({
   onExport: () => void;
   onOpenProject: () => void;
 }): React.JSX.Element {
+  const dialog = useDialog();
   const [open, setOpen] = useState<string | null>(null);
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
@@ -131,12 +134,15 @@ export function MenuBar({
   const canUndoEdit = useStudio((s) => s.canUndoEdit);
   const canRedoEdit = useStudio((s) => s.canRedoEdit);
   const newProject = useStudio((s) => s.newProject);
+  const saveProjectToFile = useStudio((s) => s.saveProjectToFile);
+  const openProjectFileViaPicker = useStudio((s) => s.openProjectFileViaPicker);
   const addTitle = useStudio((s) => s.addTitle);
   const addSolid = useStudio((s) => s.addSolid);
   const splitAtPlayhead = useStudio((s) => s.splitAtPlayhead);
-  const grabScreenshot = useStudio((s) => s.grabScreenshot);
+  const captureFrame = useStudio((s) => s.captureFrame);
   const inspectorOpen = useLayout((s) => s.inspectorOpen);
   const toggleInspector = useLayout((s) => s.toggleInspector);
+  const resetWorkspace = useLayout((s) => s.resetWorkspace);
   const importViaPicker = useStudio((s) => s.importViaPicker);
   const toggleTelemetry = useStudio((s) => s.toggleTelemetry);
   const setPlayhead = useStudio((s) => s.setPlayhead);
@@ -181,22 +187,37 @@ export function MenuBar({
     {
       title: 'File',
       entries: [
-        { label: 'New project', icon: <IconFile />, onSelect: () => {
-            if (confirm('Start a new project? Unsaved work in this one is kept on disk.')) newProject();
-          } },
+        { label: 'New project', icon: <IconFile />, onSelect: () => void (async () => {
+            if (await dialog.confirm({
+              title: 'Start a new project?',
+              message: 'Your current project is kept safely on this device.',
+              confirmLabel: 'New project',
+            })) newProject();
+          })() },
         {
           label: 'Open project…',
           icon: <IconFolder />,
           hint: 'Ctrl+O',
           onSelect: onOpenProject,
         },
+        {
+          label: 'Open a project file…',
+          icon: <IconFolder />,
+          onSelect: () => void openProjectFileViaPicker(),
+        },
+        {
+          label: 'Save this project to a file…',
+          icon: <IconDownload />,
+          onSelect: () => void saveProjectToFile(project.id),
+        },
+        'separator',
         { label: 'Import media…', icon: <IconPlus />, hint: 'Ctrl+I', onSelect: () => void importViaPicker() },
         'separator',
         {
-          label: 'Save this frame…',
+          label: 'Capture frame',
           icon: <IconCamera />,
           hint: 'Shift+S',
-          onSelect: () => void grabScreenshot(),
+          onSelect: () => void captureFrame(),
         },
         { label: 'Export…', icon: <IconExport />, hint: 'Ctrl+E', onSelect: onExport },
       ],
@@ -290,18 +311,18 @@ export function MenuBar({
         {
           label: 'Add title at playhead',
           icon: <IconText />,
-          onSelect: () => {
-            const text = prompt('Title text', 'Hello');
+          onSelect: () => void (async () => {
+            const text = await dialog.prompt({ title: 'Add title', inputLabel: 'Title text', initialValue: 'Hello', confirmLabel: 'Add title' });
             if (text) addTitle(text);
-          },
+          })(),
         },
         {
           label: 'Add colour at playhead',
           icon: <IconSwatch />,
-          onSelect: () => {
-            const fill = prompt('Fill colour (any CSS colour)', '#1f6feb');
+          onSelect: () => void (async () => {
+            const fill = await dialog.prompt({ title: 'Add colour', inputLabel: 'CSS colour', initialValue: '#1f6feb', confirmLabel: 'Add colour' });
             if (fill) addSolid(fill);
-          },
+          })(),
         },
       ],
     },
@@ -349,6 +370,7 @@ export function MenuBar({
             document.querySelector<HTMLButtonElement>('.transport-buttons button[title*="ullscreen"]')?.click();
           },
         },
+        { label: 'Reset workspace layout', onSelect: resetWorkspace },
         'separator',
         { label: 'Zoom in', hint: 'Ctrl+Wheel', onSelect: () => setZoom(sequence.view.zoom * 1.4) },
         { label: 'Zoom out', onSelect: () => setZoom(sequence.view.zoom / 1.4) },
@@ -370,9 +392,9 @@ export function MenuBar({
       entries: [
         {
           label: 'Keyboard shortcuts',
-          onSelect: () =>
-            alert(
-              [
+          onSelect: () => void dialog.notice({
+              title: 'Keyboard shortcuts',
+              message: [
                 'Space — play / pause',
                 '← / → — step one frame (Shift for ten)',
                 'Home / End — go to start / end',
@@ -385,16 +407,14 @@ export function MenuBar({
                 'Ctrl+Wheel — zoom the timeline',
                 'Right-click — context menus on clips, lanes, the ruler and the bin',
               ].join('\n'),
-            ),
+            }),
         },
         {
           label: 'About Browser Video Studio',
-          onSelect: () =>
-            alert(
-              'Browser Video Studio\n\n' +
-                'A video editor that runs entirely in your browser on WebCodecs and WebGPU.\n' +
-                'Nothing is uploaded — media never leaves this machine.',
-            ),
+          onSelect: () => void dialog.notice({
+            title: 'About Browser Video Studio',
+            message: 'A video editor that runs entirely in your browser on WebCodecs and WebGPU.\nNothing is uploaded — media never leaves this machine.',
+          }),
         },
       ],
     },

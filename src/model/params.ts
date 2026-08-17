@@ -50,6 +50,29 @@ export function sortKeyframes<V>(keyframes: readonly Keyframe<V>[]): readonly Ke
   return [...keyframes].sort((a, b) => T.cmp(a.at, b.at));
 }
 
+/** Add or replace the keyframe at an exact clip-relative time. */
+export function upsertKeyframe<V>(
+  param: Param<V>,
+  at: Time,
+  value: V,
+): Param<V> {
+  if (param.kind === 'static') return keyframedParam([keyframe(at, value)]);
+  const existing = param.keyframes.findIndex((item) => T.eq(item.at, at));
+  if (existing < 0) return keyframedParam([...param.keyframes, keyframe(at, value)]);
+  const keyframes = [...param.keyframes];
+  keyframes[existing] = { ...keyframes[existing]!, value };
+  return keyframedParam(keyframes);
+}
+
+/** Remove an exact keyframe, collapsing the final one back to a static value. */
+export function removeKeyframe<V>(param: Param<V>, at: Time): Param<V> {
+  if (param.kind === 'static') return param;
+  const valueAtTime = evalParam(param, at);
+  const keyframes = param.keyframes.filter((item) => !T.eq(item.at, at));
+  if (keyframes.length === 0) return staticParam(valueAtTime);
+  return keyframedParam(keyframes);
+}
+
 // ---------------------------------------------------------------------------
 // Cubic bezier easing (CSS timing-function semantics)
 // ---------------------------------------------------------------------------

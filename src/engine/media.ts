@@ -62,6 +62,49 @@ interface MediaHandle {
 /** How long a still lasts when first placed. Stills stretch freely afterwards. */
 export const DEFAULT_STILL_DURATION_SECONDS = 5;
 
+/**
+ * A decoder walking one clip forward in step with the play head.
+ *
+ * `getSample` is random access: it builds a decoder, seeks back to the keyframe
+ * before the time asked for, decodes the whole run up to it, flushes and closes --
+ * every call. That is the right shape for scrubbing and the wrong one for playing,
+ * where the next request is a frame later and re-decodes almost the same run. On a
+ * 1080p H.264 clip it measured 26-143 ms per frame, rising with distance from the
+ * keyframe. Walking a single iterator instead decodes each packet once.
+ */
+interface FrameCursor {
+  readonly assetId: AssetId;
+  iterator: AsyncGenerator<VideoSample, void, unknown> | null;
+  /** Latest sample at or before the last time asked for. Owned by the cursor. */
+  current: VideoSample | null;
+  /** Pulled from the iterator but still in the future. Owned by the cursor. */
+  lookahead: VideoSample | null;
+  /** Source seconds last asked for, so a jump can be told from a step. */
+  at: number;
+  /** Monotonic stamp for least-recently-used eviction. */
+  used: number;
+}
+
+/**
+ * How far ahead a cursor will walk before starting over instead.
+ *
+ * Walking wins only while the frames wanted are the frames coming next. Past about
+ * a second the skipped frames cost more to decode and throw away than a fresh seek
+ * to the nearest keyframe costs outright.
+ */
+const CURSOR_RESYNC_SECONDS = 1;
+
+/**
+ * Cursors kept alive at once.
+ *
+ * Each holds an open decoder, so this is a real resource. Two is the common case (a
+ * dissolve), and the limit only bites on a stack deeper than most projects have.
+ */
+const MAX_CURSORS = 8;
+
+/** Timestamps are floats; a frame boundary must not miss itself by a rounding error. */
+const TIMESTAMP_EPSILON = 1e-9;
+
 export function isImageFile(file: File | Blob): boolean {
   return file.type.startsWith('image/');
 }
@@ -74,9 +117,14 @@ export function isImageFile(file: File | Blob): boolean {
  */
 export class MediaLibrary {
   private readonly handles = new Map<AssetId, MediaHandle>();
+  /** Lower-resolution video handles used only by sequential preview playback. */
+  private readonly proxies = new Map<AssetId, MediaHandle>();
   private readonly opening = new Map<AssetId, Promise<MediaHandle>>();
   /** Decoded stills, which have no container and so no demuxer handle. */
   private readonly stills = new Map<AssetId, ImageBitmap>();
+  /** Sequential decoders, keyed by whatever is walking them -- one per clip. */
+  private readonly cursors = new Map<string, FrameCursor>();
+  private cursorClock = 0;
 
   /** Inspect a file without registering it. Used by the import flow. */
   static async probe(blob: Blob): Promise<MediaProbe> {
@@ -210,6 +258,44 @@ export class MediaLibrary {
     await this.handleFor(assetId, blob);
   }
 
+  async openProxy(assetId: AssetId, blob: Blob): Promise<void> {
+    this.closeProxy(assetId);
+    const input = new Input({ source: new BlobSource(blob), formats: ALL_FORMATS });
+    if (!(await input.canRead())) throw new MediaError('Unsupported proxy format');
+    const videoTrack = await input.getPrimaryVideoTrack();
+    if (!videoTrack) throw new MediaError('Proxy contains no video track');
+    const durationSeconds =
+      (await input.getDurationFromMetadata().catch(() => null)) ?? (await input.computeDuration());
+    this.proxies.set(assetId, {
+      assetId,
+      blob,
+      input,
+      videoTrack,
+      audioTrack: null,
+      videoSink: null,
+      audioSink: null,
+      durationSeconds,
+    });
+    // Any active walk belongs to the old source choice.
+    for (const [key, cursor] of this.cursors) {
+      if (cursor.assetId !== assetId) continue;
+      this.cursors.delete(key);
+      void closeCursor(cursor);
+    }
+  }
+
+  closeProxy(assetId: AssetId): void {
+    const handle = this.proxies.get(assetId);
+    if (!handle) return;
+    for (const [key, cursor] of this.cursors) {
+      if (cursor.assetId !== assetId) continue;
+      this.cursors.delete(key);
+      void closeCursor(cursor);
+    }
+    void handle.input.dispose?.();
+    this.proxies.delete(assetId);
+  }
+
   has(assetId: AssetId): boolean {
     return this.handles.has(assetId) || this.opening.has(assetId);
   }
@@ -276,6 +362,93 @@ export class MediaLibrary {
     return handle.audioSink.getBuffer(seconds);
   }
 
+  /**
+   * The frame at a source time, decoded by walking forward from the last one.
+   *
+   * For playback, where the caller asks for a steadily advancing series of times.
+   * `key` identifies the walker -- the clip id, so two clips cut from one file each
+   * keep their own decoder instead of dragging a shared one back and forth.
+   *
+   * Going backwards, or forwards further than `CURSOR_RESYNC_SECONDS`, starts a new
+   * walk, so a seek mid-playback costs what a seek always cost. The caller owns the
+   * returned sample and must close it, exactly as with `getFrame`.
+   */
+  async sequentialFrame(key: string, assetId: AssetId, at: Time): Promise<VideoSample | null> {
+    const handle = this.proxies.get(assetId) ?? await this.handleFor(assetId);
+    if (!handle.videoTrack) return null;
+    handle.videoSink ??= new VideoSampleSink(handle.videoTrack);
+
+    const seconds = T.toSeconds(at);
+    if (seconds < 0 || seconds > handle.durationSeconds) return null;
+
+    let cursor = this.cursors.get(key);
+    if (
+      cursor &&
+      (cursor.assetId !== assetId ||
+        seconds < cursor.at ||
+        seconds > cursor.at + CURSOR_RESYNC_SECONDS)
+    ) {
+      this.cursors.delete(key);
+      void closeCursor(cursor);
+      cursor = undefined;
+    }
+
+    if (!cursor) {
+      cursor = {
+        assetId,
+        iterator: handle.videoSink.samples(seconds),
+        current: null,
+        lookahead: null,
+        at: seconds,
+        // Stamped before eviction runs, not after: a cursor created with the lowest
+        // stamp in the map is the one eviction would throw away first, so at
+        // capacity a new walk would close itself the moment it opened.
+        used: ++this.cursorClock,
+      };
+      this.cursors.set(key, cursor);
+      this.evictCursors();
+    }
+    cursor.at = seconds;
+    cursor.used = ++this.cursorClock;
+
+    // Draw the walk forward until the next sample is still in the future, which
+    // makes `current` the latest frame at or before the time asked for.
+    while (cursor.iterator) {
+      if (!cursor.lookahead) {
+        const next = await cursor.iterator.next();
+        if (next.done) {
+          cursor.iterator = null;
+          break;
+        }
+        cursor.lookahead = next.value;
+      }
+      if (cursor.lookahead.timestamp > seconds + TIMESTAMP_EPSILON) break;
+
+      cursor.current?.close();
+      cursor.current = cursor.lookahead;
+      cursor.lookahead = null;
+    }
+
+    // Cloned because the caller closes what it is given, and the cursor still needs
+    // this frame: at 60 Hz over 30 fps material the same one is asked for twice.
+    return cursor.current ? cursor.current.clone() : null;
+  }
+
+  /** Drop every sequential decoder -- playback has stopped, or the edit moved on. */
+  releaseCursors(): void {
+    for (const cursor of this.cursors.values()) void closeCursor(cursor);
+    this.cursors.clear();
+  }
+
+  private evictCursors(): void {
+    if (this.cursors.size <= MAX_CURSORS) return;
+    const oldest = [...this.cursors.entries()].sort((a, b) => a[1].used - b[1].used);
+    for (const [key, cursor] of oldest.slice(0, this.cursors.size - MAX_CURSORS)) {
+      this.cursors.delete(key);
+      void closeCursor(cursor);
+    }
+  }
+
   /** Sequential audio over a source range — used by the mixer and by export. */
   async *audioRange(
     assetId: AssetId,
@@ -306,16 +479,45 @@ export class MediaLibrary {
 
   /** Release a single asset's demuxer and decoders. */
   close(assetId: AssetId): void {
+    this.closeProxy(assetId);
+    const still = this.stills.get(assetId);
+    if (still) {
+      still.close();
+      this.stills.delete(assetId);
+    }
     const handle = this.handles.get(assetId);
     if (!handle) return;
+    // The cursors walk this handle's sink, so they cannot outlive it.
+    for (const [key, cursor] of this.cursors) {
+      if (cursor.assetId !== assetId) continue;
+      this.cursors.delete(key);
+      void closeCursor(cursor);
+    }
     void handle.input.dispose?.();
     this.handles.delete(assetId);
   }
 
   closeAll(): void {
+    this.releaseCursors();
     for (const assetId of [...this.handles.keys()]) this.close(assetId);
+    for (const assetId of [...this.proxies.keys()]) this.closeProxy(assetId);
     for (const bitmap of this.stills.values()) bitmap.close();
     this.stills.clear();
+  }
+}
+
+/** End a walk and let go of its decoder. Never throws; there is nothing to retry. */
+async function closeCursor(cursor: FrameCursor): Promise<void> {
+  cursor.current?.close();
+  cursor.lookahead?.close();
+  cursor.current = null;
+  cursor.lookahead = null;
+  const iterator = cursor.iterator;
+  cursor.iterator = null;
+  try {
+    await iterator?.return();
+  } catch {
+    // The walk is being abandoned either way.
   }
 }
 

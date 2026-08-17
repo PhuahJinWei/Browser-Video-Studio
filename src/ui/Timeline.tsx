@@ -47,7 +47,10 @@ import type {
   TransitionId,
 } from '../model/types';
 import { useContextMenu, type MenuEntry } from './ContextMenu';
+import { useDialog } from './Dialog';
+import { clipsForDragOrigin } from './dragOrigin';
 import { planGapInsert } from './insertGap';
+import { ownsPointerGesture } from './pointerGesture';
 import { shiftedTrack } from './trackShift';
 import {
   IconAlert,
@@ -345,6 +348,7 @@ function clampToFreeSpace(
 }
 
 export function Timeline(): React.JSX.Element {
+  const dialog = useDialog();
   const history = useStudio((s) => s.history);
   const sequenceId = useStudio((s) => s.sequenceId);
   const selection = useStudio((s) => s.selection);
@@ -368,6 +372,7 @@ export function Timeline(): React.JSX.Element {
   const setTimelineVideoRatio = useLayout((s) => s.setTimelineVideoRatio);
   const setTimelinePaneScroll = useLayout((s) => s.setTimelinePaneScroll);
   const setStatus = useStudio((s) => s.setStatus);
+  const showProgramPreview = useStudio((s) => s.showProgramPreview);
   const selectedTransitionId = useStudio((s) => s.selectedTransitionId);
   const selectedTrackId = useStudio((s) => s.selectedTrackId);
   const toggleSelect = useStudio((s) => s.toggleSelect);
@@ -1207,6 +1212,9 @@ export function Timeline(): React.JSX.Element {
 
   // ------------------------------------------------------- clip affordances
 
+  const clipsForAffordances = (trackId: TrackId): readonly Clip[] =>
+    clipsForDragOrigin(project, trackId, drag?.kind === 'move' ? drag.origins : null);
+
   /**
    * The fade and transition buttons along the top of a track.
    *
@@ -1220,7 +1228,7 @@ export function Timeline(): React.JSX.Element {
    * centred on a cut belongs to neither of the two clips it sits between.
    */
   const affordancesFor = (trackId: TrackId): readonly Affordance[] => {
-    const clips = trackClips(project, trackId);
+    const clips = clipsForAffordances(trackId);
     const found: Affordance[] = [];
 
     clips.forEach((clip, index) => {
@@ -1538,8 +1546,13 @@ export function Timeline(): React.JSX.Element {
       {
         label: 'Set duration…',
         icon: <IconTransition />,
-        onSelect: () => {
-          const answer = prompt('Transition length in seconds', String(seconds));
+        onSelect: () => void (async () => {
+          const answer = await dialog.prompt({
+            title: 'Transition duration',
+            inputLabel: 'Seconds',
+            initialValue: String(seconds),
+            confirmLabel: 'Set duration',
+          });
           const value = answer === null ? NaN : Number(answer);
           if (!Number.isFinite(value) || value <= 0) return;
           runMany(
@@ -1550,7 +1563,7 @@ export function Timeline(): React.JSX.Element {
             })),
             'Set transition length',
           );
-        },
+        })(),
       },
       'separator',
       ...(inspectorOpen
@@ -1646,6 +1659,16 @@ export function Timeline(): React.JSX.Element {
 
   // ------------------------------------------------------------- interaction
 
+  /**
+   * The pointer whose press actually began on the ruler or playhead handle.
+   *
+   * `event.buttons === 1` is not ownership: it is also true when a press begins on
+   * some other control and merely enters the ruler later. Capture plus an explicit
+   * id makes scrubbing a gesture of this surface rather than a global held-button
+   * side effect.
+   */
+  const scrubPointer = useRef<number | null>(null);
+
   const scrubFromEvent = (event: React.PointerEvent): void => {
     const at = timeAtClientX(event.clientX);
     setPlayhead(at);
@@ -1655,13 +1678,23 @@ export function Timeline(): React.JSX.Element {
   };
 
   const onRulerPointerDown = (event: React.PointerEvent): void => {
-    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    if (!isPrimaryButton(event)) return;
+    event.preventDefault();
+    scrubPointer.current = event.pointerId;
+    event.currentTarget.setPointerCapture(event.pointerId);
     scrubFromEvent(event);
   };
   const onRulerPointerMove = (event: React.PointerEvent): void => {
-    if (event.buttons === 1) scrubFromEvent(event);
+    if (ownsPointerGesture(scrubPointer.current, event.pointerId)) scrubFromEvent(event);
   };
-  const onRulerPointerUp = (): void => clearGestureHints();
+  const finishRulerScrub = (event: React.PointerEvent): void => {
+    if (!ownsPointerGesture(scrubPointer.current, event.pointerId)) return;
+    scrubPointer.current = null;
+    clearGestureHints();
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
 
 
   /**
@@ -1853,7 +1886,9 @@ export function Timeline(): React.JSX.Element {
             style={{ width: contentWidth }}
             onPointerDown={onRulerPointerDown}
             onPointerMove={onRulerPointerMove}
-            onPointerUp={onRulerPointerUp}
+            onPointerUp={finishRulerScrub}
+            onPointerCancel={finishRulerScrub}
+            onLostPointerCapture={finishRulerScrub}
             onContextMenu={openRulerMenu}
           >
             {ticks.map((tick) => (
@@ -1878,16 +1913,19 @@ export function Timeline(): React.JSX.Element {
                 if (!isPrimaryButton(event)) return;
                 event.stopPropagation();
                 event.preventDefault();
-                (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+                scrubPointer.current = event.pointerId;
+                event.currentTarget.setPointerCapture(event.pointerId);
                 showHint(event, T.toTimecode(playhead, frameRate), null, false);
               }}
               onPointerMove={(event) => {
-                if (event.buttons !== 1) return;
+                if (!ownsPointerGesture(scrubPointer.current, event.pointerId)) return;
                 const at = timeAtClientX(event.clientX);
                 setPlayhead(at);
                 showHint(event, T.toTimecode(at, frameRate), null, false);
               }}
-              onPointerUp={() => clearGestureHints()}
+              onPointerUp={finishRulerScrub}
+              onPointerCancel={finishRulerScrub}
+              onLostPointerCapture={finishRulerScrub}
             />
               </div>
             </div>
@@ -2087,6 +2125,9 @@ export function Timeline(): React.JSX.Element {
                         isMediaClip(clip) && project.assets[clip.assetId]?.status.state === 'missing'
                       }
                       onSelect={(modifier) => {
+                        // A clip belongs to the edited program, so interacting with
+                        // one is also an unambiguous request to leave Source view.
+                        showProgramPreview();
                         if (modifier === 'isolate') selectExact([clip.id]);
                         else if (modifier === 'toggle') toggleSelect(clip.id);
                         else if (modifier === 'range') selectRangeTo(clip.id);
@@ -2118,7 +2159,7 @@ export function Timeline(): React.JSX.Element {
                     // Two rows of buttons need a lane tall enough to hold them; on a
                     // track dragged right down, this row is what gives way.
                     height >= MIN_LANE_FOR_TWO_ROWS &&
-                    trackClips(project, trackId).map((clip) => {
+                    clipsForAffordances(trackId).map((clip) => {
                       const width = T.toSeconds(clip.duration) * pxPerSecond;
                       if (width < AFFORDANCE_WIDTH + EDGE_INSET * 2) return null;
                       return (

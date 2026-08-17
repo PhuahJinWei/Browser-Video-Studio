@@ -340,6 +340,8 @@ export type Command =
 
   // -- assets ---------------------------------------------------------------
   | { readonly type: 'addAsset'; readonly asset: Asset }
+  /** Replace a source in place so every clip keeps its stable asset id. */
+  | { readonly type: 'replaceAsset'; readonly assetId: AssetId; readonly asset: Asset }
   | { readonly type: 'removeAsset'; readonly assetId: AssetId }
   | {
       readonly type: 'setAssetStatus';

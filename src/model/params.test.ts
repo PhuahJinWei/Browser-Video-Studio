@@ -10,8 +10,10 @@ import {
   isAnimated,
   keyframe,
   keyframedParam,
+  removeKeyframe,
   sortKeyframes,
   staticParam,
+  upsertKeyframe,
 } from './params';
 import * as T from './time';
 
@@ -102,6 +104,27 @@ describe('keyframed parameters', () => {
   it('type-check at evaluation time', () => {
     const text = staticParam('hello') as unknown as ReturnType<typeof staticParam<number>>;
     expect(() => evalNumber(text, T.TIME_ZERO)).toThrow(/numeric/);
+  });
+});
+
+describe('keyframe editing', () => {
+  it('creates, inserts and replaces exact keyframes', () => {
+    const first = upsertKeyframe(staticParam(10), sec(1), 20);
+    const second = upsertKeyframe(first, sec(3), 40);
+    const replaced = upsertKeyframe(second, sec(1), 25);
+    expect(replaced.kind).toBe('keyframed');
+    if (replaced.kind !== 'keyframed') return;
+    expect(replaced.keyframes.map((item) => [T.toSeconds(item.at), item.value])).toEqual([
+      [1, 25],
+      [3, 40],
+    ]);
+  });
+
+  it('removes a keyframe and collapses the final one to a static value', () => {
+    const animated = keyframedParam([keyframe(sec(1), 10), keyframe(sec(2), 20)]);
+    const one = removeKeyframe(animated, sec(1));
+    expect(one.kind === 'keyframed' && one.keyframes).toHaveLength(1);
+    expect(removeKeyframe(one, sec(2))).toEqual(staticParam(20));
   });
 });
 

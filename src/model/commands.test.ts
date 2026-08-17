@@ -747,6 +747,41 @@ describe('assets, markers and view', () => {
     expect(p.assets[f.assetId]!.status).toEqual({ state: 'indexing', progress: 0.4 });
   });
 
+  it('replaces an asset in place so clips keep their source reference', () => {
+    const withClip = run(f, insertCommand(f, { trackId: f.v1, start: sec(0), duration: sec(2) }));
+    const original = withClip.assets[f.assetId]!;
+    const replacement = {
+      ...original,
+      source: {
+        fileName: 'relinked.mp4',
+        byteLength: 123,
+        mimeType: 'video/mp4',
+        opfsPath: null,
+        hasFileHandle: false,
+        contentHash: null,
+      },
+      status: { state: 'ready' as const },
+    };
+    const p = apply(
+      withClip,
+      { type: 'replaceAsset', assetId: f.assetId, asset: replacement },
+      f.ids,
+    );
+    expect(p.assets[f.assetId]!.source?.fileName).toBe('relinked.mp4');
+    expect(Object.values(p.clips).some((clip) => 'assetId' in clip && clip.assetId === f.assetId)).toBe(true);
+  });
+
+  it('refuses a replacement whose id does not match its slot', () => {
+    const original = f.project.assets[f.assetId]!;
+    expect(() =>
+      apply(
+        f.project,
+        { type: 'replaceAsset', assetId: f.assetId, asset: { ...original, id: f.shortAssetId } },
+        f.ids,
+      ),
+    ).toThrow(/cannot change an asset id/);
+  });
+
   it('adds and removes markers', () => {
     const p1 = run(f, { type: 'addMarker', sequenceId: f.seqId, at: sec(3), name: 'Cut here' });
     const [markerId] = p1.sequences[f.seqId]!.markerIds;

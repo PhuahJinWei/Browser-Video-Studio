@@ -38,6 +38,10 @@ function mediaPath(id: ProjectId, assetId: AssetId): string {
   return `${projectDir(id)}/media/${assetId}`;
 }
 
+function proxyPath(id: ProjectId, assetId: AssetId): string {
+  return `${projectDir(id)}/proxies/${assetId}`;
+}
+
 // ---------------------------------------------------------------------------
 // Index
 // ---------------------------------------------------------------------------
@@ -92,6 +96,18 @@ export async function saveMedia(
 
 export async function loadMedia(projectId: ProjectId, assetId: AssetId): Promise<File | null> {
   return opfs.readFile(mediaPath(projectId, assetId));
+}
+
+export async function saveProxy(projectId: ProjectId, assetId: AssetId, file: Blob): Promise<void> {
+  await opfs.writeFile(proxyPath(projectId, assetId), file);
+}
+
+export async function loadProxy(projectId: ProjectId, assetId: AssetId): Promise<File | null> {
+  return opfs.readFile(proxyPath(projectId, assetId));
+}
+
+export async function deleteProxy(projectId: ProjectId, assetId: AssetId): Promise<void> {
+  await opfs.remove(proxyPath(projectId, assetId)).catch(() => undefined);
 }
 
 /**
