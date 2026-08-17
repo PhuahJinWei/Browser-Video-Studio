@@ -1,10 +1,10 @@
 /**
  * Clip previews: filmstrips and waveforms.
  *
- * Both are rasterised once per asset into a single image covering the whole source,
- * then positioned by CSS on each clip. That means trimming and moving a clip costs
- * nothing — the browser just shifts a background — and one decode pass serves every
- * clip cut from the same asset.
+ * Both are rasterised per asset and positioned by CSS on each clip. Filmstrips begin
+ * as one cheap source-wide image, then add small zoom-specific tiles progressively.
+ * That means trimming and moving a clip costs nothing — the browser just shifts the
+ * backgrounds — and one cache serves every clip cut from the same asset.
  *
  * Generation is deliberately lazy and cancellable: a 4K import should not block the
  * editor while it renders a strip nobody is looking at yet.
@@ -35,11 +35,63 @@ export interface Filmstrip {
   readonly posterHeight: number;
 }
 
+/** One independently publishable piece of a zoom-specific filmstrip. */
+export interface FilmstripTile {
+  readonly url: string;
+  /** Index of this tile's first thumbnail in the level. */
+  readonly firstFrame: number;
+  readonly frameCount: number;
+}
+
+/** A CSS background layer positioned in source-time coordinates. */
+export interface FilmstripLayer {
+  readonly url: string;
+  readonly sourceStart: number;
+  readonly sourceDuration: number;
+}
+
+/** Layers ready to paint now, ordered from sharpest to fallback. */
+export interface FilmstripPreview {
+  readonly sourceSeconds: number;
+  /** Sampling grid used to place fixed-aspect frames and their dividers. */
+  readonly framesPerSecond: number;
+  readonly layers: readonly FilmstripLayer[];
+}
+
+interface FilmstripLevel {
+  readonly requestedDensity: number;
+  readonly sourceSeconds: number;
+  readonly frameCount: number;
+  readonly tiles: Map<number, FilmstripTile>;
+  complete: boolean;
+}
+
 export interface Waveform {
   readonly url: string;
   readonly width: number;
   readonly height: number;
   readonly sourceSeconds: number;
+}
+
+/** One independently publishable high-resolution waveform region. */
+export interface WaveformTile {
+  readonly url: string;
+  readonly firstColumn: number;
+  readonly columnCount: number;
+}
+
+interface WaveformLevel {
+  readonly requestedDensity: number;
+  readonly sourceSeconds: number;
+  readonly columnCount: number;
+  readonly tiles: Map<number, WaveformTile>;
+  complete: boolean;
+}
+
+/** Waveform layers ready to display, sharp tiles first and starter fallback last. */
+export interface WaveformPreview {
+  readonly sourceSeconds: number;
+  readonly layers: readonly FilmstripLayer[];
 }
 
 /*
@@ -54,48 +106,46 @@ export interface Waveform {
 const FILMSTRIP_HEIGHT = 160;
 
 /**
- * Densities we will build, in frames per second of source.
+ * The starter atlas still has to fit one browser canvas. Zoom-specific levels only
+ * store small tiles, so their logical grid can cover a much longer source without
+ * allocating one enormous bitmap.
+ */
+const MAX_STARTER_FILMSTRIP_FRAMES = 120;
+const MAX_FILMSTRIP_LEVEL_FRAMES = 12_000;
+/** Small enough to appear quickly; large enough not to flood CSS with layers. */
+const FILMSTRIP_FRAMES_PER_TILE = 8;
+/** One viewport is normally under two tiles wide; the third is a scroll buffer. */
+const MAX_NEW_TILES_PER_PASS = 3;
+/** Raw zoom densities are precise; retain recent ones without growing forever. */
+const MAX_CACHED_FILMSTRIP_LEVELS = 12;
+
+/** Number of thumbnails a density request produces for this source. */
+function filmstripFrameCount(
+  sourceSeconds: number,
+  framesPerSecond: number,
+  maximum = MAX_FILMSTRIP_LEVEL_FRAMES,
+): number {
+  return Math.max(
+    1,
+    Math.min(maximum, Math.ceil(sourceSeconds * framesPerSecond)),
+  );
+}
+
+/**
+ * Sampling density whose cells have the source frame's aspect ratio on this track.
  *
- * Quantised so that zooming re-renders a handful of times rather than on every
- * wheel notch, and each step doubles, so the coarse strip stays usable on screen
- * while the finer one decodes.
+ * Unlike broad power-of-two tiers, this does not squeeze a tier's fixed frame count
+ * across whatever width the new zoom happens to produce. The cache is still bounded
+ * by tile-on-demand generation, while every rendered cell stays `aspect × height`.
  */
-export const DENSITY_TIERS = [1, 2, 4, 8] as const;
-
-/**
- * A frame may cover about this much of the timeline before it looks stretched.
- * Roughly the natural width of a 16:9 frame at a default lane height.
- */
-const TARGET_FRAME_PX = 120;
-
-/**
- * Gap after each frame, as a fraction of its width.
- *
- * Contiguous frames are what other editors draw, and they read as a ribbon of film
- * — which is fine until the footage is busy, when the whole strip turns into one
- * texture and no single frame is legible. A hairline gutter separates them without
- * costing meaningful width.
- */
-const FRAME_GUTTER_RATIO = 0.018;
-
-/**
- * Ceiling on frames in one strip.
- *
- * The sprite is a single canvas, so this is really a limit on its width: 120
- * frames at ~284px is already about 34,000px across. A long source therefore
- * stays coarse however far you zoom, which is what it did before density
- * existed at all — the gain is for clips of the length people actually cut.
- */
-const MAX_FILMSTRIP_FRAMES = 120;
-
-/**
- * The coarsest density that still keeps frames under `TARGET_FRAME_PX` at this
- * zoom. `speed` matters because a slowed clip stretches its source across more
- * of the timeline, so each frame of it covers more ground.
- */
-export function densityForZoom(pixelsPerSecond: number, speed = 1): number {
-  const wanted = pixelsPerSecond / (Math.abs(speed) || 1) / TARGET_FRAME_PX;
-  return DENSITY_TIERS.find((tier) => tier >= wanted) ?? DENSITY_TIERS[DENSITY_TIERS.length - 1]!;
+export function densityForZoom(
+  pixelsPerSecond: number,
+  speed = 1,
+  frameAspect = 16 / 9,
+  previewHeight = 70,
+): number {
+  const frameWidth = Math.max(1, frameAspect * previewHeight);
+  return Math.max(1 / 1_000, pixelsPerSecond / (Math.abs(speed) || 1) / frameWidth);
 }
 /** Bin cards are ~220 CSS px wide; 2x that stays crisp on a HiDPI display. */
 const POSTER_WIDTH = 440;
@@ -106,6 +156,45 @@ const WAVEFORM_HEIGHT = 160;
  * columns the extra detail is invisible and the peaks are what carry the shape.
  */
 const WAVEFORM_COLUMNS = 2400;
+/** Raster columns per independently decoded waveform tile. */
+const WAVEFORM_COLUMNS_PER_TILE = 1024;
+/** Covers at least a normal viewport at 2× device scale. */
+const MAX_NEW_WAVEFORM_TILES_PER_PASS = 4;
+const MAX_CACHED_WAVEFORM_LEVELS = 12;
+
+/**
+ * Source columns needed so CSS never enlarges a waveform horizontally.
+ * Device scale is capped at 2×: beyond that the extra decode cost buys little.
+ */
+export function waveformDensityForZoom(
+  pixelsPerSecond: number,
+  speed = 1,
+  pixelRatio = 1,
+): number {
+  const scale = Math.max(1, Math.min(2, pixelRatio));
+  return Math.max(1 / 1_000, pixelsPerSecond / (Math.abs(speed) || 1) * scale);
+}
+
+/** Missing tiles nearest the viewport, without allocating an array for the source. */
+function nearestMissingTiles(
+  tileCount: number,
+  priorityTile: number,
+  existing: ReadonlySet<number> | undefined,
+  maximum: number,
+): number[] {
+  const result: number[] = [];
+  for (let distance = 0; distance < tileCount && result.length < maximum; distance++) {
+    const candidates = distance === 0
+      ? [priorityTile]
+      : [priorityTile - distance, priorityTile + distance];
+    for (const candidate of candidates) {
+      if (candidate < 0 || candidate >= tileCount || existing?.has(candidate)) continue;
+      result.push(candidate);
+      if (result.length >= maximum) break;
+    }
+  }
+  return result;
+}
 
 /**
  * How far along a generator is, 0 to 1.
@@ -119,7 +208,7 @@ export type ProgressListener = (fraction: number) => void;
 export interface GenerateOptions {
   readonly signal?: AbortSignal;
   readonly onProgress?: ProgressListener;
-  /** Frames per second of source. Defaults to the coarsest tier. */
+  /** Frames per second of source. Defaults to the cheap one-frame-per-second starter. */
   readonly framesPerSecond?: number;
 }
 
@@ -142,7 +231,7 @@ export async function generateFilmstrip(
   const framesPerSecond = options.framesPerSecond ?? 1;
   const frameCount = Math.max(
     4,
-    Math.min(MAX_FILMSTRIP_FRAMES, Math.round(sourceSeconds * framesPerSecond)),
+    filmstripFrameCount(sourceSeconds, framesPerSecond, MAX_STARTER_FILMSTRIP_FRAMES),
   );
 
   const probe = await media.getFrame(assetId, T.TIME_ZERO).catch(() => null);
@@ -152,14 +241,19 @@ export async function generateFilmstrip(
   const frameWidth = Math.max(2, Math.round(FILMSTRIP_HEIGHT * aspect));
   probe.close();
 
-  // The gutter is part of the cell, so it scales with the strip: it stays the same
-  // fraction of a frame at every zoom rather than growing into a stripe.
-  const gutter = Math.max(1, Math.round(frameWidth * FRAME_GUTTER_RATIO));
-  const cellWidth = frameWidth + gutter;
-
-  const canvas = new OffscreenCanvas(cellWidth * frameCount, FILMSTRIP_HEIGHT);
+  /*
+   * Frames are contiguous on purpose.
+   *
+   * A gutter baked into the bitmap is not a hairline once CSS maps the whole source
+   * to a deeply zoomed timeline: its width scales with every thumbnail and becomes
+   * a dark slash several screen pixels wide. Clip edges and the ruler already carry
+   * the edit boundaries; the filmstrip should remain uninterrupted source imagery.
+   */
+  const canvas = new OffscreenCanvas(frameWidth * frameCount, FILMSTRIP_HEIGHT);
   const ctx = canvas.getContext('2d');
   if (!ctx) return null;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
   ctx.fillStyle = '#11141b';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -181,7 +275,7 @@ export async function generateFilmstrip(
 
     const frame = sample.toVideoFrame();
     try {
-      ctx.drawImage(frame, i * cellWidth, 0, frameWidth, FILMSTRIP_HEIGHT);
+      ctx.drawImage(frame, i * frameWidth, 0, frameWidth, FILMSTRIP_HEIGHT);
       // The first sampled frame doubles as the poster, at full size.
       if (i === 0 && posterCtx) posterCtx.drawImage(frame, 0, 0, POSTER_WIDTH, posterHeight);
     } finally {
@@ -194,13 +288,15 @@ export async function generateFilmstrip(
   }
 
   const [stripBlob, posterBlob] = await Promise.all([
-    canvas.convertToBlob({ type: 'image/webp', quality: 0.72 }),
-    poster.convertToBlob({ type: 'image/webp', quality: 0.85 }),
+    // The strip is scaled again by CSS. A low-quality intermediate makes that
+    // second sampling expose block edges and mosquito noise at deep zoom.
+    canvas.convertToBlob({ type: 'image/webp', quality: 0.92 }),
+    poster.convertToBlob({ type: 'image/webp', quality: 0.9 }),
   ]);
 
   return {
     url: URL.createObjectURL(stripBlob),
-    frameWidth: cellWidth,
+    frameWidth,
     frameHeight: FILMSTRIP_HEIGHT,
     framesPerSecond: frameCount / sourceSeconds,
     frameCount,
@@ -209,6 +305,115 @@ export async function generateFilmstrip(
     posterWidth: POSTER_WIDTH,
     posterHeight,
   };
+}
+
+interface GenerateFilmstripTilesOptions extends GenerateOptions {
+  readonly skipTiles?: ReadonlySet<number>;
+  /** Source time to build around first, normally the centre of the viewport. */
+  readonly prioritySeconds?: number;
+  readonly onStart: (frameCount: number, sourceSeconds: number) => void;
+  readonly onTile: (tileIndex: number, tile: FilmstripTile) => void;
+}
+
+/**
+ * Build a zoom level in small atlases and publish each one as soon as it lands.
+ *
+ * A whole-source atlas made zoom latency equal to the slowest frame in the source.
+ * Eight-frame tiles put useful pixels on screen after the first small batch and let
+ * an interrupted zoom resume from the tiles it already completed.
+ */
+async function generateFilmstripTiles(
+  media: MediaLibrary,
+  assetId: AssetId,
+  duration: Time,
+  options: GenerateFilmstripTilesOptions,
+): Promise<boolean> {
+  const { signal, onProgress, onStart, onTile, skipTiles, prioritySeconds } = options;
+  const sourceSeconds = T.toSeconds(duration);
+  if (sourceSeconds <= 0) return false;
+
+  const framesPerSecond = options.framesPerSecond ?? 1;
+  const frameCount = filmstripFrameCount(sourceSeconds, framesPerSecond);
+  onStart(frameCount, sourceSeconds);
+
+  const probe = await media.getFrame(assetId, T.TIME_ZERO).catch(() => null);
+  if (!probe) return false;
+  const aspect = probe.displayWidth / probe.displayHeight || 16 / 9;
+  const frameWidth = Math.max(2, Math.round(FILMSTRIP_HEIGHT * aspect));
+  probe.close();
+
+  const tileCount = Math.ceil(frameCount / FILMSTRIP_FRAMES_PER_TILE);
+  const priorityFrame = Math.max(
+    0,
+    Math.min(frameCount - 1, Math.floor((prioritySeconds ?? 0) * framesPerSecond)),
+  );
+  const priorityTile = Math.floor(priorityFrame / FILMSTRIP_FRAMES_PER_TILE);
+  const tileOrder = Array.from({ length: tileCount }, (_, index) => index).sort(
+    (a, b) => Math.abs(a - priorityTile) - Math.abs(b - priorityTile),
+  );
+  let completedFrames = 0;
+  let completedTiles = skipTiles?.size ?? 0;
+  let generatedTiles = 0;
+
+  for (const tileIndex of tileOrder) {
+    const firstFrame = tileIndex * FILMSTRIP_FRAMES_PER_TILE;
+    const count = Math.min(FILMSTRIP_FRAMES_PER_TILE, frameCount - firstFrame);
+
+    if (skipTiles?.has(tileIndex)) {
+      completedFrames += count;
+      onProgress?.(completedFrames / frameCount);
+      continue;
+    }
+    // Zoom levels may describe thousands of logical frames. Decode only the visible
+    // neighbourhood now; scrolling calls back with another priority and resumes it.
+    if (generatedTiles >= MAX_NEW_TILES_PER_PASS) break;
+    if (signal?.aborted) return false;
+
+    const canvas = new OffscreenCanvas(frameWidth * count, FILMSTRIP_HEIGHT);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return false;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.fillStyle = '#11141b';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    for (let local = 0; local < count; local++) {
+      if (signal?.aborted) return false;
+      const frameIndex = firstFrame + local;
+      const at = T.fromSeconds(
+        Math.min(
+          sourceSeconds - Math.min(sourceSeconds / 2, 0.000_001),
+          (frameIndex + 0.5) / framesPerSecond,
+        ),
+        1_000_000,
+      );
+      const sample = await media.getFrame(assetId, at).catch(() => null);
+      if (sample) {
+        const frame = sample.toVideoFrame();
+        try {
+          ctx.drawImage(frame, local * frameWidth, 0, frameWidth, FILMSTRIP_HEIGHT);
+        } finally {
+          frame.close();
+          sample.close();
+        }
+      }
+      completedFrames++;
+      onProgress?.(completedFrames / frameCount);
+    }
+
+    if (signal?.aborted) return false;
+    const blob = await canvas.convertToBlob({ type: 'image/webp', quality: 0.92 });
+    if (signal?.aborted) return false;
+    onTile(tileIndex, {
+      url: URL.createObjectURL(blob),
+      firstFrame,
+      frameCount: count,
+    });
+    generatedTiles++;
+    completedTiles++;
+  }
+
+  return completedTiles >= tileCount;
 }
 
 /**
@@ -265,16 +470,181 @@ export async function generateWaveform(
   if (!ctx) return null;
 
   ctx.clearRect(0, 0, columns, WAVEFORM_HEIGHT);
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.72)';
   const middle = WAVEFORM_HEIGHT / 2;
 
   for (let x = 0; x < columns; x++) {
-    const height = Math.max(1, peaks[x]! * (WAVEFORM_HEIGHT - 2));
-    ctx.fillRect(x, middle - height / 2, 1, height);
+    const height = Math.max(1, Math.round(peaks[x]! * (WAVEFORM_HEIGHT - 2)));
+    ctx.fillRect(x, Math.round(middle - height / 2), 1, height);
   }
 
-  const blob = await canvas.convertToBlob({ type: 'image/webp', quality: 0.8 });
+  /*
+   * A waveform is almost entirely one-pixel edges against transparency. Lossy WebP
+   * saves little on that material and softens every peak with compression ringing;
+   * PNG keeps the envelope pixel-exact and is still tiny for this sparse image.
+   */
+  const blob = await canvas.convertToBlob({ type: 'image/png' });
   return { url: URL.createObjectURL(blob), width: columns, height: WAVEFORM_HEIGHT, sourceSeconds };
+}
+
+interface GenerateWaveformTilesOptions extends GenerateOptions {
+  readonly columnsPerSecond: number;
+  readonly skipTiles?: ReadonlySet<number>;
+  readonly prioritySeconds?: number;
+  readonly onStart: (columnCount: number, sourceSeconds: number) => void;
+  readonly onTile: (tileIndex: number, tile: WaveformTile) => void;
+}
+
+/**
+ * Decode only the waveform neighbourhood visible at this zoom.
+ *
+ * Each raster column stores the real minimum and maximum sample in its source-time
+ * bucket. CSS maps it to at most one device pixel, so sharpness comes from actual
+ * audio detail rather than a scaling mode applied to the starter image.
+ */
+/**
+ * Smallest span a column's peak is measured over, in samples.
+ *
+ * A column narrower than one cycle of the waveform only sees part of that cycle, so
+ * its own peak is not the envelope — which is why a min/max reading collapses into a
+ * wobbling line once zoomed far enough in. Widening the *measurement* keeps the
+ * envelope an envelope; the bar is still placed at full column resolution, so
+ * nothing is lost in precision.
+ *
+ * 256 samples is ~5ms, about one cycle of the lowest pitch worth resolving.
+ */
+const MIN_PEAK_SAMPLES = 256;
+
+/** Sliding maximum, so each column reports the loudest sample near it. */
+function widenPeaks(
+  peaks: Float32Array,
+  sampleRate: number,
+  columnsPerSecond: number,
+): Float32Array {
+  if (sampleRate <= 0 || columnsPerSecond <= 0) return peaks;
+
+  const samplesPerColumn = sampleRate / columnsPerSecond;
+  const spread = Math.floor((MIN_PEAK_SAMPLES / samplesPerColumn - 1) / 2);
+  // Already wide enough on its own: most zoom levels land here and pay nothing.
+  if (spread < 1) return peaks;
+
+  const widened = new Float32Array(peaks.length);
+  for (let x = 0; x < peaks.length; x++) {
+    const from = Math.max(0, x - spread);
+    const to = Math.min(peaks.length - 1, x + spread);
+    let peak = 0;
+    for (let i = from; i <= to; i++) if (peaks[i]! > peak) peak = peaks[i]!;
+    widened[x] = peak;
+  }
+  return widened;
+}
+
+async function generateWaveformTiles(
+  media: MediaLibrary,
+  assetId: AssetId,
+  duration: Time,
+  options: GenerateWaveformTilesOptions,
+): Promise<boolean> {
+  const {
+    signal,
+    onProgress,
+    onStart,
+    onTile,
+    skipTiles,
+    prioritySeconds,
+    columnsPerSecond,
+  } = options;
+  const sourceSeconds = T.toSeconds(duration);
+  if (sourceSeconds <= 0 || columnsPerSecond <= 0) return false;
+
+  const columnCount = Math.max(1, Math.ceil(sourceSeconds * columnsPerSecond));
+  const tileCount = Math.ceil(columnCount / WAVEFORM_COLUMNS_PER_TILE);
+  onStart(columnCount, sourceSeconds);
+
+  const priorityColumn = Math.max(
+    0,
+    Math.min(columnCount - 1, Math.floor((prioritySeconds ?? 0) * columnsPerSecond)),
+  );
+  const priorityTile = Math.floor(priorityColumn / WAVEFORM_COLUMNS_PER_TILE);
+  const tileOrder = nearestMissingTiles(
+    tileCount,
+    priorityTile,
+    skipTiles,
+    MAX_NEW_WAVEFORM_TILES_PER_PASS,
+  );
+  let completedTiles = Math.min(tileCount, skipTiles?.size ?? 0);
+
+  for (const tileIndex of tileOrder) {
+    if (signal?.aborted) return false;
+
+    const firstColumn = tileIndex * WAVEFORM_COLUMNS_PER_TILE;
+    const count = Math.min(WAVEFORM_COLUMNS_PER_TILE, columnCount - firstColumn);
+    const sourceStart = firstColumn / columnsPerSecond;
+    const sourceEnd = Math.min(sourceSeconds, (firstColumn + count) / columnsPerSecond);
+    // Absolute peak per column, mirrored at draw time — the same envelope the
+    // source-wide sprite draws, so zooming sharpens the picture rather than
+    // replacing it with a different one.
+    const peaks = new Float32Array(count);
+    let sampleRate = 0;
+
+    for await (const wrapped of media.audioRange(
+      assetId,
+      T.fromSeconds(sourceStart, 1_000_000),
+      T.fromSeconds(sourceEnd, 1_000_000),
+    )) {
+      if (signal?.aborted) return false;
+      const { buffer, timestamp } = wrapped;
+      const rate = buffer.sampleRate;
+      sampleRate = rate;
+      const sampleCount = buffer.length;
+      const fromSample = Math.max(0, Math.floor((sourceStart - timestamp) * rate));
+      const toSample = Math.min(sampleCount, Math.ceil((sourceEnd - timestamp) * rate));
+      const channels = Array.from(
+        { length: buffer.numberOfChannels },
+        (_, channel) => buffer.getChannelData(channel),
+      );
+
+      for (let sampleIndex = fromSample; sampleIndex < toSample; sampleIndex++) {
+        if ((sampleIndex & 4095) === 0 && signal?.aborted) return false;
+        const seconds = timestamp + sampleIndex / rate;
+        const column = Math.floor((seconds - sourceStart) * columnsPerSecond);
+        if (column < 0 || column >= count) continue;
+
+        let peak = peaks[column]!;
+        for (const channel of channels) {
+          const magnitude = Math.abs(channel[sampleIndex]!);
+          if (magnitude > peak) peak = magnitude;
+        }
+        peaks[column] = peak;
+      }
+    }
+
+    const envelope = widenPeaks(peaks, sampleRate, columnsPerSecond);
+
+    const canvas = new OffscreenCanvas(count, WAVEFORM_HEIGHT);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return false;
+    ctx.clearRect(0, 0, count, WAVEFORM_HEIGHT);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.76)';
+    const middle = WAVEFORM_HEIGHT / 2;
+    for (let x = 0; x < count; x++) {
+      const height = Math.max(1, Math.round(envelope[x]! * (WAVEFORM_HEIGHT - 2)));
+      ctx.fillRect(x, Math.round(middle - height / 2), 1, height);
+    }
+
+    if (signal?.aborted) return false;
+    const blob = await canvas.convertToBlob({ type: 'image/png' });
+    if (signal?.aborted) return false;
+    onTile(tileIndex, {
+      url: URL.createObjectURL(blob),
+      firstColumn,
+      columnCount: count,
+    });
+    completedTiles++;
+    onProgress?.(completedTiles / tileCount);
+  }
+
+  return completedTiles >= tileCount;
 }
 
 /**
@@ -282,13 +652,22 @@ export async function generateWaveform(
  * Object URLs are revoked on `dispose` so long sessions do not leak.
  */
 export class PreviewCache {
+  /** The cheap starter strip, also used for the media-bin poster. */
   private readonly filmstrips = new Map<AssetId, Filmstrip | null>();
+  /** Additional timeline levels, keyed by the precise density that requested them. */
+  private readonly filmstripTiers = new Map<AssetId, Map<number, FilmstripLevel>>();
   private readonly waveforms = new Map<AssetId, Waveform | null>();
+  private readonly waveformTiers = new Map<AssetId, Map<number, WaveformLevel>>();
   private readonly pending = new Map<string, Promise<unknown>>();
-  /** Density each asset's strip has been asked for, so a request is not repeated. */
+  /** Density of each asset's active job, so an identical request can join it. */
   private readonly density = new Map<AssetId, number>();
+  /** Visible tile of each active job, so scrolling can redirect the decode pass. */
+  private readonly densityPriorityTiles = new Map<AssetId, number>();
   /** In-flight density rebuilds, so a newer zoom can abandon an older one. */
   private readonly densityJobs = new Map<AssetId, AbortController>();
+  private readonly waveformDensity = new Map<AssetId, number>();
+  private readonly waveformPriorityTiles = new Map<AssetId, number>();
+  private readonly waveformDensityJobs = new Map<AssetId, AbortController>();
   /**
    * How far each unfinished asset has got, per kind of preview.
    *
@@ -347,8 +726,214 @@ export class PreviewCache {
     return this.filmstrips.get(assetId);
   }
 
+  /**
+   * Layers ready for this zoom right now.
+   *
+   * Completed target tiles paint alone. While a level is still arriving, its tiles
+   * sit over the nearest complete non-oversampled level, so every finished batch
+   * sharpens in place without opening blank holes in the clip.
+   */
+  getFilmstripPreview(assetId: AssetId, framesPerSecond: number): FilmstripPreview | null | undefined {
+    const base = this.filmstrips.get(assetId);
+    if (!base) return base;
+    if (base.sourceSeconds <= 0) {
+      return {
+        sourceSeconds: 0,
+        framesPerSecond: 0,
+        layers: [{ url: base.url, sourceStart: 0, sourceDuration: 0 }],
+      };
+    }
+
+    const tiers = this.filmstripTiers.get(assetId);
+    const exact = tiers?.get(framesPerSecond);
+    const targetCount = filmstripFrameCount(base.sourceSeconds, framesPerSecond);
+
+    const fallback = [...(tiers?.values() ?? [])]
+      .filter((level) => level.complete && level.frameCount <= targetCount)
+      .sort((a, b) => b.frameCount - a.frameCount)[0];
+
+    const layersFor = (
+      level: FilmstripLevel,
+      layoutDensity = level.requestedDensity,
+    ): FilmstripLayer[] =>
+      [...level.tiles.values()]
+        .sort((a, b) => a.firstFrame - b.firstFrame)
+        .map((tile) => ({
+          url: tile.url,
+          sourceStart: tile.firstFrame / layoutDensity,
+          sourceDuration: tile.frameCount / layoutDensity,
+        }));
+
+    if (exact?.complete) {
+      return {
+        sourceSeconds: base.sourceSeconds,
+        framesPerSecond: exact.requestedDensity,
+        layers: layersFor(exact),
+      };
+    }
+
+    // The same number of decoded cells can be laid onto a slightly different time
+    // grid without resampling. This avoids a redundant decode when rounding produced
+    // the same count, while the CSS cells still take the exact natural width.
+    const useBaseFallback =
+      !fallback ||
+      (base.frameCount <= targetCount && base.frameCount > fallback.frameCount);
+    const selectedFallback = useBaseFallback ? undefined : fallback;
+    const fallbackDensity = selectedFallback?.frameCount === targetCount
+      ? framesPerSecond
+      : selectedFallback?.requestedDensity;
+    const baseDensity = base.frameCount === targetCount
+      ? framesPerSecond
+      : base.framesPerSecond;
+    const fallbackLayers = selectedFallback
+      ? layersFor(selectedFallback, fallbackDensity)
+      : [{
+          url: base.url,
+          sourceStart: 0,
+          sourceDuration: base.frameCount / baseDensity,
+        }];
+    return {
+      sourceSeconds: base.sourceSeconds,
+      framesPerSecond:
+        exact?.requestedDensity ?? fallbackDensity ?? baseDensity,
+      layers: [...(exact ? layersFor(exact) : []), ...fallbackLayers],
+    };
+  }
+
   getWaveform(assetId: AssetId): Waveform | null | undefined {
     return this.waveforms.get(assetId);
+  }
+
+  /** Sharp visible waveform tiles over the best complete lower-resolution fallback. */
+  getWaveformPreview(
+    assetId: AssetId,
+    columnsPerSecond: number,
+  ): WaveformPreview | null | undefined {
+    const base = this.waveforms.get(assetId);
+    if (!base) return base;
+
+    const tiers = this.waveformTiers.get(assetId);
+    const exact = tiers?.get(columnsPerSecond);
+    const fallback = [...(tiers?.values() ?? [])]
+      .filter((level) => level.complete && level.requestedDensity <= columnsPerSecond)
+      .sort((a, b) => b.requestedDensity - a.requestedDensity)[0];
+    const layersFor = (level: WaveformLevel): FilmstripLayer[] =>
+      [...level.tiles.values()]
+        .sort((a, b) => a.firstColumn - b.firstColumn)
+        .map((tile) => ({
+          url: tile.url,
+          sourceStart: tile.firstColumn / level.requestedDensity,
+          sourceDuration: tile.columnCount / level.requestedDensity,
+        }));
+
+    if (exact?.complete) {
+      return { sourceSeconds: base.sourceSeconds, layers: layersFor(exact) };
+    }
+
+    const fallbackLayers = fallback
+      ? layersFor(fallback)
+      : [{ url: base.url, sourceStart: 0, sourceDuration: base.sourceSeconds }];
+    return {
+      sourceSeconds: base.sourceSeconds,
+      layers: [...(exact ? layersFor(exact) : []), ...fallbackLayers],
+    };
+  }
+
+  /** Build a few high-resolution waveform tiles around the visible source time. */
+  async ensureWaveformDensity(
+    assetId: AssetId,
+    audioDuration: Time | null,
+    columnsPerSecond: number,
+    prioritySeconds?: number,
+  ): Promise<void> {
+    if (!audioDuration) return;
+    const base = this.waveforms.get(assetId);
+    if (!base || base.sourceSeconds <= 0) return;
+
+    // The starter already contains at least one raster column per requested device
+    // pixel, so CSS only downsamples it and a denser tile would be indistinguishable.
+    if (columnsPerSecond <= base.width / base.sourceSeconds) return;
+
+    const columnCount = Math.max(1, Math.ceil(base.sourceSeconds * columnsPerSecond));
+    const priorityTile = Math.floor(
+      Math.max(0, Math.min(columnCount - 1, (prioritySeconds ?? 0) * columnsPerSecond)) /
+        WAVEFORM_COLUMNS_PER_TILE,
+    );
+    const active = this.waveformDensityJobs.get(assetId);
+    if (
+      active &&
+      this.waveformDensity.get(assetId) === columnsPerSecond &&
+      this.waveformPriorityTiles.get(assetId) === priorityTile
+    ) return;
+    if (active) {
+      active.abort();
+      this.waveformDensityJobs.delete(assetId);
+      this.setProgress(assetId, 'wave', null);
+    }
+
+    const tiers = this.waveformTiers.get(assetId);
+    if (tiers?.get(columnsPerSecond)?.complete) return;
+    this.waveformDensity.set(assetId, columnsPerSecond);
+    this.waveformPriorityTiles.set(assetId, priorityTile);
+    const controller = new AbortController();
+    this.waveformDensityJobs.set(assetId, controller);
+
+    try {
+      let level = tiers?.get(columnsPerSecond);
+      const completed = await generateWaveformTiles(this.media, assetId, audioDuration, {
+        columnsPerSecond,
+        signal: controller.signal,
+        ...(prioritySeconds !== undefined ? { prioritySeconds } : {}),
+        ...(level ? { skipTiles: new Set(level.tiles.keys()) } : {}),
+        onProgress: (fraction) => this.setProgress(assetId, 'wave', fraction),
+        onStart: (nextColumnCount, sourceSeconds) => {
+          if (level) return;
+          let cachedTiers = this.waveformTiers.get(assetId);
+          if (!cachedTiers) {
+            cachedTiers = new Map();
+            this.waveformTiers.set(assetId, cachedTiers);
+          }
+          while (cachedTiers.size >= MAX_CACHED_WAVEFORM_LEVELS) {
+            const oldestKey = cachedTiers.keys().next().value as number | undefined;
+            if (oldestKey === undefined) break;
+            const oldest = cachedTiers.get(oldestKey);
+            if (oldest) {
+              for (const tile of oldest.tiles.values()) URL.revokeObjectURL(tile.url);
+            }
+            cachedTiers.delete(oldestKey);
+          }
+          level = {
+            requestedDensity: columnsPerSecond,
+            sourceSeconds,
+            columnCount: nextColumnCount,
+            tiles: new Map(),
+            complete: false,
+          };
+          cachedTiers.set(columnsPerSecond, level);
+        },
+        onTile: (tileIndex, tile) => {
+          if (!level || controller.signal.aborted) {
+            URL.revokeObjectURL(tile.url);
+            return;
+          }
+          const previous = level.tiles.get(tileIndex);
+          if (previous) URL.revokeObjectURL(previous.url);
+          level.tiles.set(tileIndex, tile);
+          this.onProgress?.();
+        },
+      });
+      if (controller.signal.aborted || !completed || !level) return;
+      level.complete = true;
+      this.onProgress?.();
+    } catch {
+      // The starter remains visible if a zoom-specific waveform cannot be decoded.
+    } finally {
+      if (this.waveformDensityJobs.get(assetId) === controller) {
+        this.waveformDensityJobs.delete(assetId);
+        this.waveformPriorityTiles.delete(assetId);
+        this.setProgress(assetId, 'wave', null);
+      }
+    }
   }
 
   /**
@@ -375,59 +960,114 @@ export class PreviewCache {
 
   /** Build both previews for an asset. Safe to call repeatedly. */
   /**
-   * Rebuild an asset's strip at a finer density, if it is not already at least that
-   * fine.
+   * Build the strip tier requested by the current zoom, if it is not cached yet.
    *
-   * Only ever upgrades. Zooming back out leaves the finer strip in place: it costs
-   * nothing to downscale, and throwing it away would mean decoding it all again on
-   * the next zoom in.
-   *
-   * The previous strip stays visible throughout and is replaced only when the new
-   * one is complete, so zooming never blanks the timeline. A request that arrives
-   * while one is running aborts it, which is what stops a wheel-spin queueing a
-   * dozen decodes.
+   * Tiers are retained rather than replacing one another. Zooming out can therefore
+   * return to the starter strip immediately, and zooming back in can reuse a tier it
+   * has already paid to decode. A request arriving while another tier is running
+   * aborts that job, which stops a wheel-spin queueing a dozen decode passes.
    */
   async ensureDensity(
     assetId: AssetId,
     videoDuration: Time | null,
     framesPerSecond: number,
+    prioritySeconds?: number,
   ): Promise<void> {
     if (!videoDuration) return;
 
     const existing = this.filmstrips.get(assetId);
     // `undefined` means nothing built yet — `ensure` owns that case.
     if (existing === undefined || existing === null) return;
-    if (existing.framesPerSecond >= framesPerSecond - 0.001) return;
-    if (this.density.get(assetId) === framesPerSecond) return;
 
+    const targetCount = filmstripFrameCount(existing.sourceSeconds, framesPerSecond);
+    const priorityTile = Math.floor(
+      Math.max(0, Math.min(targetCount - 1, (prioritySeconds ?? 0) * framesPerSecond)) /
+        FILMSTRIP_FRAMES_PER_TILE,
+    );
+    const active = this.densityJobs.get(assetId);
+    if (
+      active &&
+      this.density.get(assetId) === framesPerSecond &&
+      this.densityPriorityTiles.get(assetId) === priorityTile
+    ) return;
+    if (active) {
+      active.abort();
+      this.densityJobs.delete(assetId);
+      this.setProgress(assetId, 'film', null);
+    }
     this.density.set(assetId, framesPerSecond);
-    this.densityJobs.get(assetId)?.abort();
+    this.densityPriorityTiles.set(assetId, priorityTile);
+
+    // A starter with the same cell count can be placed on this exact temporal grid
+    // by CSS, so decoding the same thumbnails again would buy nothing.
+    if (existing.frameCount === targetCount) return;
+    const tiers = this.filmstripTiers.get(assetId);
+    if (tiers?.get(framesPerSecond)?.complete) return;
+    // Several sparse density tiers collapse to the four-frame minimum on a short
+    // source. Reuse any tier with the same frame count instead of decoding an
+    // indistinguishable strip under another key.
+    if ([...(tiers?.values() ?? [])].some((level) => level.complete && level.frameCount === targetCount)) return;
+
     const controller = new AbortController();
     this.densityJobs.set(assetId, controller);
 
     try {
-      const strip = await generateFilmstrip(this.media, assetId, videoDuration, {
+      let level = tiers?.get(framesPerSecond);
+      const completed = await generateFilmstripTiles(this.media, assetId, videoDuration, {
         framesPerSecond,
         signal: controller.signal,
+        ...(prioritySeconds !== undefined ? { prioritySeconds } : {}),
         onProgress: (fraction) => this.setProgress(assetId, 'film', fraction),
+        ...(level ? { skipTiles: new Set(level.tiles.keys()) } : {}),
+        onStart: (frameCount, sourceSeconds) => {
+          if (level) return;
+          let cachedTiers = this.filmstripTiers.get(assetId);
+          if (!cachedTiers) {
+            cachedTiers = new Map();
+            this.filmstripTiers.set(assetId, cachedTiers);
+          }
+          while (cachedTiers.size >= MAX_CACHED_FILMSTRIP_LEVELS) {
+            const oldestKey = cachedTiers.keys().next().value as number | undefined;
+            if (oldestKey === undefined) break;
+            const oldest = cachedTiers.get(oldestKey);
+            if (oldest) {
+              for (const tile of oldest.tiles.values()) URL.revokeObjectURL(tile.url);
+            }
+            cachedTiers.delete(oldestKey);
+          }
+          level = {
+            requestedDensity: framesPerSecond,
+            sourceSeconds,
+            frameCount,
+            tiles: new Map(),
+            complete: false,
+          };
+          cachedTiers.set(framesPerSecond, level);
+        },
+        onTile: (tileIndex, tile) => {
+          if (!level || controller.signal.aborted) {
+            URL.revokeObjectURL(tile.url);
+            return;
+          }
+          const previous = level.tiles.get(tileIndex);
+          if (previous) URL.revokeObjectURL(previous.url);
+          level.tiles.set(tileIndex, tile);
+          // This is the important progressive repaint: do not wait for the level.
+          this.onProgress?.();
+        },
       });
-      if (controller.signal.aborted || !strip) return;
-
-      // Only now is the old one safe to release.
-      const previous = this.filmstrips.get(assetId);
-      this.filmstrips.set(assetId, strip);
-      if (previous) {
-        URL.revokeObjectURL(previous.url);
-        if (previous.posterUrl !== previous.url) URL.revokeObjectURL(previous.posterUrl);
-      }
+      if (controller.signal.aborted || !completed || !level) return;
+      level.complete = true;
       this.onProgress?.();
     } catch {
-      // A denser strip is an improvement, not a requirement: on failure the one
-      // already on screen simply stays.
-      this.density.delete(assetId);
+      // A zoom-specific strip is an improvement, not a requirement: on failure the
+      // closest cached tier simply stays on screen.
     } finally {
-      this.setProgress(assetId, 'film', null);
-      if (this.densityJobs.get(assetId) === controller) this.densityJobs.delete(assetId);
+      if (this.densityJobs.get(assetId) === controller) {
+        this.densityJobs.delete(assetId);
+        this.densityPriorityTiles.delete(assetId);
+        this.setProgress(assetId, 'film', null);
+      }
     }
   }
 
@@ -472,14 +1112,34 @@ export class PreviewCache {
   }
 
   dispose(): void {
+    for (const controller of this.densityJobs.values()) controller.abort();
+    for (const controller of this.waveformDensityJobs.values()) controller.abort();
     for (const strip of this.filmstrips.values()) {
       if (!strip) continue;
       URL.revokeObjectURL(strip.url);
-      URL.revokeObjectURL(strip.posterUrl);
+      if (strip.posterUrl !== strip.url) URL.revokeObjectURL(strip.posterUrl);
+    }
+    for (const tiers of this.filmstripTiers.values()) {
+      for (const level of tiers.values()) {
+        for (const tile of level.tiles.values()) URL.revokeObjectURL(tile.url);
+      }
     }
     for (const wave of this.waveforms.values()) if (wave) URL.revokeObjectURL(wave.url);
+    for (const tiers of this.waveformTiers.values()) {
+      for (const level of tiers.values()) {
+        for (const tile of level.tiles.values()) URL.revokeObjectURL(tile.url);
+      }
+    }
     this.filmstrips.clear();
+    this.filmstripTiers.clear();
     this.waveforms.clear();
+    this.waveformTiers.clear();
+    this.density.clear();
+    this.densityPriorityTiles.clear();
+    this.densityJobs.clear();
+    this.waveformDensity.clear();
+    this.waveformPriorityTiles.clear();
+    this.waveformDensityJobs.clear();
     this.progress.clear();
   }
 }
