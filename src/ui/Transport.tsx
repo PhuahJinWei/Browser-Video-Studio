@@ -38,10 +38,6 @@ export interface SourceTransport {
   readonly seek: (at: Time) => void;
   readonly togglePlay: () => void;
   readonly marks: { readonly inPoint: Time | null; readonly outPoint: Time | null };
-  readonly markIn: () => void;
-  readonly markOut: () => void;
-  readonly clearMarks: () => void;
-  readonly editToTimeline: (mode: 'insert' | 'overwrite') => void;
 }
 
 export function Transport({ source = null }: { source?: SourceTransport | null }): React.JSX.Element {
@@ -221,26 +217,6 @@ export function Transport({ source = null }: { source?: SourceTransport | null }
         </div>
 
         <div className="transport-utilities" role="group" aria-label="Preview utilities">
-          {source && (
-            <div className="source-edit-tools" role="group" aria-label="Source editing">
-              <button title="Mark source In (I)" onClick={source.markIn}>In</button>
-              <button title="Mark source Out (O)" onClick={source.markOut}>Out</button>
-              <button
-                className="icon"
-                title="Clear source In and Out"
-                disabled={!source.marks.inPoint && !source.marks.outPoint}
-                onClick={source.clearMarks}
-              >
-                ×
-              </button>
-              <button title="Insert source at playhead" onClick={() => source.editToTimeline('insert')}>
-                Insert
-              </button>
-              <button title="Overwrite source at playhead" onClick={() => source.editToTimeline('overwrite')}>
-                Overwrite
-              </button>
-            </div>
-          )}
           <span
             className="preview-volume"
             title={`Preview volume ${monitorMuted ? 'muted' : `${Math.round(monitorVolume * 100)}%`}`}

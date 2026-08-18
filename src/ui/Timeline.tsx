@@ -10,11 +10,6 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { Command } from '../model/commands';
 import { DEFAULT_TRACK_HEIGHT } from '../model/factories';
 import {
-  densityForZoom,
-  type PreviewCache,
-  waveformDensityForZoom,
-} from '../engine/previews';
-import {
   clipEnd,
   clipFitsTrack,
   clipSourceSpan,
@@ -33,12 +28,12 @@ import { staticParam } from '../model/params';
 import * as T from '../model/time';
 import { TRANSITION_TYPES } from '../model/types';
 import type {
-  Asset,
   Clip,
   ClipId,
   FrameRate,
   Param,
   Project,
+  SequenceId,
   Time,
   Track,
   TrackId,
@@ -46,6 +41,7 @@ import type {
   Transition,
   TransitionId,
 } from '../model/types';
+import { LanePreview, type LaneClip } from './LanePreview';
 import { useContextMenu, type MenuEntry } from './ContextMenu';
 import { useDialog } from './Dialog';
 import { clipsForDragOrigin } from './dragOrigin';
@@ -95,7 +91,13 @@ import {
   TIMELINE_VIDEO_RATIO_MIN,
   useLayout,
 } from './layout';
-import { appendPointFor, counterpartTrackId, orderedTrackIds, useStudio } from './store';
+import {
+  appendPointFor,
+  counterpartTrackId,
+  emptyTracksToRemove,
+  orderedTrackIds,
+  useStudio,
+} from './store';
 import {
   clampTrackHeight,
   isExpandedTrackHeader,
@@ -120,6 +122,22 @@ const MIN_TAIL_SECONDS = 10;
 const SNAP_PIXELS = 8;
 
 type DragKind = 'move' | 'trim-in' | 'trim-out';
+
+/**
+ * Scroll a pane by the least it takes to show one of its rows.
+ *
+ * `scrollIntoView` would do it, but it walks every scrollable ancestor on the way
+ * up — which here means yanking the timeline sideways and the page with it.
+ */
+function scrollRowIntoPane(pane: HTMLElement, row: HTMLElement): void {
+  const paneRect = pane.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
+  const above = rowRect.top - paneRect.top;
+  const below = rowRect.bottom - paneRect.bottom;
+  // A row taller than the pane cannot be shown whole, so its top wins.
+  if (above < 0) pane.scrollTop += above;
+  else if (below > 0) pane.scrollTop += Math.min(below, above);
+}
 
 /**
  * A time after snapping, and what it snapped to.
@@ -184,6 +202,9 @@ interface AssetInsertion {
  * stays small while the *hit* area is padded out in CSS, which is what actually makes
  * them comfortable to click.
  */
+/** Shared so a lane with nothing on it does not hand the painter a fresh array. */
+const EMPTY_LANE: readonly LaneClip[] = [];
+
 const AFFORDANCE_WIDTH = 18;
 const AFFORDANCE_HEIGHT = 16;
 /** Clear of the 7px trim handle, which owns the very edge and is used far more often. */
@@ -364,6 +385,7 @@ export function Timeline(): React.JSX.Element {
   const selectTransition = useStudio((s) => s.selectTransition);
   const addTransitionOnCuts = useStudio((s) => s.addTransitionOnCuts);
   const splitAtPlayhead = useStudio((s) => s.splitAtPlayhead);
+  const removeEmptyTracks = useStudio((s) => s.removeEmptyTracks);
   const selectRangeTo = useStudio((s) => s.selectRangeTo);
   const selectWithin = useStudio((s) => s.selectWithin);
   const setInspectorOpen = useLayout((s) => s.setInspectorOpen);
@@ -378,7 +400,6 @@ export function Timeline(): React.JSX.Element {
   const toggleSelect = useStudio((s) => s.toggleSelect);
   const setPlayhead = useStudio((s) => s.setPlayhead);
   const setZoom = useStudio((s) => s.setZoom);
-  const refreshPreviewDensity = useStudio((s) => s.refreshPreviewDensity);
   const duration = useStudio((s) => s.duration);
   const previews = useStudio((s) => s.previews);
   const dropAssetOnTrack = useStudio((s) => s.dropAssetOnTrack);
@@ -395,9 +416,7 @@ export function Timeline(): React.JSX.Element {
   zoomRef.current = pxPerSecond;
   const playhead = sequence.view.playhead;
   const trackIds = useMemo(() => orderedTrackIds(project, sequenceId), [project, sequenceId]);
-  const previewGeometryKey = trackIds
-    .map((trackId) => Math.max(TRACK_HEIGHT_MIN, getTrack(project, trackId).height))
-    .join(':');
+  const emptyTrackCount = emptyTracksToRemove(project, sequenceId).length;
 
   /**
    * Usable width of the pane, tracked so the ruler can fill it.
@@ -427,6 +446,45 @@ export function Timeline(): React.JSX.Element {
     if (videoPaneRef.current) videoPaneRef.current.scrollTop = layout.timelineVideoScrollTop;
     if (audioPaneRef.current) audioPaneRef.current.scrollTop = layout.timelineAudioScrollTop;
   }, []);
+
+  /**
+   * Bring a track that has just appeared into view.
+   *
+   * Each stack scrolls on its own and track heights are fixed, so past a few tracks
+   * a new one is simply added off-screen: the command runs, nothing visibly happens,
+   * and the only clue is a scrollbar that got shorter. Undoing a delete lands here
+   * too, which is the same courtesy for the same reason.
+   */
+  const seenTracks = useRef<{ sequenceId: SequenceId; ids: ReadonlySet<TrackId> } | null>(null);
+  useLayoutEffect(() => {
+    const previous = seenTracks.current;
+    seenTracks.current = { sequenceId, ids: new Set(trackIds) };
+    // Nothing was *added* on a first render or a switch of sequence — the whole
+    // stack is new, and wherever that sequence was left scrolled to is the answer.
+    if (!previous || previous.sequenceId !== sequenceId) return;
+
+    for (const [list, pane] of [
+      [sequence.videoTrackIds, videoPaneRef.current],
+      [sequence.audioTrackIds, audioPaneRef.current],
+    ] as const) {
+      if (!pane) continue;
+      /*
+       * The deepest new one in the *document's* order, which is not the pane's:
+       * video renders top-down, so V3 is the first row and V1 the last. Filling
+       * the counterpart stack up to a matching index adds several at once — A1,
+       * A2, A3 to pair with V3 — and the clip lands on the last of them, which
+       * is the one worth looking at.
+       */
+      const added = list.filter((trackId) => !previous.ids.has(trackId));
+      const target = added[added.length - 1];
+      if (!target) continue;
+
+      const row = [...pane.querySelectorAll<HTMLElement>('[data-track-id]')]
+        .find((element) => element.dataset.trackId === target)
+        ?.closest<HTMLElement>('.timeline-row');
+      if (row) scrollRowIntoPane(pane, row);
+    }
+  }, [trackIds, sequenceId, sequence]);
 
   const tailSeconds = Math.max(T.toSeconds(duration()) + MIN_TAIL_SECONDS, MIN_TAIL_SECONDS);
   // Whichever is longer: the material, or enough to reach the right-hand edge.
@@ -726,23 +784,17 @@ export function Timeline(): React.JSX.Element {
     const sides: { above: InsertGhost[]; below: InsertGhost[] } = { above: [], below: [] };
     if (!gapPlan) return sides;
 
-    const ghostFor = (clip: Clip): InsertGhost => {
-      const height = Math.max(TRACK_HEIGHT_MIN, getTrack(project, clip.trackId).height);
-      const asset = isMediaClip(clip) ? project.assets[clip.assetId] : undefined;
-      const preview = previewStyle(clip, pxPerSecond, previews, asset, height);
-      return {
-        id: clip.id,
-        left: T.toSeconds(clip.start) * pxPerSecond,
-        width: Math.max(2, T.toSeconds(clip.duration) * pxPerSecond),
-        kind: clipKindClass(clip),
-        height,
-        appearance: {
-          ...(preview ? { backgroundColor: 'var(--clip-bed)' } : {}),
-          ...preview,
-          ...(clip.kind === 'solid' ? { background: clip.fill } : {}),
-        },
-      };
-    };
+    // A ghost is a placeholder for a drop that has not happened, so it carries the
+    // clip's own colour rather than its picture: the picture is drawn by the lane
+    // the clip is actually on, and a ghost is by definition not on one yet.
+    const ghostFor = (clip: Clip): InsertGhost => ({
+      id: clip.id,
+      left: T.toSeconds(clip.start) * pxPerSecond,
+      width: Math.max(2, T.toSeconds(clip.duration) * pxPerSecond),
+      kind: clipKindClass(clip),
+      height: Math.max(TRACK_HEIGHT_MIN, getTrack(project, clip.trackId).height),
+      appearance: clip.kind === 'solid' ? { background: clip.fill } : {},
+    });
 
     sides[gapPlan.primaryTrack.side].push(ghostFor(gapPlan.primary));
     if (gapPlan.partnerTrack) {
@@ -759,6 +811,51 @@ export function Timeline(): React.JSX.Element {
       ),
     [gapPlan],
   );
+
+  /**
+   * What each lane's painter draws, in the lane's own pixel space.
+   *
+   * Built here because React already knows where every clip sits; the painter only
+   * has to map it to the viewport. Keyed by track so a lane re-renders when its own
+   * clips move and not when another track's do.
+   */
+  const lanePlans = useMemo(() => {
+    const plans = new Map<TrackId, LaneClip[]>();
+    for (const trackId of trackIds) {
+      const laneClips: LaneClip[] = [];
+      for (const clip of trackClips(project, trackId)) {
+        if (!isMediaClip(clip)) continue;
+        // A clip being lifted into an insertion gap is shown by its ghost there, so
+        // the lane must stop drawing it: hiding the clip's own element no longer
+        // hides its picture now that the picture is painted underneath.
+        if (relocatingIds.has(clip.id)) continue;
+        const asset = project.assets[clip.assetId];
+        if (!asset) continue;
+        const isAudio = clip.kind === 'audio';
+        // A ramp has no single rate a strip could be laid out at, so its average
+        // over the clip is used; playback still runs the exact curve.
+        const speed = clip.speedRamp
+          ? Math.max(0.001, T.ratio(clipSourceSpan(clip), clip.duration))
+          : Math.abs(clip.speed) || 1;
+        const size = asset.video?.size;
+        laneClips.push({
+          id: clip.id,
+          kind: isAudio ? 'audio' : 'video',
+          assetId: clip.assetId,
+          x: T.toSeconds(clip.start) * pxPerSecond,
+          width: Math.max(1, T.toSeconds(clip.duration) * pxPerSecond),
+          sourceIn: T.toSeconds(clip.sourceIn),
+          speed,
+          sourceSeconds: T.toSeconds(
+            (isAudio ? asset.audio?.duration : asset.video?.duration) ?? clip.duration,
+          ),
+          frameAspect: size && size.width > 0 && size.height > 0 ? size.width / size.height : 16 / 9,
+        });
+      }
+      plans.set(trackId, laneClips);
+    }
+    return plans;
+  }, [project, trackIds, pxPerSecond, relocatingIds]);
 
   const insertionAt = useCallback(
     (clientY: number, clipKind: Clip['kind']): Insertion | null => {
@@ -1617,6 +1714,15 @@ export function Timeline(): React.JSX.Element {
       },
       'separator',
       {
+        label:
+          emptyTrackCount > 0
+            ? `Remove ${emptyTrackCount} empty track${emptyTrackCount === 1 ? '' : 's'}`
+            : 'Remove empty tracks',
+        icon: <IconTrash />,
+        disabled: emptyTrackCount === 0,
+        onSelect: removeEmptyTracks,
+      },
+      {
         label: 'Delete this track',
         icon: <IconTrash />,
         danger: true,
@@ -1747,29 +1853,48 @@ export function Timeline(): React.JSX.Element {
     el.style.setProperty('--timeline-scroll-x', `${Math.round(el.scrollLeft)}px`);
   }, [pxPerSecond]);
 
-  /**
-   * Tell the progressive filmstrip and waveform builders which source region
-   * deserves its first tile. Scroll and zoom both move this window; cached fallback
-   * layers stay visible underneath each new pass.
+  /*
+   * Publish how much room the panes' scrollbar gutters take.
+   *
+   * The panes reserve a stable gutter on their right edge; the guide overlay spans
+   * the split, so without this a play head scrolled to the far right would be drawn
+   * across that gutter. Measured rather than assumed, because the width of a
+   * scrollbar is a platform and setting decision, and it is zero on overlay ones.
+   */
+  useEffect(() => {
+    const pane = videoPaneRef.current;
+    const split = lanesRef.current;
+    if (!pane || !split) return;
+
+    const measure = (): void => {
+      split.style.setProperty(
+        '--timeline-pane-gutter',
+        `${Math.max(0, pane.offsetWidth - pane.clientWidth)}px`,
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(pane);
+    return () => observer.disconnect();
+  }, []);
+
+  /*
+   * Publish the horizontal scroll offset for anything positioned against the
+   * viewport rather than against the content — the lane previews' canvases, and the
+   * sticky column headers. The lane painters listen to the scroll event themselves;
+   * this is only the CSS half.
    */
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
 
-    const refreshVisiblePreviews = () => {
+    const publish = (): void => {
       el.style.setProperty('--timeline-scroll-x', `${Math.round(el.scrollLeft)}px`);
-      const visibleWidth = Math.max(0, el.clientWidth - HEADER_WIDTH);
-      const startSeconds = Math.max(0, el.scrollLeft / zoomRef.current);
-      refreshPreviewDensity({
-        startSeconds,
-        endSeconds: startSeconds + visibleWidth / zoomRef.current,
-      });
     };
-
-    refreshVisiblePreviews();
-    el.addEventListener('scroll', refreshVisiblePreviews, { passive: true });
-    return () => el.removeEventListener('scroll', refreshVisiblePreviews);
-  }, [paneWidth, previewGeometryKey, pxPerSecond, refreshPreviewDensity]);
+    publish();
+    el.addEventListener('scroll', publish, { passive: true });
+    return () => el.removeEventListener('scroll', publish);
+  }, []);
 
   const ticks = useMemo(
     () => buildTicks(totalSeconds, pxPerSecond, sequence.frameRate),
@@ -1938,7 +2063,11 @@ export function Timeline(): React.JSX.Element {
               gridTemplateRows: `minmax(44px, ${timelineVideoRatio}fr) ${TRACK_SECTION_DIVIDER_HEIGHT}px minmax(44px, ${1 - timelineVideoRatio}fr)`,
             }}
           >
-            {(['video', 'audio'] as const).map((paneKind) => (
+            {(['video', 'audio'] as const).map((paneKind) => {
+              const paneTrackIds = trackIds.filter(
+                (trackId) => getTrack(project, trackId).kind === paneKind,
+              );
+              return (
               <div className={`timeline-pane-group ${paneKind}`} key={paneKind}>
                 <div
                   className={`timeline-pane ${paneKind}`}
@@ -1953,11 +2082,18 @@ export function Timeline(): React.JSX.Element {
                     style={{ width: HEADER_WIDTH + contentWidth }}
                   >
           {paneKind === 'video' && timelineTail('video')}
-          {trackIds.filter((trackId) => getTrack(project, trackId).kind === paneKind).map((trackId) => {
+          {paneTrackIds.map((trackId, rowIndex) => {
             const track = getTrack(project, trackId);
             const height = Math.max(TRACK_HEIGHT_MIN, track.height);
+            // The bottom video row ends flush against the section divider, which owns
+            // that seam; its resize handle stays inside the row rather than over it.
+            const atPaneBoundary = paneKind === 'video' && rowIndex === paneTrackIds.length - 1;
             return (
-              <div className="timeline-row" key={trackId} style={{ height }}>
+              <div
+                className={`timeline-row${atPaneBoundary ? ' at-pane-boundary' : ''}`}
+                key={trackId}
+                style={{ height }}
+              >
                 <TrackHeader
                   track={track}
                   onCommand={run}
@@ -2007,6 +2143,13 @@ export function Timeline(): React.JSX.Element {
                     if (event.target === event.currentTarget) openLaneMenu(event, trackId);
                   }}
                 >
+                  <LanePreview
+                    clips={lanePlans.get(trackId) ?? EMPTY_LANE}
+                    previews={previews}
+                    pxPerSecond={pxPerSecond}
+                    scrollerRef={scrollRef}
+                    height={height}
+                  />
                   {/*
                     Where the clips were when the drag started.
 
@@ -2027,24 +2170,13 @@ export function Timeline(): React.JSX.Element {
                           start: origin.start,
                           duration: origin.duration,
                         };
-                        const asset = isMediaClip(original)
-                          ? project.assets[original.assetId]
-                          : undefined;
-                        const appearance = previewStyle(
-                          original,
-                          pxPerSecond,
-                          previews,
-                          asset,
-                          height,
-                        );
                         return (
                           <div
                             key={origin.clipId}
-                            className={`clip drag-origin ${clipKindClass(original)}${appearance ? ' has-preview' : ''}`}
+                            className={`clip drag-origin ${clipKindClass(original)}`}
                             style={{
                               left: T.toSeconds(origin.start) * pxPerSecond,
                               width: Math.max(2, T.toSeconds(origin.duration) * pxPerSecond),
-                              ...appearance,
                               ...(original.kind === 'solid'
                                 ? { background: original.fill }
                                 : {}),
@@ -2112,26 +2244,30 @@ export function Timeline(): React.JSX.Element {
                       relocating={relocatingIds.has(clip.id)}
                       pxPerSecond={pxPerSecond}
                       selected={selection.includes(clip.id)}
-                      preview={previewStyle(
-                        clip,
-                        pxPerSecond,
-                        previews,
-                        isMediaClip(clip) ? project.assets[clip.assetId] : undefined,
-                        height,
-                      )}
-                      // Judged by this clip's own preview, not by either of the
-                      // asset's two: the waveform lands long before the strip, and
-                      // the video clip used to lose its shimmer the moment its
-                      // audio was done, then sit flat for the rest of the decode.
+                      // The picture and sound are drawn by the lane's canvas, under
+                      // the clips. A clip carries only what it owns: its border, its
+                      // kind edge, its name and its badges.
+                      painted={isMediaClip(clip)}
+                      /*
+                        Both kinds say when they are working, but only sound can say
+                        how far along it is.
+
+                        Peaks are one job over the whole file — a real denominator,
+                        and seconds long on a long source, so a bar earns its place.
+                        Picture is many small jobs sized to the viewport: the only
+                        honest denominator is "the cells in view", which refills on
+                        every scroll and would make a bar flash rather than inform.
+                        So the clip shimmers until it has frames, then goes quiet.
+                      */
                       loading={
                         isMediaClip(clip) &&
                         (clip.kind === 'audio'
-                          ? previews?.getWaveform(clip.assetId) === undefined
-                          : previews?.getFilmstrip(clip.assetId) === undefined)
+                          ? previews?.getPeaks(clip.assetId) === undefined
+                          : (previews?.thumbnails.isWarmingUp(clip.assetId) ?? false))
                       }
                       progress={
-                        isMediaClip(clip)
-                          ? (previews?.getKindProgress(clip.assetId, clip.kind === 'audio' ? 'wave' : 'film') ?? null)
+                        isMediaClip(clip) && clip.kind === 'audio'
+                          ? (previews?.getPeaksProgress(clip.assetId) ?? null)
                           : null
                       }
                       missing={
@@ -2236,22 +2372,6 @@ export function Timeline(): React.JSX.Element {
           })}
 
           {paneKind === 'audio' && timelineTail('audio')}
-
-          {/*
-            Below the lanes in the stacking order but above the clips, so the sticky
-            track headers cover it when the timeline is scrolled right. It used to sit
-            over the whole grid at a higher z-index and painted straight across them.
-          */}
-          <div className="playhead-line" style={{ left: HEADER_WIDTH + playheadX }} />
-
-          {snapMark !== null && (
-            <div
-              className="snap-line"
-              style={{
-                left: HEADER_WIDTH + Math.round(T.toSeconds(snapMark) * pxPerSecond),
-              }}
-            />
-          )}
                   </div>
                 </div>
                 {paneKind === 'video' && (
@@ -2261,7 +2381,33 @@ export function Timeline(): React.JSX.Element {
                   />
                 )}
               </div>
-            ))}
+              );
+            })}
+
+            {/*
+              Every full-height guide, once, over the whole split.
+
+              These used to live inside each pane's content, which made a line that
+              spans the timeline into one element per pane — and left it unable to
+              cross the divider, since that is a separate opaque grid row. The
+              divider grew its own third copy of the playhead to paper over the gap,
+              and the snap line simply kept the gap.
+
+              Drawing them here instead makes crossing the divider structural rather
+              than something to keep in sync. Clipping the overlay at the header
+              column is also what keeps a guide off the track headers: the old
+              arrangement did that by stacking underneath them, which is why they had
+              to sit below the clips they are meant to be read against.
+            */}
+            <div className="timeline-guides" style={{ left: HEADER_WIDTH }}>
+              <div className="playhead-line" style={{ left: playheadX }} />
+              {snapMark !== null && (
+                <div
+                  className="snap-line"
+                  style={{ left: Math.round(T.toSeconds(snapMark) * pxPerSecond) }}
+                />
+              )}
+            </div>
           </div>
 
           {marquee && <MarqueeBox marquee={marquee} />}
@@ -2696,135 +2842,6 @@ function TrackHeader({
   );
 }
 
-/**
- * Position the asset-wide waveform or available filmstrip tile layers behind a clip.
- *
- * Coordinates stay source-wide, so trimming and moving only shift CSS backgrounds —
- * no re-rasterisation, and clips cut from one asset share one cache.
- */
-function previewStyle(
-  clip: Clip,
-  pxPerSecond: number,
-  previews: PreviewCache | null,
-  asset: Asset | undefined,
-  trackHeight: number,
-): React.CSSProperties | undefined {
-  if (!previews || !isMediaClip(clip)) return undefined;
-
-  // A single CSS filmstrip cannot vary tile width continuously, so a ramp uses its
-  // average rate. This keeps the source endpoints truthful while playback supplies
-  // the exact integrated mapping frame by frame.
-  const speed = clip.speedRamp
-    ? Math.max(0.001, T.ratio(clipSourceSpan(clip), clip.duration))
-    : Math.abs(clip.speed) || 1;
-  if (clip.kind !== 'audio') {
-    const size = asset?.video?.size;
-    const starter = previews.getFilmstrip(clip.assetId);
-    const frameAspect = starter && starter.frameWidth > 0 && starter.frameHeight > 0
-      ? starter.frameWidth / starter.frameHeight
-      : size && size.width > 0 && size.height > 0
-        ? size.width / size.height
-        : 16 / 9;
-    const preview = previews.getFilmstripPreview(
-      clip.assetId,
-      // One row separator plus the clip's two borders do not show image pixels.
-      densityForZoom(pxPerSecond, speed, frameAspect, Math.max(1, trackHeight - 3)),
-    );
-    if (!preview) return undefined;
-
-    // A still has no timeline of frames to map onto: tile the poster instead.
-    if (preview.sourceSeconds <= 0) {
-      const poster = preview.layers[0];
-      if (!poster) return undefined;
-      return {
-        backgroundImage: `url(${poster.url})`,
-        backgroundSize: 'auto 100%',
-        backgroundRepeat: 'repeat-x',
-        backgroundPosition: 'left center',
-      };
-    }
-
-    const clipSourceStart = T.toSeconds(clip.sourceIn);
-    const clipSourceEnd = clipSourceStart + T.toSeconds(clip.duration) * speed;
-    const layers = preview.layers.filter(
-      (layer) =>
-        layer.sourceStart < clipSourceEnd &&
-        layer.sourceStart + layer.sourceDuration > clipSourceStart,
-    );
-    if (layers.length === 0) return undefined;
-
-    /*
-     * The separator is CSS, not part of a thumbnail. Its one pixel therefore stays
-     * one pixel at every zoom instead of scaling into the dark scratches caused by
-     * the old baked gutters. The sampling density makes this period equal to the
-     * source frame's natural width at the visible track height.
-     */
-    const frameWidth = pxPerSecond / speed / preview.framesPerSecond;
-    const sourceOffset = (clipSourceStart / speed) * pxPerSecond;
-    const divider =
-      'linear-gradient(to right, transparent calc(100% - 1px), rgb(4 10 16 / 68%) calc(100% - 1px))';
-
-    return {
-      backgroundImage: [divider, ...layers.map((layer) => `url(${layer.url})`)].join(', '),
-      backgroundSize: [
-        `${frameWidth}px 100%`,
-        ...layers.map((layer) => `${(layer.sourceDuration / speed) * pxPerSecond}px 100%`),
-      ].join(', '),
-      backgroundPosition: [
-        `${-sourceOffset}px center`,
-        ...layers.map(
-          (layer) =>
-            `${((layer.sourceStart - clipSourceStart) / speed) * pxPerSecond}px center`,
-        ),
-      ].join(', '),
-      backgroundRepeat: ['repeat-x', ...layers.map(() => 'no-repeat')].join(', '),
-    };
-  }
-
-  const wantedDensity = waveformDensityForZoom(pxPerSecond, speed, window.devicePixelRatio);
-  const preview = previews.getWaveformPreview(clip.assetId, wantedDensity);
-  if (!preview) return undefined;
-
-  const clipSourceStart = T.toSeconds(clip.sourceIn);
-  const clipSourceEnd = clipSourceStart + T.toSeconds(clip.duration) * speed;
-  const layers = preview.layers.filter(
-    (layer) =>
-      layer.sourceStart < clipSourceEnd &&
-      layer.sourceStart + layer.sourceDuration > clipSourceStart,
-  );
-  if (layers.length === 0) return undefined;
-
-  /*
-   * Nearest-neighbour once the zoom wants tiles, bilinear before.
-   *
-   * A waveform is one-pixel columns. The tiles are cut so a column is exactly one
-   * device pixel, but a clip's background lands at a fractional device offset on
-   * any display whose scale is not a whole number -- 125 %, 150 % -- and bilinear
-   * sampling then blends every column with its neighbour into a two-pixel smear at
-   * half strength. That is the blur people saw at high zoom on HiDPI screens; at
-   * 100 % the offsets happen to be whole and it looked fine. Nearest-neighbour at a
-   * 1:1 scale is a pure shift and stays crisp. It is only switched on where the
-   * image is at or above screen density: shrinking a waveform without filtering
-   * drops columns, and the dropped columns are peaks.
-   */
-  const base = previews.getWaveform(clip.assetId);
-  const upscaling = base ? wantedDensity >= base.width / base.sourceSeconds : false;
-
-  return {
-    ...(upscaling ? { imageRendering: 'pixelated' as const } : {}),
-    backgroundImage: layers.map((layer) => `url(${layer.url})`).join(', '),
-    backgroundSize: layers
-      .map((layer) => `${(layer.sourceDuration / speed) * pxPerSecond}px 100%`)
-      .join(', '),
-    backgroundPosition: layers
-      .map(
-        (layer) =>
-          `${((layer.sourceStart - clipSourceStart) / speed) * pxPerSecond}px center`,
-      )
-      .join(', '),
-    backgroundRepeat: layers.map(() => 'no-repeat').join(', '),
-  };
-}
 
 /** The visual family shared by clips and every drag representation of a clip. */
 function clipKindClass(clip: Clip): 'audio' | 'title' | 'solid' | 'video' {
@@ -2842,7 +2859,7 @@ function ClipView({
   relocating,
   pxPerSecond,
   selected,
-  preview,
+  painted,
   loading,
   progress,
   missing,
@@ -2857,7 +2874,7 @@ function ClipView({
   relocating: boolean;
   pxPerSecond: number;
   selected: boolean;
-  preview: React.CSSProperties | undefined;
+  painted: boolean;
   /** No preview has landed yet, and none has failed — it is still being decoded. */
   loading: boolean;
   /** How far this clip's preview has got, 0-1, or null when it is not building. */
@@ -2890,8 +2907,8 @@ function ClipView({
 
   return (
     <div
-      className={`clip ${kindClass}${relocating ? ' relocating' : ''}${selected ? ' selected' : ''}${clip.enabled ? '' : ' disabled'}${preview ? ' has-preview' : ''}${isGrouped(clip) ? ' grouped' : ''}${loading ? ' loading' : ''}${missing ? ' missing' : ''}`}
-      style={{ left, width, ...preview, ...fillStyle }}
+      className={`clip ${kindClass}${relocating ? ' relocating' : ''}${selected ? ' selected' : ''}${clip.enabled ? '' : ' disabled'}${painted ? ' has-preview' : ''}${isGrouped(clip) ? ' grouped' : ''}${loading ? ' loading' : ''}${missing ? ' missing' : ''}`}
+      style={{ left, width, ...fillStyle }}
       // No `title`: the hover card replaces it. Leaving both would show a styled card
       // and then the browser's own tooltip on top of it a moment later.
       onPointerEnter={onHoverStart}

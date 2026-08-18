@@ -952,18 +952,6 @@ button.action.tint-danger:hover:not(:disabled) svg {
   align-items: center;
   gap: 3px;
 }
-.source-edit-tools {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  margin-right: 4px;
-  padding-right: 7px;
-  border-right: 1px solid var(--line);
-}
-.source-edit-tools button:not(.icon) {
-  min-width: 32px;
-  padding-inline: 6px;
-}
 .transport-playback {
   grid-area: playback;
   justify-self: center;
@@ -1191,6 +1179,25 @@ button.action.tint-danger:hover:not(:disabled) svg {
 .track-resize-handle:focus-visible {
   outline: none;
 }
+
+/*
+ * The bottom video row's seam *is* the pane boundary, and the section divider sits
+ * directly beneath it. Straddling that one put two row-resize targets in the same
+ * few pixels — and since the grid clips the half below, every pixel the handle had
+ * left was the strip immediately above the divider, with its accent line painting
+ * along the divider's top edge as though the divider itself had lit up. Keeping
+ * this handle wholly inside its own row leaves the divider uncontested; the two
+ * are now adjacent rather than overlapping.
+ */
+.timeline-row.at-pane-boundary .track-resize-handle {
+  bottom: 0;
+  height: 6px;
+}
+.timeline-row.at-pane-boundary .track-resize-handle::after {
+  top: auto;
+  bottom: 0;
+}
+
 body.resizing-track {
   cursor: row-resize;
   user-select: none;
@@ -1210,6 +1217,7 @@ body.resizing-track {
 .track-section-divider::after {
   content: '';
   position: absolute;
+  z-index: 6;
   top: 2px;
   left: calc(50% - 22px);
   width: 44px;
@@ -1412,6 +1420,22 @@ body.resizing-track-sections {
   font-size: 12px;
 }
 
+/*
+ * The picture and sound for one track, drawn rather than assembled from images.
+ *
+ * Sized and positioned to the visible width only: the content behind a lane can be
+ * tens of thousands of pixels wide, which no canvas can be, and there is no point
+ * drawing what is scrolled off. It follows the scroll through a custom property the
+ * scroller publishes, and sits under the clips, which carry their own chrome.
+ */
+.lane-preview {
+  position: absolute;
+  top: 0;
+  left: var(--timeline-scroll-x, 0px);
+  pointer-events: none;
+  z-index: 0;
+}
+
 .track-lane {
   position: relative;
   flex: none;
@@ -1489,6 +1513,33 @@ body.resizing-track-sections {
  * covered by the sticky corner, the line sits inside the lanes and is covered by the
  * sticky headers, and neither needs to outrank anything it should not.
  */
+/*
+ * The strip a full-height guide may be drawn in: the content area, and only that.
+ *
+ * Clipped at the header column rather than stacked below it, so a guide is free to
+ * be the topmost thing in the timeline — which is what a play head should be —
+ * without ever painting across the track headers. Above the divider's own z-index
+ * so one line crosses the whole stack; inert, so the divider still takes its drag.
+ */
+.timeline-guides {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: var(--timeline-pane-gutter, 0px);
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 11;
+}
+
+/*
+ * Positioned in content pixels and translated by the scroll, like everything else
+ * that is measured in time rather than in screen space.
+ */
+.playhead-line,
+.snap-line {
+  transform: translateX(calc(0px - var(--timeline-scroll-x)));
+}
+
 .playhead-line {
   position: absolute;
   top: 0;
@@ -1497,8 +1548,6 @@ body.resizing-track-sections {
   margin-left: -1px;
   background: var(--danger);
   pointer-events: none;
-  /* Above the clips and the drop ghost, below the sticky track headers at 5. */
-  z-index: 4;
 }
 
 /*
@@ -1569,7 +1618,6 @@ body.resizing-track-sections {
   background: var(--warn);
   opacity: 0.9;
   pointer-events: none;
-  z-index: 4;
 }
 
 /*
@@ -2238,12 +2286,12 @@ button.sequence-match.matched:disabled {
 /*
  * Clip previews: the filmstrip / waveform sits behind the label.
  *
- * The bed is opaque rather than transparent. A waveform is rasterised as white peaks
- * on a clear canvas, so letting the lane show through erased it the moment the lane
- * was not dark — which is exactly what a light theme does.
+ * Transparent, because the lane's canvas behind it is what draws the picture and
+ * the sound — and paints the bed underneath them, so a white waveform still has
+ * something dark to sit on in a light theme.
  */
 .clip.has-preview {
-  background-color: var(--clip-bed);
+  background: none;
 }
 .clip.has-preview::before {
   content: '';

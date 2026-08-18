@@ -21,9 +21,6 @@ export function Preview(): React.JSX.Element {
   const sourcePreviewTime = useStudio((s) => s.sourcePreviewTime);
   const setSourcePreviewTime = useStudio((s) => s.setSourcePreviewTime);
   const sourceMarks = useStudio((s) => s.sourceMarks);
-  const setSourceMark = useStudio((s) => s.setSourceMark);
-  const clearSourceMarks = useStudio((s) => s.clearSourceMarks);
-  const editSourceToTimeline = useStudio((s) => s.editSourceToTimeline);
   const showProgramPreview = useStudio((s) => s.showProgramPreview);
   const previews = useStudio((s) => s.previews);
   useStudio((s) => s.previewVersion);
@@ -133,10 +130,6 @@ export function Preview(): React.JSX.Element {
         seek: seekSource,
         togglePlay: toggleSourcePlay,
         marks: sourceMarks.get(sourceAsset.id) ?? { inPoint: null, outPoint: null },
-        markIn: () => setSourceMark('in'),
-        markOut: () => setSourceMark('out'),
-        clearMarks: clearSourceMarks,
-        editToTimeline: editSourceToTimeline,
       }
     : null;
 
@@ -153,7 +146,8 @@ export function Preview(): React.JSX.Element {
     onEnded: () => setSourcePlaying(false),
   };
 
-  const wave = sourceAsset ? previews?.getWaveform(sourceAsset.id) : undefined;
+  // The source monitor's scrub rail uses the same one-per-asset picture the bin does.
+  const wave = sourceAsset ? previews?.getPosterUrl(sourceAsset.id) : null;
 
   return (
     <div className="preview-panel">
@@ -187,7 +181,7 @@ export function Preview(): React.JSX.Element {
                 />
                 <div
                   className="source-audio"
-                  style={wave ? { backgroundImage: `url(${wave.url})` } : undefined}
+                  style={wave ? { backgroundImage: `url(${wave})` } : undefined}
                 >
                   <IconAudio size={38} />
                   <span>{sourceAsset.name}</span>

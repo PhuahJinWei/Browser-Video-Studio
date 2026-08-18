@@ -21,11 +21,7 @@ import {
 import type { StreamTargetChunk } from 'mediabunny';
 import { isImageFile, MediaLibrary } from '../engine/media';
 import { generateProxy as encodeProxy } from '../engine/proxy';
-import {
-  densityForZoom,
-  PreviewCache,
-  waveformDensityForZoom,
-} from '../engine/previews';
+import { PreviewStore } from '../engine/previewStore';
 import { apply, type Command, type NewClipSpec } from '../model/commands';
 import { normaliseFolder } from '../model/commands/handlers';
 import { randomIdSource } from '../model/ids';
@@ -250,7 +246,7 @@ export interface StudioState {
   /** Source blobs, kept so the engine can reopen assets. */
   mediaFiles: ReadonlyMap<AssetId, File>;
   telemetry: EngineTelemetry | null;
-  previews: PreviewCache | null;
+  previews: PreviewStore | null;
   /** Bumped whenever a preview finishes, so the timeline re-renders. */
   previewVersion: number;
   exportProgress: ExportProgress | null;
@@ -337,11 +333,6 @@ export interface StudioState {
 
   setPlayhead: (at: Time) => void;
   setZoom: (pixelsPerSecond: number) => void;
-  /** Build filmstrip and waveform tiles for the current zoom and visible range. */
-  refreshPreviewDensity: (visible?: {
-    readonly startSeconds: number;
-    readonly endSeconds: number;
-  }) => void;
 
   /**
    * Move clips onto a track that does not exist yet — dropping into the gap above,
@@ -415,6 +406,17 @@ export interface StudioState {
    * what you want when you are simply chopping the timeline.
    */
   splitAtPlayhead: () => void;
+  /**
+   * Clear out the tracks holding nothing, in one undo step.
+   *
+   * Deliberately a command rather than something that happens on its own when the
+   * last clip leaves a track: an empty track is an ordinary working state — room
+   * made ahead of an overlay, or a lane a clip has been dragged off mid-rearrange —
+   * and a stack that reshuffles itself under the pointer takes its height, its
+   * lock, its mute and its position with it. See `emptyTracksToRemove` for what it
+   * will take.
+   */
+  removeEmptyTracks: () => void;
   addTransitionNearPlayhead: (transitionType?: string, trackId?: TrackId) => boolean;
   /** Whether a transition has a bare cut to land on, for anything offering the action. */
   canAddTransitionNearPlayhead: () => boolean;
@@ -489,14 +491,6 @@ export function flushAutosave(): Promise<void> {
 
 const initial = starterProject();
 
-/**
- * A short settling pause avoids starting work at every wheel notch. Tiles and tier
- * fallbacks make aborts cheap now, so this can stay below the delay people perceive.
- */
-const DENSITY_DEBOUNCE_MS = 100;
-let densityTimer: ReturnType<typeof setTimeout> | null = null;
-/** Bumped per pass, so an older sweep stops when a newer zoom starts one. */
-let densityRun = 0;
 let exportController: AbortController | null = null;
 const proxyControllers = new Map<AssetId, AbortController>();
 let automaticProxyQueue = Promise.resolve();
@@ -1140,142 +1134,6 @@ export const useStudio = create<StudioState>((set, get) => ({
       sequenceId: get().sequenceId,
       view: { zoom: Math.max(4, Math.min(2000, pixelsPerSecond)) },
     });
-    get().refreshPreviewDensity();
-  },
-
-  /** Ask for filmstrip and waveform tiles fine enough for the current viewport. */
-  refreshPreviewDensity: (visible) => {
-    if (densityTimer !== null) clearTimeout(densityTimer);
-    densityTimer = setTimeout(() => {
-      densityTimer = null;
-      const state = get();
-      const cache = state.previews;
-      if (!cache) return;
-
-      const project = state.project();
-      const zoom = getSequence(project, state.sequenceId).view.zoom;
-
-      type DensityRequest = {
-        density: number;
-        prioritySeconds?: number;
-        priorityDistance: number;
-      };
-      const videoWanted = new Map<AssetId, DensityRequest>();
-      const audioWanted = new Map<AssetId, DensityRequest>();
-      const visibleCentre = visible
-        ? (visible.startSeconds + visible.endSeconds) / 2
-        : null;
-      for (const clip of Object.values(project.clips)) {
-        if (clip.kind !== 'video' && clip.kind !== 'audio') continue;
-        const asset = project.assets[clip.assetId];
-        if (!asset) continue;
-
-        let candidateSeconds: number | undefined;
-        let candidateDistance = Number.POSITIVE_INFINITY;
-        if (visible && visibleCentre !== null) {
-          const start = T.toSeconds(clip.start);
-          const end = start + T.toSeconds(clip.duration);
-          if (start < visible.endSeconds && end > visible.startSeconds) {
-            const timelineAt = Math.max(start, Math.min(end, visibleCentre));
-            candidateDistance = Math.abs(timelineAt - visibleCentre);
-            candidateSeconds =
-              T.toSeconds(clip.sourceIn) +
-              (timelineAt - start) * (Math.abs(clip.speed) || 1);
-          }
-        }
-
-        if (clip.kind === 'audio') {
-          if (!asset.audio) continue;
-          const density = waveformDensityForZoom(
-            zoom,
-            clip.speed,
-            typeof window === 'undefined' ? 1 : window.devicePixelRatio,
-          );
-          const current = audioWanted.get(clip.assetId);
-          const useCandidate = candidateDistance <
-            (current?.priorityDistance ?? Number.POSITIVE_INFINITY);
-          audioWanted.set(clip.assetId, {
-            density: Math.max(current?.density ?? 0, density),
-            ...(useCandidate && candidateSeconds !== undefined
-              ? { prioritySeconds: candidateSeconds }
-              : current?.prioritySeconds !== undefined
-                ? { prioritySeconds: current.prioritySeconds }
-                : {}),
-            priorityDistance: useCandidate
-              ? candidateDistance
-              : current?.priorityDistance ?? Number.POSITIVE_INFINITY,
-          });
-          continue;
-        }
-
-        if (!asset.video) continue;
-        const track = project.tracks[clip.trackId];
-        const { width, height } = asset.video.size;
-        const starter = cache.getFilmstrip(clip.assetId);
-        const frameAspect = starter && starter.frameWidth > 0 && starter.frameHeight > 0
-          ? starter.frameWidth / starter.frameHeight
-          : width > 0 && height > 0
-            ? width / height
-            : 16 / 9;
-        // The row separator plus the clip's two border pixels do not contain image;
-        // using the content box makes each CSS cell match the source aspect on screen.
-        const previewHeight = Math.max(1, Math.max(36, track?.height ?? 36) - 3);
-        const density = densityForZoom(
-          zoom,
-          clip.speed,
-          frameAspect,
-          previewHeight,
-        );
-        const current = videoWanted.get(clip.assetId);
-        const useCandidate = candidateDistance <
-          (current?.priorityDistance ?? Number.POSITIVE_INFINITY);
-        videoWanted.set(clip.assetId, {
-          density: Math.max(current?.density ?? 0, density),
-          ...(useCandidate && candidateSeconds !== undefined
-            ? { prioritySeconds: candidateSeconds }
-            : current?.prioritySeconds !== undefined
-              ? { prioritySeconds: current.prioritySeconds }
-              : {}),
-          priorityDistance: useCandidate
-            ? candidateDistance
-            : current?.priorityDistance ?? Number.POSITIVE_INFINITY,
-        });
-      }
-
-      // One asset at a time. Concurrent range decodes compete for the same demuxer
-      // and hardware, making the preview actually on screen finish last.
-      const run = ++densityRun;
-      void (async () => {
-        // Waveform ranges are quick and fix the currently visible blur first.
-        for (const [assetId, request] of audioWanted) {
-          if (run !== densityRun) return;
-          const asset = project.assets[assetId];
-          if (!asset?.audio) continue;
-          await cache.ensureWaveformDensity(
-            assetId,
-            asset.audio.duration,
-            request.density,
-            request.prioritySeconds,
-          );
-          set({ previewVersion: get().previewVersion + 1 });
-        }
-
-        for (const [assetId, request] of videoWanted) {
-          // A newer zoom has taken over; its own pass covers what is left.
-          if (run !== densityRun) return;
-          const asset = project.assets[assetId];
-          if (!asset?.video) continue;
-
-          await cache.ensureDensity(
-            assetId,
-            asset.video.duration,
-            request.density,
-            request.prioritySeconds,
-          );
-          set({ previewVersion: get().previewVersion + 1 });
-        }
-      })();
-    }, DENSITY_DEBOUNCE_MS);
   },
 
   attachEngine: async (canvas) => {
@@ -1440,6 +1298,34 @@ export const useStudio = create<StudioState>((set, get) => ({
     if (trackIds.length === 0) return;
 
     state.run({ type: 'splitClips', trackIds, at: state.playhead() }, 'Split');
+  },
+
+  removeEmptyTracks: () => {
+    const state = get();
+    const project = state.project();
+    const removing = emptyTracksToRemove(project, state.sequenceId);
+
+    if (removing.length === 0) {
+      set({ status: 'No empty tracks to remove.' });
+      return;
+    }
+
+    // The selection is by clip, so an empty track cannot hold one — but the track
+    // the Inspector is pointed at can be one of these, and it is about to go.
+    if (state.selectedTrackId && removing.includes(state.selectedTrackId)) {
+      set({ selectedTrackId: null });
+    }
+
+    state.runMany(
+      removing.map((trackId) => ({ type: 'removeTrack' as const, trackId })),
+      removing.length === 1 ? 'Remove empty track' : 'Remove empty tracks',
+    );
+    set({
+      status:
+        removing.length === 1
+          ? 'Removed 1 empty track.'
+          : `Removed ${removing.length} empty tracks.`,
+    });
   },
 
   addTransitionOnCuts: (cuts, transitionType, duration, label = 'Add transition') => {
@@ -1826,46 +1712,33 @@ export const useStudio = create<StudioState>((set, get) => ({
     const engine = get().engine;
     if (!engine) return;
 
-    let cache = get().previews;
-    if (!cache) {
-      // Progress reuses the version counter the finished previews already ride on,
-      // so a moving bar re-renders the bin and the lanes by the same route.
-      cache = new PreviewCache(engine.media, () =>
+    let store = get().previews;
+    if (!store) {
+      // One counter carries every preview change to the UI: peaks arriving, a
+      // thumbnail decoding, a card's poster landing. The lanes paint themselves, so
+      // for them this only needs to be a nudge, not a description of what changed.
+      store = new PreviewStore(engine.media, () =>
         set({ previewVersion: get().previewVersion + 1 }),
       );
-      set({ previews: cache });
+      set({ previews: store });
     }
 
-    const assets = Object.values(get().project().assets);
-
-    // Mark the whole queue before starting on it. Previews are built one asset at a
-    // time, so without this the tenth import shows nothing at all until the ninth
-    // has finished — which looks like it failed rather than like it is waiting.
-    for (const asset of assets) {
-      if (asset.status.state !== 'ready' || asset.kind === 'image') continue;
-      cache.markQueued(asset.id, Boolean(asset.video), Boolean(asset.audio));
-    }
-
-    for (const asset of assets) {
+    for (const asset of Object.values(get().project().assets)) {
       if (asset.status.state !== 'ready') continue;
 
-      // Stills have no frames to walk; the file itself is the thumbnail.
+      // A still is its own thumbnail; there is nothing to decode for the card.
       if (asset.kind === 'image') {
         const file = get().mediaFiles.get(asset.id);
-        const size = asset.image?.size;
-        if (file && size) cache.setStillPoster(asset.id, URL.createObjectURL(file), size);
-        set({ previewVersion: get().previewVersion + 1 });
+        if (file) store.setPosterUrl(asset.id, URL.createObjectURL(file));
         continue;
       }
 
-      await cache.ensure(asset.id, asset.video?.duration ?? null, asset.audio?.duration ?? null);
-      set({ previewVersion: get().previewVersion + 1 });
-      /*
-       * Zoom may have changed while the first strip was still decoding. In that
-       * case the density request arrived before its starter preview existed. Re-read
-       * the current viewport now that the filmstrip and waveform can be upgraded.
-       */
-      if (asset.video || asset.audio) get().refreshPreviewDensity();
+      // Peaks are the one preview worth reading ahead of being looked at: the whole
+      // file has to be decoded for them, so waiting until a clip is on screen would
+      // mean waiting through the decode with a flat clip. Thumbnails are the
+      // opposite — the painter asks for the handful under the viewport.
+      if (asset.audio) store.ensurePeaks(asset.id, asset.audio.sampleRate, asset.audio.duration);
+      store.ensurePoster(asset.id, Boolean(asset.video), asset.audio?.duration ?? null);
     }
   },
 
@@ -2544,4 +2417,30 @@ export function planPlacement(
 export function orderedTrackIds(project: Project, sequenceId: SequenceId): readonly TrackId[] {
   const sequence = getSequence(project, sequenceId);
   return [...[...sequence.videoTrackIds].reverse(), ...sequence.audioTrackIds];
+}
+
+/**
+ * The tracks a "remove empty tracks" sweep would take.
+ *
+ * Shared with the menus, so what they grey out and what the command does cannot
+ * drift apart.
+ *
+ * A stack that is empty all the way down keeps its first track: a sequence with no
+ * video lane has nowhere to drop a picture, and the counterpart-filling in
+ * `planPlacement` would only have to build one back. Tidying is not worth handing
+ * back a sequence you have to repair before using.
+ */
+export function emptyTracksToRemove(
+  project: Project,
+  sequenceId: SequenceId,
+): readonly TrackId[] {
+  const sequence = getSequence(project, sequenceId);
+  const removing: TrackId[] = [];
+
+  for (const list of [sequence.videoTrackIds, sequence.audioTrackIds]) {
+    const empty = list.filter((trackId) => project.tracks[trackId]?.clipIds.length === 0);
+    removing.push(...(empty.length === list.length ? empty.slice(1) : empty));
+  }
+
+  return removing;
 }

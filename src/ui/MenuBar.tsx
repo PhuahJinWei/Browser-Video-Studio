@@ -43,7 +43,7 @@ import {
 } from './Icons';
 import * as T from '../model/time';
 import { useLayout } from './layout';
-import { useStudio } from './store';
+import { emptyTracksToRemove, useStudio } from './store';
 import { useDialog } from './Dialog';
 
 /**
@@ -139,6 +139,7 @@ export function MenuBar({
   const addTitle = useStudio((s) => s.addTitle);
   const addSolid = useStudio((s) => s.addSolid);
   const splitAtPlayhead = useStudio((s) => s.splitAtPlayhead);
+  const removeEmptyTracks = useStudio((s) => s.removeEmptyTracks);
   const captureFrame = useStudio((s) => s.captureFrame);
   const inspectorOpen = useLayout((s) => s.inspectorOpen);
   const toggleInspector = useLayout((s) => s.toggleInspector);
@@ -154,6 +155,7 @@ export function MenuBar({
   const project = history.present.project;
   const sequence = project.sequences[sequenceId]!;
   const hasSelection = selection.length > 0;
+  const emptyTrackCount = emptyTracksToRemove(project, sequenceId).length;
 
   // The first selected clip drives the Clip menu's toggles.
   const clip = selection.length > 0 ? project.clips[selection[0]!] : undefined;
@@ -338,6 +340,16 @@ export function MenuBar({
           label: 'Add audio track',
           icon: <IconAudio />,
           onSelect: () => run({ type: 'addTrack', sequenceId, kind: 'audio' }, 'Add audio track'),
+        },
+        'separator',
+        {
+          label:
+            emptyTrackCount > 0
+              ? `Remove ${emptyTrackCount} empty track${emptyTrackCount === 1 ? '' : 's'}`
+              : 'Remove empty tracks',
+          icon: <IconTrash />,
+          disabled: emptyTrackCount === 0,
+          onSelect: removeEmptyTracks,
         },
         'separator',
         {

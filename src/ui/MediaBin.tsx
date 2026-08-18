@@ -664,9 +664,10 @@ function AssetCard({
   const menu = useContextMenu();
 
   const duration = asset.video?.duration ?? asset.audio?.duration;
-  const film = previews?.getFilmstrip(asset.id);
-  const wave = previews?.getWaveform(asset.id);
-  const progress = previews?.getProgress(asset.id) ?? null;
+  // One picture per card, made once and kept: a video's first frame, or a whole-file
+  // waveform for a sound. Unlike the lanes, a card never changes with zoom.
+  const poster = previews?.getPosterUrl(asset.id) ?? null;
+  const progress = previews?.getPeaksProgress(asset.id) ?? null;
   const missing = asset.status.state === 'missing';
 
   /*
@@ -791,17 +792,13 @@ function AssetCard({
       // with the browser's own tooltip appearing on top a moment later.
     >
       <div className="bin-thumb">
-        {film ? (
-          // A dedicated poster rendered in the same decode pass as the filmstrip:
-          // the strip's own frames are ~78px wide and look soft blown up to card size.
+        {poster ? (
           <div
-            className="bin-thumb-image"
-            style={{ backgroundImage: `url(${film.posterUrl})`, backgroundSize: 'cover' }}
-          />
-        ) : wave ? (
-          <div
-            className="bin-thumb-image wave"
-            style={{ backgroundImage: `url(${wave.url})`, backgroundSize: '100% 70%' }}
+            className={`bin-thumb-image${asset.video ? '' : ' wave'}`}
+            style={{
+              backgroundImage: `url(${poster})`,
+              backgroundSize: asset.video ? 'cover' : '100% 70%',
+            }}
           />
         ) : (
           <div className={`bin-thumb-placeholder${progress !== null ? ' pending' : ''}`}>
