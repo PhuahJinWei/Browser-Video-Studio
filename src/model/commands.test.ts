@@ -4,7 +4,7 @@ import { describeSources, describeTrack, insertCommand, makeFixture, run, runFro
 import { keyframe, keyframedParam, staticParam } from './params';
 import { getClip, getTrack, ModelError } from './selectors';
 import * as T from './time';
-import type { AudioClip, ClipId, Project, VideoClip } from './types';
+import type { AudioClip, ClipId, Project, TitleClip, VideoClip } from './types';
 import { assertValidProject, validateProject } from './validate';
 
 let f: Fixture;
@@ -18,6 +18,13 @@ function clipsOf(p: Project, trackId: string): readonly ClipId[] {
 }
 
 describe('purity', () => {
+  it('changes the project proxy policy through the command layer', () => {
+    const next = apply(f.project, { type: 'setProjectProxyMode', mode: 'always' }, f.ids);
+    expect(next.settings.proxyMode).toBe('always');
+    expect(f.project.settings.proxyMode).toBe('auto');
+    expect(validateProject(next)).toEqual([]);
+  });
+
   it('never mutates the input project', () => {
     const before = JSON.stringify(f.project);
     run(f, insertCommand(f, { trackId: f.v1, start: sec(0), duration: sec(4), name: 'A' }));
@@ -657,6 +664,43 @@ describe('animatable clip properties', () => {
         /finite and non-zero/,
       );
     }
+  });
+
+  it('sets a positive speed ramp and protects source bounds', () => {
+    const p1 = run(f, insertCommand(f, { trackId: f.v1, start: sec(0), duration: sec(4) }));
+    const [clipId] = clipsOf(p1, f.v1);
+    const ramp = keyframedParam([keyframe(T.TIME_ZERO, 1), keyframe(sec(4), 2)]);
+    const p2 = runFrom(f, p1, { type: 'setClipSpeedRamp', clipId: clipId!, param: ramp });
+    expect((getClip(p2, clipId!) as VideoClip).speedRamp).toEqual(ramp);
+
+    expect(() => apply(p1, {
+      type: 'setClipSpeedRamp',
+      clipId: clipId!,
+      param: staticParam(-1),
+    }, f.ids)).toThrow(/greater than zero/);
+    expect(() => apply(p1, {
+      type: 'setClipSpeedRamp',
+      clipId: clipId!,
+      param: staticParam(4),
+    }, f.ids)).toThrow(/end of the source/);
+  });
+  it('edits title copy and typography without replacing the clip', () => {
+    const p1 = run(f, {
+      type: 'insertClip',
+      trackId: f.v1,
+      mode: 'overwrite',
+      clip: { kind: 'title', start: sec(0), duration: sec(3), text: 'Before' },
+    });
+    const [clipId] = clipsOf(p1, f.v1);
+    const p2 = runFrom(f, p1, {
+      type: 'setTitleProps',
+      clipId: clipId!,
+      text: 'After',
+      style: { fontSizePx: 96, fontWeight: 700, align: 'left', color: '#ffcc00' },
+    });
+    const title = getClip(p2, clipId!) as TitleClip;
+    expect(title.text).toBe('After');
+    expect(title.style).toMatchObject({ fontSizePx: 96, fontWeight: 700, align: 'left', color: '#ffcc00' });
   });
 });
 

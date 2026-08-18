@@ -102,8 +102,14 @@ export interface WaveformPreview {
  * screen doubles that again — so the old 44px strip was being blown up better than
  * threefold. These are sized for a generous track at 2x, which is the same reasoning
  * the bin poster below already used.
+ *
+ * The starter stays at 160: it is one image across the whole source, and the
+ * encoder's width limit already caps how many frames it can hold. The zoom tiles are
+ * small and are what is actually on screen once the viewport has been refined, so
+ * they get the full 320 a lane can be dragged to on a 2x display.
  */
 const FILMSTRIP_HEIGHT = 160;
+const FILMSTRIP_TILE_HEIGHT = 320;
 
 /**
  * The starter atlas still has to fit one browser canvas. Zoom-specific levels only
@@ -111,6 +117,11 @@ const FILMSTRIP_HEIGHT = 160;
  * allocating one enormous bitmap.
  */
 const MAX_STARTER_FILMSTRIP_FRAMES = 120;
+/**
+ * A starter this coarse still reads as a strip. Below it, a source's keyframes are
+ * too few to sample from and the frames between them too few to be worth avoiding.
+ */
+const MIN_KEYFRAME_STARTER_FRAMES = 24;
 const MAX_FILMSTRIP_LEVEL_FRAMES = 12_000;
 /** Small enough to appear quickly; large enough not to flood CSS with layers. */
 const FILMSTRIP_FRAMES_PER_TILE = 8;
@@ -149,7 +160,22 @@ export function densityForZoom(
 }
 /** Bin cards are ~220 CSS px wide; 2x that stays crisp on a HiDPI display. */
 const POSTER_WIDTH = 440;
-const WAVEFORM_HEIGHT = 160;
+/*
+ * Tall enough that a lane never enlarges it.
+ *
+ * A waveform is drawn as hard-edged one-pixel columns, and CSS then fits the image
+ * to the lane; enlarge it and every edge softens into a two-pixel blur. A lane can be
+ * dragged to 160 CSS px, which on a 2x display is 320 device rows, so that is what
+ * the raster has to be. (The old 160 was being blown up ~1.5-2x on any HiDPI screen
+ * with a tall track -- exactly the "blurry when zoomed in" that got reported.)
+ */
+const WAVEFORM_HEIGHT = 320;
+/**
+ * WebP will not encode a side longer than this. `convertToBlob` does not fail past
+ * it -- it silently *crops* the image to the first 16,383 pixels, which for a strip
+ * meant the first half of the source stretched across the whole clip.
+ */
+const WEBP_MAX_DIMENSION = 16_383;
 /*
  * Columns across the whole source. A clip can be far wider than this on screen when
  * zoomed in, but a waveform is an envelope rather than a picture: past a few thousand
@@ -210,6 +236,89 @@ export interface GenerateOptions {
   readonly onProgress?: ProgressListener;
   /** Frames per second of source. Defaults to the cheap one-frame-per-second starter. */
   readonly framesPerSecond?: number;
+  /**
+   * The strip so far, called every `PARTIAL_PUBLISH_MS` while frames are still
+   * arriving. Each is a complete image of the whole source with the undecoded slots
+   * still dark, laid out identically to the finished one, so a caller can show it
+   * in place and swap it for the next without moving anything.
+   */
+  readonly onPartial?: (strip: Filmstrip) => void;
+}
+
+/**
+ * How often a strip in progress is published.
+ *
+ * Encoding the whole atlas costs ~150 ms off the main thread, so per frame would
+ * spend more time publishing than decoding. Under a second keeps the clip visibly
+ * filling in; a long source used to sit as a flat colour for half a minute or more
+ * with nothing to say it was being worked on.
+ */
+const PARTIAL_PUBLISH_MS = 700;
+
+/** Long enough for every lane to have repainted from the strip that replaced them. */
+const REVOKE_DELAY_MS = 2_000;
+
+/**
+ * How often a moving progress bar is allowed to re-render the UI.
+ *
+ * Every decoded frame used to notify, and every notification re-renders the
+ * timeline and the bin -- at twenty frames a second that was most of the main
+ * thread going to bars nobody can read that fast. Ten a second is smooth to look at.
+ */
+const PROGRESS_NOTIFY_MS = 100;
+
+/**
+ * Where to sample a source for a strip of `slotCount` thumbnails.
+ *
+ * Decoding is what a filmstrip costs, and where it costs is the keyframe: any other
+ * frame needs every frame since the last keyframe decoded first, which on a long
+ * clip with a sparse keyframe interval is dozens per thumbnail. A keyframe decodes
+ * alone. So when the source has at least one keyframe per slot, each slot shows the
+ * keyframe closest to it -- a coarse strip is a sample of the picture, not a frame-
+ * accurate one, and this is the difference between a strip in a second and one in
+ * a minute. A source too short to have that many keyframes is sampled at the middle
+ * of each slot instead, where the frames between are few and cheap.
+ *
+ * Returned in order, and always one per slot, so a decoder can take the whole list
+ * in one pass.
+ */
+export async function sampleTimes(
+  media: Pick<MediaLibrary, 'keyframeTimes'>,
+  assetId: AssetId,
+  sourceSeconds: number,
+  slotCount: number,
+  slotSeconds: number,
+  firstSlot = 0,
+): Promise<number[]> {
+  const keyframes = await media.keyframeTimes(assetId).catch(() => [] as readonly number[]);
+  const last = sourceSeconds - Math.min(sourceSeconds / 2, 0.000_001);
+  const middleOf = (slot: number): number => Math.min(last, (slot + 0.5) * slotSeconds);
+
+  const spacing = keyframes.length > 1 ? sourceSeconds / keyframes.length : Infinity;
+  if (spacing > slotSeconds) {
+    return Array.from({ length: slotCount }, (_, i) => middleOf(firstSlot + i));
+  }
+
+  const times: number[] = [];
+  let cursor = 0;
+  for (let i = 0; i < slotCount; i++) {
+    const slot = firstSlot + i;
+    const start = slot * slotSeconds;
+    const end = start + slotSeconds;
+    // The first keyframe at or after the slot begins -- the picture nearest its
+    // left edge, which is where a thumbnail is read as belonging. Not the last one
+    // before it ends: with keyframes on the slot boundaries, and slots a hair wider
+    // than the keyframe interval, that took every slot's *next* keyframe and put
+    // the whole strip one cell late. Keyframes and slots are both in order, so the
+    // walk only ever goes forward, and no two slots can share a keyframe.
+    while (cursor < keyframes.length && keyframes[cursor]! < start) cursor++;
+    const candidate = keyframes[cursor];
+    // A slot with no keyframe of its own would repeat its neighbour's picture.
+    // Better one exact decode than a strip that stutters.
+    if (candidate !== undefined && candidate < end) times.push(Math.min(last, candidate));
+    else times.push(middleOf(slot));
+  }
+  return times;
 }
 
 /**
@@ -222,24 +331,37 @@ export async function generateFilmstrip(
   duration: Time,
   options: GenerateOptions = {},
 ): Promise<Filmstrip | null> {
-  const { signal, onProgress } = options;
+  const { signal, onProgress, onPartial } = options;
   const sourceSeconds = T.toSeconds(duration);
   if (sourceSeconds <= 0) return null;
 
   // Floored so short clips still read as a strip, and capped so neither the
   // decode nor the canvas runs away on a long one.
   const framesPerSecond = options.framesPerSecond ?? 1;
-  const frameCount = Math.max(
+  let frameCount = Math.max(
     4,
     filmstripFrameCount(sourceSeconds, framesPerSecond, MAX_STARTER_FILMSTRIP_FRAMES),
   );
-
+  // On a long source, no finer than its keyframes: that makes every thumbnail a
+  // single decode, and the zoom tiles refine wherever the viewport actually is.
+  // A short source has too few keyframes for a strip and is cheap to decode anyway.
+  const keyframeCount = (await media.keyframeTimes(assetId).catch(() => [])).length;
+  if (keyframeCount >= MIN_KEYFRAME_STARTER_FRAMES && keyframeCount < frameCount) {
+    frameCount = keyframeCount;
+  }
   const probe = await media.getFrame(assetId, T.TIME_ZERO).catch(() => null);
   if (!probe) return null;
 
   const aspect = probe.displayWidth / probe.displayHeight || 16 / 9;
   const frameWidth = Math.max(2, Math.round(FILMSTRIP_HEIGHT * aspect));
   probe.close();
+
+  // The starter is one image, and the encoder has a hard limit on how wide one can
+  // be. Past it the strip is not refused but cropped, so the count has to give way:
+  // a coarser strip is still the right strip, and the zoom tiles are what carry
+  // detail on a long source anyway.
+  frameCount = Math.max(4, Math.min(frameCount, Math.floor(WEBP_MAX_DIMENSION / frameWidth)));
+  const slotSeconds = sourceSeconds / frameCount;
 
   /*
    * Frames are contiguous on purpose.
@@ -265,46 +387,75 @@ export async function generateFilmstrip(
     posterCtx.fillRect(0, 0, POSTER_WIDTH, posterHeight);
   }
 
-  for (let i = 0; i < frameCount; i++) {
-    if (signal?.aborted) return null;
-    // Sample from the middle of each slot rather than its edge, so the first frame
-    // is not a black lead-in and the last is not past the end.
-    const at = T.fromSeconds((sourceSeconds * (i + 0.5)) / frameCount, 1_000_000);
-    const sample = await media.getFrame(assetId, at).catch(() => null);
-    if (!sample) continue;
-
-    const frame = sample.toVideoFrame();
-    try {
-      ctx.drawImage(frame, i * frameWidth, 0, frameWidth, FILMSTRIP_HEIGHT);
-      // The first sampled frame doubles as the poster, at full size.
-      if (i === 0 && posterCtx) posterCtx.drawImage(frame, 0, 0, POSTER_WIDTH, posterHeight);
-    } finally {
-      frame.close();
-      sample.close();
-    }
-    // Reported per frame rather than in chunks: forty decodes is already a coarse
-    // enough scale, and a bar that only moves in fifths reads as a stalled one.
-    onProgress?.((i + 1) / frameCount);
-  }
-
-  const [stripBlob, posterBlob] = await Promise.all([
-    // The strip is scaled again by CSS. A low-quality intermediate makes that
-    // second sampling expose block edges and mosquito noise at deep zoom.
-    canvas.convertToBlob({ type: 'image/webp', quality: 0.92 }),
-    poster.convertToBlob({ type: 'image/webp', quality: 0.9 }),
-  ]);
-
-  return {
-    url: URL.createObjectURL(stripBlob),
+  const describe = (url: string, posterUrl: string): Filmstrip => ({
+    url,
     frameWidth,
     frameHeight: FILMSTRIP_HEIGHT,
     framesPerSecond: frameCount / sourceSeconds,
     frameCount,
     sourceSeconds,
-    posterUrl: URL.createObjectURL(posterBlob),
+    posterUrl,
     posterWidth: POSTER_WIDTH,
     posterHeight,
+  });
+
+  // The poster is the first frame at full size, so it can go out with the first
+  // partial rather than waiting for the last thumbnail: the bin card is what most
+  // people are looking at while the strip builds.
+  let posterUrl: string | null = null;
+  let lastPublished = performance.now();
+  const encodePoster = async (): Promise<string> => {
+    posterUrl ??= URL.createObjectURL(await poster.convertToBlob({ type: 'image/webp', quality: 0.9 }));
+    return posterUrl;
   };
+  const publish = async (): Promise<void> => {
+    if (!onPartial || signal?.aborted) return;
+    // The strip is scaled again by CSS. A low-quality intermediate makes that
+    // second sampling expose block edges and mosquito noise at deep zoom.
+    const [stripBlob, posterHref] = await Promise.all([
+      canvas.convertToBlob({ type: 'image/webp', quality: 0.92 }),
+      encodePoster(),
+    ]);
+    if (signal?.aborted) return;
+    onPartial(describe(URL.createObjectURL(stripBlob), posterHref));
+    lastPublished = performance.now();
+  };
+
+  const times = await sampleTimes(media, assetId, sourceSeconds, frameCount, slotSeconds);
+  let i = 0;
+  for await (const sample of media.framesAt(assetId, times)) {
+    if (signal?.aborted) {
+      sample?.close();
+      return null;
+    }
+    if (sample) {
+      const frame = sample.toVideoFrame();
+      try {
+        ctx.drawImage(frame, i * frameWidth, 0, frameWidth, FILMSTRIP_HEIGHT);
+        if (i === 0 && posterCtx) posterCtx.drawImage(frame, 0, 0, POSTER_WIDTH, posterHeight);
+      } finally {
+        frame.close();
+        sample.close();
+      }
+    }
+    i++;
+    // Reported per frame rather than in chunks: forty decodes is already a coarse
+    // enough scale, and a bar that only moves in fifths reads as a stalled one.
+    onProgress?.(i / frameCount);
+    // The first frame goes out at once -- it carries the poster -- and the rest on
+    // a timer, so a fast decode is not slowed by publishing and a slow one still
+    // shows life. Never on the last: the finished strip is published by the return.
+    if (i < frameCount && (i === 1 || performance.now() - lastPublished >= PARTIAL_PUBLISH_MS)) {
+      await publish();
+    }
+  }
+  if (signal?.aborted) return null;
+
+  const [stripBlob, posterHref] = await Promise.all([
+    canvas.convertToBlob({ type: 'image/webp', quality: 0.92 }),
+    encodePoster(),
+  ]);
+  return describe(URL.createObjectURL(stripBlob), posterHref);
 }
 
 interface GenerateFilmstripTilesOptions extends GenerateOptions {
@@ -339,7 +490,7 @@ async function generateFilmstripTiles(
   const probe = await media.getFrame(assetId, T.TIME_ZERO).catch(() => null);
   if (!probe) return false;
   const aspect = probe.displayWidth / probe.displayHeight || 16 / 9;
-  const frameWidth = Math.max(2, Math.round(FILMSTRIP_HEIGHT * aspect));
+  const frameWidth = Math.max(2, Math.round(FILMSTRIP_TILE_HEIGHT * aspect));
   probe.close();
 
   const tileCount = Math.ceil(frameCount / FILMSTRIP_FRAMES_PER_TILE);
@@ -369,7 +520,7 @@ async function generateFilmstripTiles(
     if (generatedTiles >= MAX_NEW_TILES_PER_PASS) break;
     if (signal?.aborted) return false;
 
-    const canvas = new OffscreenCanvas(frameWidth * count, FILMSTRIP_HEIGHT);
+    const canvas = new OffscreenCanvas(frameWidth * count, FILMSTRIP_TILE_HEIGHT);
     const ctx = canvas.getContext('2d');
     if (!ctx) return false;
     ctx.imageSmoothingEnabled = true;
@@ -377,26 +528,26 @@ async function generateFilmstripTiles(
     ctx.fillStyle = '#11141b';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    for (let local = 0; local < count; local++) {
-      if (signal?.aborted) return false;
-      const frameIndex = firstFrame + local;
-      const at = T.fromSeconds(
-        Math.min(
-          sourceSeconds - Math.min(sourceSeconds / 2, 0.000_001),
-          (frameIndex + 0.5) / framesPerSecond,
-        ),
-        1_000_000,
-      );
-      const sample = await media.getFrame(assetId, at).catch(() => null);
+    // One decoder pass per tile rather than one seek per frame: neighbouring
+    // thumbnails usually share a group of pictures, whose lead-in is then decoded
+    // once for all of them instead of once each.
+    const times = await sampleTimes(media, assetId, sourceSeconds, count, 1 / framesPerSecond, firstFrame);
+    let local = 0;
+    for await (const sample of media.framesAt(assetId, times)) {
+      if (signal?.aborted) {
+        sample?.close();
+        return false;
+      }
       if (sample) {
         const frame = sample.toVideoFrame();
         try {
-          ctx.drawImage(frame, local * frameWidth, 0, frameWidth, FILMSTRIP_HEIGHT);
+          ctx.drawImage(frame, local * frameWidth, 0, frameWidth, FILMSTRIP_TILE_HEIGHT);
         } finally {
           frame.close();
           sample.close();
         }
       }
+      local++;
       completedFrames++;
       onProgress?.(completedFrames / frameCount);
     }
@@ -667,6 +818,7 @@ export class PreviewCache {
    * decoder has reached it.
    */
   private readonly progress = new Map<AssetId, { film: number | null; wave: number | null }>();
+  private notifyTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Called whenever a fraction moves, so the UI can re-render. */
   constructor(
@@ -710,11 +862,47 @@ export class PreviewCache {
     const next = { ...entry, [kind]: fraction };
     if (next.film === null && next.wave === null) this.progress.delete(assetId);
     else this.progress.set(assetId, next);
+    // Done is worth telling at once; a moving bar is not worth a re-render of the
+    // whole timeline per decoded frame, which is what it was costing.
+    if (fraction === null) this.notifyNow();
+    else this.notifySoon();
+  }
+
+  /** Coalesced notification for anything only a bar is waiting on. */
+  private notifySoon(): void {
+    if (this.notifyTimer !== null) return;
+    this.notifyTimer = setTimeout(() => {
+      this.notifyTimer = null;
+      this.onProgress?.();
+    }, PROGRESS_NOTIFY_MS);
+  }
+
+  private notifyNow(): void {
+    if (this.notifyTimer !== null) {
+      clearTimeout(this.notifyTimer);
+      this.notifyTimer = null;
+    }
     this.onProgress?.();
   }
 
   getFilmstrip(assetId: AssetId): Filmstrip | null | undefined {
     return this.filmstrips.get(assetId);
+  }
+
+  /**
+   * How far one kind of preview has got, or null when it is not being built.
+   *
+   * The timeline wants this per kind: a video clip and its own audio are two clips,
+   * and the strip routinely takes far longer than the waveform, so a combined
+   * figure would show the picture as half done when the sound is finished and the
+   * picture has barely started.
+   */
+  getKindProgress(assetId: AssetId, kind: 'film' | 'wave'): number | null {
+    // Zoom tiles also report under 'film', but they build a viewport's worth at a
+    // time and stop, so their fraction never reaches the end. The bar on a clip is
+    // about whether that clip's preview exists yet: the starter, and only that.
+    if (kind === 'film' && !this.pending.has(`film:${assetId}`)) return null;
+    return this.progress.get(assetId)?.[kind] ?? null;
   }
 
   /**
@@ -969,6 +1157,9 @@ export class PreviewCache {
     const existing = this.filmstrips.get(assetId);
     // `undefined` means nothing built yet — `ensure` owns that case.
     if (existing === undefined || existing === null) return;
+    // A partial starter is in the map while it builds. Two decoders on one file
+    // slow each other down, and `ensure` re-requests density the moment it is done.
+    if (this.pending.has(`film:${assetId}`)) return;
 
     const targetCount = filmstripFrameCount(existing.sourceSeconds, framesPerSecond);
     const priorityTile = Math.floor(
@@ -1070,13 +1261,31 @@ export class PreviewCache {
     if (videoDuration && !this.filmstrips.has(assetId)) {
       jobs.push(
         this.once(`film:${assetId}`, async () => {
+          // Partials go straight into the map, so the clip fills in as the frames
+          // land. Their URLs are only let go once the finished strip has replaced
+          // them on screen: revoking a URL a lane is still painting from leaves a
+          // blank clip until the next style pass.
+          const superseded: string[] = [];
           const strip = await generateFilmstrip(this.media, assetId, videoDuration, {
             onProgress: (fraction) => this.setProgress(assetId, 'film', fraction),
+            onPartial: (partial) => {
+              const previous = this.filmstrips.get(assetId);
+              if (previous) superseded.push(previous.url);
+              this.filmstrips.set(assetId, partial);
+              this.onProgress?.();
+            },
           }).catch(() => null);
+          const partial = this.filmstrips.get(assetId);
+          if (partial) superseded.push(partial.url);
           this.filmstrips.set(assetId, strip);
           // Cleared rather than pinned at 1: a finished preview is shown by the
           // image being there, and a bar stuck full reads as still working.
           this.setProgress(assetId, 'film', null);
+          if (superseded.length > 0) {
+            setTimeout(() => {
+              for (const url of superseded) URL.revokeObjectURL(url);
+            }, REVOKE_DELAY_MS);
+          }
         }),
       );
     }

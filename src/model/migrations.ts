@@ -82,6 +82,15 @@ const MIGRATIONS: Readonly<Record<number, MigrationStep>> = {
     }
     return { ...project, tracks: migrated, schemaVersion: 5 };
   },
+  /** 5 → 6: media clips gained an optional positive variable-speed curve. */
+  5: (project) => {
+    const clips = (project.clips ?? {}) as Record<string, Record<string, unknown>>;
+    const migrated: Record<string, unknown> = {};
+    for (const [id, clip] of Object.entries(clips)) {
+      migrated[id] = 'speed' in clip ? { ...clip, speedRamp: null } : clip;
+    }
+    return { ...project, clips: migrated, schemaVersion: 6 };
+  },
 };
 
 export function readSchemaVersion(project: unknown): number | null {

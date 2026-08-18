@@ -31,6 +31,7 @@ import type {
   TrackKind,
   Transition,
   TransitionId,
+  TitleClip,
 } from '../types';
 
 /** What a new clip should be made of. The clip's id comes from the `IdSource`. */
@@ -234,6 +235,10 @@ export type Command =
       readonly key: 'masterGainDb';
       readonly param: Param<number>;
     }
+  | {
+      readonly type: 'setProjectProxyMode';
+      readonly mode: 'auto' | 'always' | 'never';
+    }
   /**
    * Put a transition across the cut between two adjacent clips.
    *
@@ -306,6 +311,17 @@ export type Command =
       readonly duration: Time;
     }
   | { readonly type: 'setClipSpeed'; readonly clipId: ClipId; readonly speed: number }
+  | {
+      readonly type: 'setClipSpeedRamp';
+      readonly clipId: ClipId;
+      readonly param: Param<number> | null;
+    }
+  | {
+      readonly type: 'setTitleProps';
+      readonly clipId: ClipId;
+      readonly text?: string;
+      readonly style?: Partial<TitleClip['style']>;
+    }
   /** Break the video/audio link on every clip in these clips' groups. */
   | { readonly type: 'unlinkClips'; readonly clipIds: readonly ClipId[] }
   /** Put these clips into one link group so they move and trim together. */

@@ -13,6 +13,7 @@ import {
   ALL_FORMATS,
   AudioBufferSink,
   BlobSource,
+  EncodedPacketSink,
   Input,
   type InputAudioTrack,
   type InputVideoTrack,
@@ -56,6 +57,10 @@ interface MediaHandle {
   readonly audioTrack: InputAudioTrack | null;
   videoSink: VideoSampleSink | null;
   audioSink: AudioBufferSink | null;
+  /** Reads the container index without decoding; for finding keyframes. */
+  packetSink: EncodedPacketSink | null;
+  /** Presentation times of every video keyframe, walked once and kept. */
+  keyframes: Promise<readonly number[]> | null;
   readonly durationSeconds: number;
 }
 
@@ -274,6 +279,8 @@ export class MediaLibrary {
       audioTrack: null,
       videoSink: null,
       audioSink: null,
+      packetSink: null,
+      keyframes: null,
       durationSeconds,
     });
     // Any active walk belongs to the old source choice.
@@ -326,6 +333,8 @@ export class MediaLibrary {
         audioTrack,
         videoSink: null,
         audioSink: null,
+        packetSink: null,
+        keyframes: null,
         durationSeconds,
       };
       this.handles.set(assetId, handle);
@@ -360,6 +369,45 @@ export class MediaLibrary {
     const seconds = T.toSeconds(at);
     if (seconds < 0 || seconds > handle.durationSeconds) return null;
     return handle.audioSink.getBuffer(seconds);
+  }
+
+  /**
+   * The frames at a sorted list of source times, decoded in one pass.
+   *
+   * One decoder serves the whole list, and a run of times inside the same group of
+   * pictures decodes its lead-in once rather than once per time -- which is what
+   * `getFrame` in a loop does. Yields null where a time has no frame. Samples are
+   * owned by the caller.
+   */
+  async *framesAt(assetId: AssetId, seconds: readonly number[]): AsyncGenerator<VideoSample | null, void, unknown> {
+    const handle = await this.handleFor(assetId);
+    if (!handle.videoTrack) return;
+    handle.videoSink ??= new VideoSampleSink(handle.videoTrack);
+    yield* handle.videoSink.samplesAtTimestamps(seconds);
+  }
+
+  /**
+   * Presentation times of the video keyframes, in order.
+   *
+   * Read from the container index, so this costs a walk over the packet table and
+   * no decoding. A keyframe is the one picture that can be decoded on its own,
+   * which makes these the cheap places to sample a long source.
+   */
+  async keyframeTimes(assetId: AssetId): Promise<readonly number[]> {
+    const handle = await this.handleFor(assetId);
+    if (!handle.videoTrack) return [];
+    handle.packetSink ??= new EncodedPacketSink(handle.videoTrack);
+    const sink = handle.packetSink;
+    handle.keyframes ??= (async () => {
+      const times: number[] = [];
+      let packet = await sink.getFirstKeyPacket({ metadataOnly: true });
+      while (packet) {
+        times.push(packet.timestamp);
+        packet = await sink.getNextKeyPacket(packet, { metadataOnly: true });
+      }
+      return times;
+    })().catch(() => []);
+    return handle.keyframes;
   }
 
   /**

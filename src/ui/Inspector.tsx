@@ -11,7 +11,7 @@ import { defaultParams, EFFECT_REGISTRY, effectDefinition, listEffects } from '.
 import type { Command } from '../model/commands';
 import { DEFAULT_TRANSITION_SECONDS, TRANSITION_LABELS } from './transitions';
 import type { ClipParamKey } from '../model/commands';
-import { evalNumber, removeKeyframe, staticParam, upsertKeyframe } from '../model/params';
+import { evalNumber, keyframe, keyframedParam, removeKeyframe, staticParam, upsertKeyframe } from '../model/params';
 import {
   encoderSafeSequenceSize,
   matchableVideoAssets,
@@ -145,6 +145,7 @@ const SIZE_PRESETS: readonly { label: string; width: number; height: number }[] 
  */
 function SequenceInspector(): React.JSX.Element {
   const run = useStudio((s) => s.run);
+  const setProxyMode = useStudio((s) => s.setProxyMode);
   const history = useStudio((s) => s.history);
   const sequenceId = useStudio((s) => s.sequenceId);
   const selectedAssetIds = useStudio((s) => s.selectedAssetIds);
@@ -246,6 +247,22 @@ function SequenceInspector(): React.JSX.Element {
             </option>
           ))}
         </select>
+      </div>
+
+      <div className="field">
+        <label htmlFor="proxy-policy">Editing proxies</label>
+        <select
+          id="proxy-policy"
+          value={project.settings.proxyMode}
+          onChange={(event) => setProxyMode(event.target.value as Project['settings']['proxyMode'])}
+        >
+          <option value="auto">Automatic for media above 720p</option>
+          <option value="always">Automatic for every video</option>
+          <option value="never">Manual only</option>
+        </select>
+        <p className="hint" style={{ margin: 0 }}>
+          Proxies speed up preview only. Export always reads the original media.
+        </p>
       </div>
 
       {reference?.video && referenceSettings && (
@@ -720,6 +737,124 @@ function asSingleUnit(project: Project, selection: readonly ClipId[]): SelectedU
   };
 }
 
+function SpeedControls({
+  clips,
+  primary,
+  onCommit,
+}: {
+  readonly clips: readonly (VideoClip | AudioClip)[];
+  readonly primary: VideoClip | AudioClip;
+  readonly onCommit: () => void;
+}): React.JSX.Element {
+  const runMany = useStudio((s) => s.runMany);
+  const setPlayhead = useStudio((s) => s.setPlayhead);
+  const playhead = useStudio((s) => {
+    const sequence = s.history.present.project.sequences[s.sequenceId];
+    return sequence?.view.playhead ?? T.TIME_ZERO;
+  });
+  const at = T.clamp(T.sub(playhead, primary.start), T.TIME_ZERO, primary.duration);
+  const base = Math.abs(primary.speed) || 1;
+  const param = primary.speedRamp ?? staticParam(base);
+  const keyframes = primary.speedRamp?.kind === 'keyframed' ? primary.speedRamp.keyframes : [];
+  const active = keyframes.some((item) => T.eq(item.at, at));
+  const previous = [...keyframes].reverse().find((item) => T.lt(item.at, at));
+  const next = keyframes.find((item) => T.gt(item.at, at));
+
+  const setForAll = (
+    makeParam: (clip: VideoClip | AudioClip, relative: T.Time) => Param<number> | null,
+    label: string,
+  ): void => {
+    runMany(
+      clips.map((clip) => ({
+        type: 'setClipSpeedRamp' as const,
+        clipId: clip.id,
+        param: makeParam(
+          clip,
+          T.clamp(T.sub(playhead, clip.start), T.TIME_ZERO, clip.duration),
+        ),
+      })),
+      label,
+      `speed-ramp:${primary.id}`,
+    );
+  };
+
+  const baselineRamp = (clip: VideoClip | AudioClip, relative: T.Time): Param<number> => {
+    const rate = Math.abs(clip.speed) || 1;
+    let track = keyframedParam([
+      keyframe(T.TIME_ZERO, rate),
+      keyframe(clip.duration, rate),
+    ]);
+    track = upsertKeyframe(track, relative, rate);
+    return track;
+  };
+
+  return (
+    <>
+      <Slider
+        label="Playback rate"
+        value={evalNumber(param, at)}
+        min={0.1}
+        max={8}
+        step={0.05}
+        format={(value) => `${value.toFixed(2)}×`}
+        neutral={1}
+        neutralSnapSteps={2}
+        precisionInput
+        onChange={(value) => {
+          if (!primary.speedRamp) {
+            runMany(
+              clips.map((clip) => ({ type: 'setClipSpeed' as const, clipId: clip.id, speed: value })),
+              'Set clip speed',
+              `speed:${primary.id}`,
+            );
+            return;
+          }
+          setForAll((clip, relative) => upsertKeyframe(
+            clip.speedRamp ?? baselineRamp(clip, relative),
+            relative,
+            value,
+          ), 'Set speed ramp');
+        }}
+        animation={{
+          active,
+          count: keyframes.length,
+          canGoPrevious: Boolean(previous),
+          canGoNext: Boolean(next),
+          onToggle: () => {
+            setForAll((clip, relative) => {
+              const track = clip.speedRamp ?? baselineRamp(clip, relative);
+              const here = track.kind === 'keyframed' && track.keyframes.some((item) => T.eq(item.at, relative));
+              return here ? removeKeyframe(track, relative) : upsertKeyframe(track, relative, evalNumber(track, relative));
+            }, `${active ? 'Remove' : 'Add'} speed keyframe`);
+            onCommit();
+          },
+          onPrevious: () => previous && setPlayhead(T.add(primary.start, previous.at)),
+          onNext: () => next && setPlayhead(T.add(primary.start, next.at)),
+        }}
+        onCommit={onCommit}
+      />
+      {primary.speedRamp && (
+        <div className="field">
+          <button
+            onClick={() => {
+              const current = evalNumber(primary.speedRamp!, at);
+              runMany(
+                clips.map((clip) => ({ type: 'setClipSpeed' as const, clipId: clip.id, speed: current })),
+                'Flatten speed ramp',
+              );
+            }}
+          >
+            Make constant at {evalNumber(primary.speedRamp, at).toFixed(2)}×
+          </button>
+        </div>
+      )}
+      <p className="hint" style={{ margin: 0 }}>
+        Speed ramps keep the clip’s timeline duration fixed and consume more or less source media.
+      </p>
+    </>
+  );
+}
+
 /** Static numeric value of a parameter, or a fallback when it is keyframed. */
 function staticValue(param: Param<number>, fallback: number): number {
   return param.kind === 'static' ? param.value : fallback;
@@ -735,10 +870,12 @@ function UnitInspector({ unit }: { unit: SelectedUnit }): React.JSX.Element {
   const clip = unit.primary;
   // Effects from every member, so a linked pair shows its video and audio
   // effects in one list rather than hiding half of them.
-  const effects = unit.clips
-    .flatMap((c) => c.effects)
-    .map((id) => project.effects[id])
-    .filter((e): e is EffectInstance => e !== undefined);
+  const effects = unit.clips.flatMap((ownerClip) =>
+    ownerClip.effects.flatMap((id) => {
+      const effect = project.effects[id];
+      return effect ? [{ effect, ownerClip }] : [];
+    }),
+  );
 
   return (
     <>
@@ -824,6 +961,31 @@ function UnitInspector({ unit }: { unit: SelectedUnit }): React.JSX.Element {
         </div>
       </div>
 
+      {isMediaClip(clip) && clip.kind !== 'image' && clip.kind !== 'nested' && (
+        <details className="inspector-group" open={Boolean(clip.speedRamp)}>
+          <summary>Speed{clip.speedRamp ? ' · ramped' : ''}</summary>
+          <div className="inspector-group-body">
+            <SpeedControls
+              clips={unit.clips.filter(
+                (candidate): candidate is VideoClip | AudioClip =>
+                  isMediaClip(candidate) && candidate.kind !== 'image' && candidate.kind !== 'nested',
+              )}
+              primary={clip}
+              onCommit={endGesture}
+            />
+          </div>
+        </details>
+      )}
+
+      {unit.visual?.kind === 'title' && (
+        <details className="inspector-group" open>
+          <summary>Title</summary>
+          <div className="inspector-group-body">
+            <TitleControls clip={unit.visual} onCommit={endGesture} />
+          </div>
+        </details>
+      )}
+
       {unit.visual && (
         <details className="inspector-group" open>
           <summary>Video</summary>
@@ -851,8 +1013,8 @@ function UnitInspector({ unit }: { unit: SelectedUnit }): React.JSX.Element {
         <summary>Effects{effects.length > 0 ? ` (${effects.length})` : ''}</summary>
         <div className="inspector-group-body field">
           {effects.length === 0 && <p className="hint">None.</p>}
-          {effects.map((effect) => (
-            <EffectCard key={effect.id} effect={effect} />
+          {effects.map(({ effect, ownerClip }) => (
+            <EffectCard key={effect.id} effect={effect} ownerClip={ownerClip} />
           ))}
           <select
             value=""
@@ -894,6 +1056,135 @@ function UnitInspector({ unit }: { unit: SelectedUnit }): React.JSX.Element {
 
 interface ControlProps {
   onCommit: () => void;
+}
+
+function TitleControls({ clip, onCommit }: { clip: TitleClip; onCommit: () => void }): React.JSX.Element {
+  const run = useStudio((s) => s.run);
+  const setStyle = (style: Partial<TitleClip['style']>, label: string, key: string): void => run(
+    { type: 'setTitleProps', clipId: clip.id, style },
+    label,
+    `title:${clip.id}:${key}`,
+  );
+
+  return (
+    <>
+      <div className="field">
+        <label htmlFor={`title-text-${clip.id}`}>Text</label>
+        <textarea
+          id={`title-text-${clip.id}`}
+          rows={3}
+          value={clip.text}
+          onChange={(event) => run(
+            { type: 'setTitleProps', clipId: clip.id, text: event.target.value },
+            'Edit title text',
+            `title:${clip.id}:text`,
+          )}
+          onBlur={onCommit}
+        />
+      </div>
+      <div className="field">
+        <label htmlFor={`title-font-${clip.id}`}>Font</label>
+        <select
+          id={`title-font-${clip.id}`}
+          value={clip.style.fontFamily}
+          onChange={(event) => setStyle({ fontFamily: event.target.value }, 'Set title font', 'font')}
+          onBlur={onCommit}
+        >
+          <option value="Inter, system-ui, sans-serif">System sans</option>
+          <option value="Georgia, 'Times New Roman', serif">Serif</option>
+          <option value="ui-monospace, 'Cascadia Code', monospace">Monospace</option>
+          {![
+            'Inter, system-ui, sans-serif',
+            "Georgia, 'Times New Roman', serif",
+            "ui-monospace, 'Cascadia Code', monospace",
+          ].includes(clip.style.fontFamily) && (
+            <option value={clip.style.fontFamily}>{clip.style.fontFamily}</option>
+          )}
+        </select>
+      </div>
+      <Slider
+        label="Font size"
+        value={clip.style.fontSizePx}
+        min={8}
+        max={360}
+        step={1}
+        unit=" px"
+        precisionInput
+        onChange={(fontSizePx) => setStyle({ fontSizePx }, 'Set title size', 'size')}
+        onCommit={onCommit}
+      />
+      <div className="field">
+        <label htmlFor={`title-weight-${clip.id}`}>Weight</label>
+        <select
+          id={`title-weight-${clip.id}`}
+          value={clip.style.fontWeight}
+          onChange={(event) => setStyle({ fontWeight: Number(event.target.value) }, 'Set title weight', 'weight')}
+          onBlur={onCommit}
+        >
+          {[100, 200, 300, 400, 500, 600, 700, 800, 900].map((weight) => (
+            <option key={weight} value={weight}>{weight}</option>
+          ))}
+        </select>
+      </div>
+      <div className="field">
+        <label>Alignment</label>
+        <div className="value-row title-align-buttons">
+          {(['left', 'center', 'right'] as const).map((align) => (
+            <button
+              key={align}
+              className={clip.style.align === align ? 'on' : ''}
+              onClick={() => {
+                setStyle({ align }, 'Set title alignment', 'align');
+                onCommit();
+              }}
+            >
+              {align[0]!.toUpperCase() + align.slice(1)}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="field">
+        <label htmlFor={`title-colour-${clip.id}`}>Text colour</label>
+        <div className="value-row colour-value-row">
+          <input
+            id={`title-colour-${clip.id}`}
+            type="color"
+            value={/^#[0-9a-f]{6}$/i.test(clip.style.color) ? clip.style.color : '#ffffff'}
+            onChange={(event) => setStyle({ color: event.target.value }, 'Set title colour', 'colour')}
+            onBlur={onCommit}
+          />
+          <input
+            aria-label="Title text colour value"
+            value={clip.style.color}
+            onChange={(event) => setStyle({ color: event.target.value }, 'Set title colour', 'colour')}
+            onBlur={onCommit}
+          />
+        </div>
+      </div>
+      <div className="field">
+        <label htmlFor={`title-background-${clip.id}`}>Background</label>
+        <div className="value-row">
+          <input
+            id={`title-background-${clip.id}`}
+            value={clip.style.background ?? ''}
+            placeholder="Transparent"
+            onChange={(event) => setStyle(
+              { background: event.target.value.trim() || null },
+              'Set title background',
+              'background',
+            )}
+            onBlur={onCommit}
+          />
+          {clip.style.background && (
+            <button onClick={() => {
+              setStyle({ background: null }, 'Clear title background', 'background');
+              onCommit();
+            }}>Clear</button>
+          )}
+        </div>
+      </div>
+    </>
+  );
 }
 
 function VisualControls({
@@ -1146,7 +1437,14 @@ function AudioControls({
   );
 }
 
-function EffectCard({ effect }: { effect: EffectInstance }): React.JSX.Element {
+function EffectCard({
+  effect,
+  ownerClip,
+}: {
+  effect: EffectInstance;
+  /** Clip effects animate in clip-relative time; track effects remain static. */
+  ownerClip?: Clip;
+}): React.JSX.Element {
   const run = useStudio((s) => s.run);
   const endGesture = useStudio((s) => s.endGesture);
   const definition = effectDefinition(effect.effectType);
@@ -1180,10 +1478,31 @@ function EffectCard({ effect }: { effect: EffectInstance }): React.JSX.Element {
       {definition &&
         Object.entries(definition.params).map(([key, schema]) => {
           const param = effect.params[key];
-          const value =
-            param?.kind === 'static' && typeof param.value === 'number'
-              ? param.value
-              : schema.default;
+          const numericParam = param as Param<number> | undefined;
+          const value = numericParam
+            ? numericParam.kind === 'static'
+              ? numericParam.value
+              : evalNumber(numericParam, T.TIME_ZERO)
+            : schema.default;
+          if (ownerClip && numericParam) {
+            return (
+              <EffectParamSlider
+                key={key}
+                effect={effect}
+                ownerClip={ownerClip}
+                paramKey={key}
+                param={numericParam}
+                label={schema.label}
+                min={schema.min}
+                max={schema.max}
+                step={schema.step}
+                unit={schema.unit ? ` ${schema.unit}` : ''}
+                neutral={schema.default}
+                neutralSnapSteps={4}
+                onCommit={endGesture}
+              />
+            );
+          }
           return (
             <Slider
               key={key}
@@ -1213,7 +1532,6 @@ function EffectCard({ effect }: { effect: EffectInstance }): React.JSX.Element {
 }
 
 interface SliderAnimation {
-  readonly enabled: boolean;
   readonly active: boolean;
   readonly count: number;
   readonly canGoPrevious: boolean;
@@ -1221,6 +1539,63 @@ interface SliderAnimation {
   readonly onToggle: () => void;
   readonly onPrevious: () => void;
   readonly onNext: () => void;
+}
+
+/** Numeric effect parameter connected to a clip-relative keyframe track. */
+function EffectParamSlider({
+  effect,
+  ownerClip,
+  paramKey,
+  param,
+  ...slider
+}: Omit<SliderProps, 'value' | 'onChange' | 'animation'> & {
+  readonly effect: EffectInstance;
+  readonly ownerClip: Clip;
+  readonly paramKey: string;
+  readonly param: Param<number>;
+}): React.JSX.Element {
+  const run = useStudio((s) => s.run);
+  const setPlayhead = useStudio((s) => s.setPlayhead);
+  const playhead = useStudio((s) => {
+    const sequence = s.history.present.project.sequences[s.sequenceId];
+    return sequence?.view.playhead ?? T.TIME_ZERO;
+  });
+  const at = T.clamp(T.sub(playhead, ownerClip.start), T.TIME_ZERO, ownerClip.duration);
+  const keyframes = param.kind === 'keyframed' ? param.keyframes : [];
+  const active = keyframes.some((item) => T.eq(item.at, at));
+  const previous = [...keyframes].reverse().find((item) => T.lt(item.at, at));
+  const next = keyframes.find((item) => T.gt(item.at, at));
+  const commit = (track: Param<number>, label: string): void => run(
+    { type: 'setEffectParam', effectId: effect.id, key: paramKey, param: track },
+    label,
+    `param:${effect.id}:${paramKey}`,
+  );
+
+  return (
+    <Slider
+      {...slider}
+      value={evalNumber(param, at)}
+      onChange={(value) => commit(
+        param.kind === 'keyframed' ? upsertKeyframe(param, at, value) : staticParam(value),
+        `Set ${slider.label}`,
+      )}
+      animation={{
+        active,
+        count: keyframes.length,
+        canGoPrevious: Boolean(previous),
+        canGoNext: Boolean(next),
+        onToggle: () => {
+          commit(
+            active ? removeKeyframe(param, at) : upsertKeyframe(param, at, evalNumber(param, at)),
+            `${active ? 'Remove' : 'Add'} ${slider.label} keyframe`,
+          );
+          slider.onCommit();
+        },
+        onPrevious: () => previous && setPlayhead(T.add(ownerClip.start, previous.at)),
+        onNext: () => next && setPlayhead(T.add(ownerClip.start, next.at)),
+      }}
+    />
+  );
 }
 
 interface SliderProps {
@@ -1313,7 +1688,6 @@ function ParamSlider({
       value={toDisplay(value)}
       onChange={change}
       animation={{
-        enabled: param.kind === 'keyframed',
         active,
         count: keyframes.length,
         canGoPrevious: Boolean(previous),

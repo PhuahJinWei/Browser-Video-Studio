@@ -25,12 +25,14 @@ Import → edit → play → export, end to end, entirely on your machine.
 - **Library** with folders, a search that looks across all of them, multi-select (click, Ctrl, Shift), and grid or list view. Deleting media that is still cut into the timeline says so and offers to take the clips too, rather than silently refusing. Media that could not be found when a project reopened is marked, on the card and on the clip.
 - **Preview** composited on the GPU — transform, opacity, crop, eight blend modes, colour adjustment and gaussian blur.
 - **Source monitor editing.** Double-click media to preview the original, mark In and Out, then insert or overwrite the marked range at the program playhead. `I`, `O`, `,` and `.` provide the desktop-style shortcuts.
-- **Clip keyframes** for transform, opacity, crop, gain and pan, with add/remove and previous/next navigation directly in the inspector.
-- **Titles** rendered to a canvas and composited like any other layer.
+- **Clip and effect keyframes** for transform, opacity, crop, gain, pan, colour, blur and audio effects, with add/remove and previous/next navigation directly in the inspector.
+- **Titles** rendered to a canvas and composited like any other layer, with multiline copy, font, size, weight, alignment, foreground and background controls.
 - **Playback** with A/V sync driven by the audio clock. Seeking mid-playback re-bases the transport and keeps rolling.
 - **Fullscreen preview**, falling back to an in-page focus mode where the browser disallows fullscreen.
 - **Export** to MP4 (H.264 + AAC) or WebM (VP9 + Opus) at any resolution and bitrate. Chromium's file-system picker streams large exports directly to disk; other environments use a normal download fallback.
-- **Editing proxies.** Generate or remove a 720p-or-smaller proxy from a media item's context menu. Sequential preview uses it while frame-accurate seeks, audio and final export continue to use the original.
+- **Editing proxies.** Generate or remove a 720p-or-smaller proxy from a media item's context menu, or let the project create them automatically for large/all video. Sequential preview uses it while frame-accurate seeks, audio and final export continue to use the original.
+- **Variable speed** with clip-relative ramp keyframes. Video source time and audio playback rate share the integrated curve; trims and splits carry it correctly.
+- **Audio DSP** with keyframeable two-band EQ and compression in the same preview/export mix path.
 - **Group and link.** Clicking a clip selects everything linked or grouped with it, so delete and the inspector act on the whole unit; Alt-click isolates one member. Ctrl+G / Ctrl+Shift+G group and ungroup.
 - **Undo/redo** where a whole drag collapses into one step.
 - **Autosave** to OPFS — reload the page and your project comes back, media included.
@@ -39,7 +41,7 @@ Import → edit → play → export, end to end, entirely on your machine.
 
 ### Not yet built
 
-Nested sequences, speed ramps, advanced audio DSP, colour management, scopes, collaboration, a WASM codec fallback, and everything in L4–L5 below. Proxy creation is currently manual, and effect parameters do not yet expose their model-level keyframes in the inspector.
+Nested sequences, audio ducking, a graphical keyframe-curve editor, colour management, scopes, collaboration, a WASM codec fallback, and everything in L4–L5 below.
 
 ## Develop
 
@@ -86,8 +88,8 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design, where th
 | | |
 |---|---|
 | **L1** | ✅ Built — import, timeline, playback, effects, export, autosave |
-| **L2** | ✅ Transitions and core clip keyframes built; text styling and multi-select marquee remain |
-| **L3** | Editing proxies built; nested sequences, speed ramps, audio DSP and WASM codec fallback remain |
+| **L2** | ✅ Effect registry, transitions, clip/effect keyframes, styled titles and multi-select marquee built; graphical curve editing remains |
+| **L3** | Proxies, speed ramps, markers, EQ and compression built; nested sequences, ducking and WASM codec fallback remain |
 | **L4** | On-device AI: background segmentation, Whisper captions, scene detection, silence removal |
 | **L5** | Node-graph effects, GPU scopes, colour management |
 

@@ -8,6 +8,7 @@ import {
   evalParamMap,
   evalTransform,
   isAnimated,
+  integrateNumberParam,
   keyframe,
   keyframedParam,
   removeKeyframe,
@@ -69,6 +70,20 @@ describe('keyframed parameters', () => {
     expect(evalNumber(held, sec(1))).toBe(10); // held across the first segment
     expect(evalNumber(held, sec(2))).toBe(20);
     expect(evalNumber(held, sec(3))).toBe(25); // linear across the second
+  });
+
+  it('integrates static, linear and held numeric parameters', () => {
+    expect(integrateNumberParam(staticParam(2), T.TIME_ZERO, sec(3))).toBeCloseTo(6);
+    expect(integrateNumberParam(
+      keyframedParam([keyframe(T.TIME_ZERO, 1), keyframe(sec(2), 3)]),
+      T.TIME_ZERO,
+      sec(2),
+    )).toBeCloseTo(4);
+    expect(integrateNumberParam(
+      keyframedParam([keyframe(T.TIME_ZERO, 2, 'hold'), keyframe(sec(2), 7)]),
+      T.TIME_ZERO,
+      sec(2),
+    )).toBeCloseTo(4);
   });
 
   it('interpolate vectors component-wise', () => {

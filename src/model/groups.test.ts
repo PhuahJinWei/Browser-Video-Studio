@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { insertCommand, makeFixture, run, runFrom, sec, type Fixture } from './fixtures';
 import { migrateProject, MigrationError, needsMigration } from './migrations';
-import { expandSelection, getClip, selectionUnit } from './selectors';
-import type { ClipId, Project } from './types';
+import { expandSelection, getClip, isMediaClip, selectionUnit } from './selectors';
+import type { ClipId, Project, VideoClip } from './types';
 import { SCHEMA_VERSION } from './types';
 
 let f: Fixture;
@@ -213,6 +213,18 @@ describe('schema migration', () => {
       },
     });
     expect(customized.tracks[f.a1]!.height).toBe(40);
+  });
+
+  it('adds an empty speed ramp when upgrading a v5 project', () => {
+    const current = run(f, insertCommand(f, { trackId: f.v1, start: sec(0), duration: sec(2) }));
+    const legacy = { ...current, schemaVersion: 5 };
+    const clips = Object.fromEntries(Object.entries(legacy.clips).map(([id, clip]) => {
+      const { speedRamp, ...withoutRamp } = clip as VideoClip;
+      void speedRamp;
+      return [id, withoutRamp];
+    }));
+    const migrated = migrateProject({ ...legacy, clips });
+    expect(Object.values(migrated.clips).every((clip) => !isMediaClip(clip) || clip.speedRamp === null)).toBe(true);
   });
 
   it('leaves a current project alone', () => {

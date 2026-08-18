@@ -210,6 +210,43 @@ export function evalNumber(param: Param<number>, at: Time): number {
   return v;
 }
 
+/**
+ * Area under a numeric parameter between two clip-relative times.
+ *
+ * Constant, hold and linear sections are exact. Bezier easing is integrated with a
+ * fixed midpoint subdivision per keyframe section, which is deterministic and far
+ * more precise than the media timestamps it ultimately selects.
+ */
+export function integrateNumberParam(param: Param<number>, from: Time, to: Time): number {
+  if (T.eq(from, to)) return 0;
+  if (T.gt(from, to)) return -integrateNumberParam(param, to, from);
+  const start = T.toSeconds(from);
+  const end = T.toSeconds(to);
+  if (param.kind === 'static') return param.value * (end - start);
+
+  const boundaries = [
+    start,
+    ...param.keyframes
+      .map((item) => T.toSeconds(item.at))
+      .filter((at) => at > start && at < end),
+    end,
+  ];
+  let area = 0;
+  for (let section = 0; section < boundaries.length - 1; section++) {
+    const a = boundaries[section]!;
+    const b = boundaries[section + 1]!;
+    const midpoint = (a + b) / 2;
+    const active = [...param.keyframes].reverse().find((item) => T.toSeconds(item.at) <= midpoint);
+    const samples = active?.interp === 'bezier' ? 16 : 1;
+    const width = (b - a) / samples;
+    for (let i = 0; i < samples; i++) {
+      const sampleAt = a + (i + 0.5) * width;
+      area += evalNumber(param, T.fromSeconds(sampleAt, 1_000_000)) * width;
+    }
+  }
+  return area;
+}
+
 export function evalBoolean(param: Param<boolean>, at: Time): boolean {
   const v = evalParam(param, at);
   if (typeof v !== 'boolean') throw new Error(`Expected a boolean parameter, got ${typeof v}`);

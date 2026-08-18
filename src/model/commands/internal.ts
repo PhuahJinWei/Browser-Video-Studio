@@ -6,6 +6,7 @@
 
 import type { IdSource } from '../ids';
 import { clipEnd, clipRange, isMediaClip, ModelError } from '../selectors';
+import { integrateNumberParam } from '../params';
 import * as T from '../time';
 import type {
   AnimatableCrop,
@@ -50,6 +51,7 @@ export interface Draft {
   effects: Record<EffectInstanceId, EffectInstance>;
   transitions: Record<TransitionId, Transition>;
   markers: Record<MarkerId, Marker>;
+  settings: Project['settings'];
 }
 
 /** Shallow-copy the entity maps so handlers can mutate freely. */
@@ -63,6 +65,7 @@ export function newDraft(p: Project): Draft {
     effects: { ...p.effects },
     transitions: { ...p.transitions },
     markers: { ...p.markers },
+    settings: p.settings,
   };
 }
 
@@ -100,6 +103,7 @@ export function commitDraft(p: Project, d: Draft): Project {
     effects: reuseIfUnchanged(p.effects, d.effects),
     transitions: reuseIfUnchanged(p.transitions, d.transitions),
     markers: reuseIfUnchanged(p.markers, d.markers),
+    settings: d.settings,
   };
 }
 
@@ -279,6 +283,7 @@ export function shiftClipAnimation(clip: Clip, by: Time): Clip {
     case 'audio':
       return {
         ...clip,
+        speedRamp: clip.speedRamp ? shiftParam(clip.speedRamp, by) : null,
         gainDb: shiftParam(clip.gainDb, by),
         pan: shiftParam(clip.pan, by),
       };
@@ -292,6 +297,7 @@ export function shiftClipAnimation(clip: Clip, by: Time): Clip {
     default:
       return {
         ...clip,
+        speedRamp: clip.speedRamp ? shiftParam(clip.speedRamp, by) : null,
         transform: shiftTransform(clip.transform, by),
         opacity: shiftParam(clip.opacity, by),
         crop: shiftCrop(clip.crop, by),
@@ -326,7 +332,14 @@ export function trimClipIn(clip: Clip, delta: Time): Clip {
     duration: T.sub(clip.duration, delta),
   };
   if (!isMediaClip(clip)) return base as Clip;
-  const sourceDelta = clip.speed === 1 ? delta : T.scale(delta, clip.speed);
+  const sourceDelta = clip.speedRamp
+    ? T.fromSeconds(
+        integrateNumberParam(clip.speedRamp, T.TIME_ZERO, delta),
+        1_000_000,
+      )
+    : clip.speed === 1
+      ? delta
+      : T.scale(delta, clip.speed);
   return { ...base, sourceIn: T.add(clip.sourceIn, sourceDelta) } as Clip;
 }
 

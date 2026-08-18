@@ -47,6 +47,9 @@ export function validateProject(p: Project): readonly Violation[] {
   if (!p.sequences[p.activeSequenceId]) {
     out.push({ path: 'activeSequenceId', message: `No sequence "${p.activeSequenceId}"` });
   }
+  if (!['auto', 'always', 'never'].includes(p.settings.proxyMode)) {
+    out.push({ path: 'settings.proxyMode', message: `Unknown proxy mode "${String(p.settings.proxyMode)}"` });
+  }
 
   const effectOwners = new Map<string, string>();
   const clipTrackFromList = new Map<string, string>();
@@ -169,6 +172,14 @@ export function validateProject(p: Project): readonly Violation[] {
       }
       if (clip.speed === 0 || !Number.isFinite(clip.speed)) {
         out.push({ path: `${at}.speed`, message: `Speed must be finite and non-zero` });
+      }
+      if (clip.speedRamp) {
+        const rates = clip.speedRamp.kind === 'static'
+          ? [clip.speedRamp.value]
+          : clip.speedRamp.keyframes.map((item) => item.value);
+        if (rates.some((rate) => !Number.isFinite(rate) || rate <= 0)) {
+          out.push({ path: `${at}.speedRamp`, message: 'Speed-ramp rates must be finite and positive' });
+        }
       }
     }
     for (const effectId of clip.effects) {

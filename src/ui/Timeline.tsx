@@ -2119,8 +2119,21 @@ export function Timeline(): React.JSX.Element {
                         isMediaClip(clip) ? project.assets[clip.assetId] : undefined,
                         height,
                       )}
-                      loading={isMediaClip(clip) && previews?.getFilmstrip(clip.assetId) === undefined
-                        && previews?.getWaveform(clip.assetId) === undefined}
+                      // Judged by this clip's own preview, not by either of the
+                      // asset's two: the waveform lands long before the strip, and
+                      // the video clip used to lose its shimmer the moment its
+                      // audio was done, then sit flat for the rest of the decode.
+                      loading={
+                        isMediaClip(clip) &&
+                        (clip.kind === 'audio'
+                          ? previews?.getWaveform(clip.assetId) === undefined
+                          : previews?.getFilmstrip(clip.assetId) === undefined)
+                      }
+                      progress={
+                        isMediaClip(clip)
+                          ? (previews?.getKindProgress(clip.assetId, clip.kind === 'audio' ? 'wave' : 'film') ?? null)
+                          : null
+                      }
                       missing={
                         isMediaClip(clip) && project.assets[clip.assetId]?.status.state === 'missing'
                       }
@@ -2698,7 +2711,12 @@ function previewStyle(
 ): React.CSSProperties | undefined {
   if (!previews || !isMediaClip(clip)) return undefined;
 
-  const speed = Math.abs(clip.speed) || 1;
+  // A single CSS filmstrip cannot vary tile width continuously, so a ramp uses its
+  // average rate. This keeps the source endpoints truthful while playback supplies
+  // the exact integrated mapping frame by frame.
+  const speed = clip.speedRamp
+    ? Math.max(0.001, T.ratio(clipSourceSpan(clip), clip.duration))
+    : Math.abs(clip.speed) || 1;
   if (clip.kind !== 'audio') {
     const size = asset?.video?.size;
     const starter = previews.getFilmstrip(clip.assetId);
@@ -2763,10 +2781,8 @@ function previewStyle(
     };
   }
 
-  const preview = previews.getWaveformPreview(
-    clip.assetId,
-    waveformDensityForZoom(pxPerSecond, speed, window.devicePixelRatio),
-  );
+  const wantedDensity = waveformDensityForZoom(pxPerSecond, speed, window.devicePixelRatio);
+  const preview = previews.getWaveformPreview(clip.assetId, wantedDensity);
   if (!preview) return undefined;
 
   const clipSourceStart = T.toSeconds(clip.sourceIn);
@@ -2778,7 +2794,24 @@ function previewStyle(
   );
   if (layers.length === 0) return undefined;
 
+  /*
+   * Nearest-neighbour once the zoom wants tiles, bilinear before.
+   *
+   * A waveform is one-pixel columns. The tiles are cut so a column is exactly one
+   * device pixel, but a clip's background lands at a fractional device offset on
+   * any display whose scale is not a whole number -- 125 %, 150 % -- and bilinear
+   * sampling then blends every column with its neighbour into a two-pixel smear at
+   * half strength. That is the blur people saw at high zoom on HiDPI screens; at
+   * 100 % the offsets happen to be whole and it looked fine. Nearest-neighbour at a
+   * 1:1 scale is a pure shift and stays crisp. It is only switched on where the
+   * image is at or above screen density: shrinking a waveform without filtering
+   * drops columns, and the dropped columns are peaks.
+   */
+  const base = previews.getWaveform(clip.assetId);
+  const upscaling = base ? wantedDensity >= base.width / base.sourceSeconds : false;
+
   return {
+    ...(upscaling ? { imageRendering: 'pixelated' as const } : {}),
     backgroundImage: layers.map((layer) => `url(${layer.url})`).join(', '),
     backgroundSize: layers
       .map((layer) => `${(layer.sourceDuration / speed) * pxPerSecond}px 100%`)
@@ -2811,6 +2844,7 @@ function ClipView({
   selected,
   preview,
   loading,
+  progress,
   missing,
   onSelect,
   onDragStart,
@@ -2826,6 +2860,8 @@ function ClipView({
   preview: React.CSSProperties | undefined;
   /** No preview has landed yet, and none has failed — it is still being decoded. */
   loading: boolean;
+  /** How far this clip's preview has got, 0-1, or null when it is not building. */
+  progress: number | null;
   /** The asset's bytes could not be found when the project was reopened. */
   missing: boolean;
   onSelect: (modifier: SelectModifier) => void;
@@ -2891,6 +2927,19 @@ function ClipView({
               <IconAlert size={9} />
             </span>
           )}
+        </div>
+      )}
+      {progress !== null && (
+        /*
+          The preview being built, as a bar along the foot of the clip.
+
+          The strip itself fills in from the left as it decodes, which says most of
+          it; the bar says how much is left, and it is the only thing that does on a
+          source long enough for the strip to take a while. Sticky, so it stays in
+          view when the clip is wider than the lane.
+        */
+        <div className="clip-progress" title={`Building preview: ${Math.round(progress * 100)}%`}>
+          <div style={{ width: `${Math.round(progress * 100)}%` }} />
         </div>
       )}
       <div
@@ -3118,7 +3167,12 @@ function clipDetails(
         value: T.toTimecode(T.add(clip.sourceIn, clipSourceSpan(clip)), frameRate),
       });
     }
-    if (clip.speed !== 1) rows.push({ label: 'Speed', value: `${clip.speed.toFixed(2)}×` });
+    if (clip.speedRamp) {
+      rows.push({
+        label: 'Speed',
+        value: `${clip.speedRamp.kind === 'keyframed' ? clip.speedRamp.keyframes.length : 1}-point ramp`,
+      });
+    } else if (clip.speed !== 1) rows.push({ label: 'Speed', value: `${clip.speed.toFixed(2)}×` });
   }
 
   if (asset?.video) {

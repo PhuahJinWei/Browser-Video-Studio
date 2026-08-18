@@ -130,6 +130,22 @@ describe('clip source mapping', () => {
     expect(clipSourceTimeAt(clip, sec(2))).toEqual(sec(4));
   });
 
+  it('integrates a variable-speed ramp into source time', () => {
+    const inserted = run(
+      f,
+      insertCommand(f, { trackId: f.v1, start: sec(0), duration: sec(2), name: 'Ramp' }),
+    );
+    const clipId = clipIds(inserted, f.v1)[0]!;
+    const p = runFrom(f, inserted, {
+      type: 'setClipSpeedRamp',
+      clipId,
+      param: keyframedParam([keyframe(T.TIME_ZERO, 1), keyframe(sec(2), 3)]),
+    });
+    const clip = getClip(p, clipId) as VideoClip;
+    expect(T.toSeconds(clipSourceTimeAt(clip, sec(1)))).toBeCloseTo(1.5, 5);
+    expect(T.toSeconds(clipSourceTimeAt(clip, sec(2)))).toBeCloseTo(4, 5);
+  });
+
   it('reports trim handles against the asset duration', () => {
     // The asset is 10 s; this clip uses 4 s starting 1 s in.
     const p = run(

@@ -119,9 +119,8 @@ Effects are a **registry**: `{ id, params schema, wgsl, uniforms layout }`. New 
 
 ## 6. Media pipeline (audio)
 
-- **AudioWorker**: `AudioDecoder` per source → `AudioData` → converted to float32 planar at **sequence sample rate** (resampled if needed — simple polyphase; quality passes later).
-- **Mixer** (in AudioWorker): for a range `[t0, t1)` produce interleaved f32 mix: sum over audio tracks → clips → (gain, pan, fades, keyframed) → track gain → master. Track/clip mute/solo respected. Optional per-clip effect chain (L3: EQ, compressor — implemented as pure DSP in the worker, not WebAudio nodes, so playback == export bit-for-bit).
-- **Playback**: mixer pushes blocks into an `AudioWorkletProcessor` via `MessagePort` (ring buffer in the worklet, no SAB). Worklet reports its playhead sample count back → this is the master clock.
+- **Decode and mix**: Mediabunny supplies decoded buffers to an `OfflineAudioContext` at the sequence sample rate. A range is mixed through clip gain/pan/fades, ordered clip/track DSP (gain, EQ, compressor), track gain and master gain. Animated parameters use deterministic 10 ms automation steps.
+- **Playback and export share `renderAudioRange`**. Playback schedules its rendered buffer against an `AudioContext` and uses that clock as transport master; export encodes the same offline result. This is the current pragmatic replacement for the originally proposed AudioWorker/Worklet mixer and preserves the important preview/export parity.
 - **Export**: same mixer produces the whole range offline → `AudioEncoder` (AAC/Opus) → muxer.
 
 ## 7. Export
@@ -149,8 +148,8 @@ both:                               → Muxer (mp4-muxer / webm-muxer) → OPFS 
 | Layer | Scope |
 |---|---|
 | **L1 — built** | Import (mp4/mov/webm/mkv/mp3/wav/flac/ogg), timeline with N video + N audio tracks, trim/split/move/ripple, snapping, playback with A/V sync, transform/opacity/crop/blend, titles, GPU colour + blur effects, export H.264+AAC / VP9+Opus, undo/redo with gesture coalescing, OPFS autosave, live pipeline telemetry. clip filmstrips and waveforms. |
-| L2 | Effect registry + GPU effects (color, blur, sharpen, LUT, crop, transform), transitions (cross-dissolve, wipes), keyframes + curves, audio gain/pan/fades, text/titles (canvas → texture), export presets |
-| L3 | Proxies + quality toggle, nested sequences, speed/retime, audio DSP (EQ, compressor, ducking), markers, larger-format import (WASM demux/decode fallback opt-in via coi-serviceworker) |
+| L2 — mostly built | Effect registry + GPU colour/blur, transitions, clip/effect keyframes, audio gain/pan/fades, styled titles, export presets. Graphical curve editing and additional GPU effects remain. |
+| L3 — in progress | Automatic/manual proxies, speed ramps, EQ, compressor and markers are built. Nested sequences, ducking and larger-format WASM fallback remain. |
 | L4 | On-device AI: person segmentation (bg blur/remove), Whisper captions, scene cut detection, silence removal, auto-reframe |
 | L5 | Node-graph effect editor, GPU scopes (waveform/vectorscope/histogram), colour management (709/2020/HLG/PQ), plugin shaders |
 

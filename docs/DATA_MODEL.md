@@ -33,10 +33,10 @@ Nesting: an `Asset` of kind `'sequence'` points at another `Sequence`; a `VideoC
 
 ```
 timeline span:  [clip.start, clip.start + clip.duration)
-source span:    [clip.sourceIn, clip.sourceIn + clip.duration * clip.speed)
-source time at timeline t:  sourceIn + (t - clip.start) * speed
+constant source span:    [clip.sourceIn, clip.sourceIn + clip.duration * clip.speed)
+constant source time at timeline t:  sourceIn + (t - clip.start) * speed
 ```
-- `speed < 0` = reverse. `speed` becomes a `Param<number>` in L3 (speed ramps); then source time = sourceIn + ∫speed dt, evaluated by a selector with a cached integral table.
+- `speed < 0` = constant reverse. When `speedRamp` is present it is a positive `Param<number>` and source time = `sourceIn + ∫speedRamp dt`; the selector integrates each keyframe segment deterministically.
 - Trim-in changes `start`, `duration`, `sourceIn` together; trim-out changes `duration` only. Slip changes `sourceIn` only. Slide changes `start` and neighbours.
 - **Handles**: how far a clip can be extended = source stream duration bounds; transitions consume handles.
 
@@ -60,7 +60,7 @@ applyAll(project, commands, ids?) => Project   // all-or-nothing batch
 | Tracks | `addTrack`, `removeTrack`, `setTrackProps`, `moveTrack` |
 | Clips | `insertClip` (overwrite \| insert), `removeClips` (lift \| ripple), `moveClips`, `trimClip` (in/out, ripple), `slipClip`, `splitClips`, `setClipProps` |
 | Grouping | `groupClips`, `ungroupClips`, `linkClips`, `unlinkClips` |
-| Clip properties | `setClipParam` (opacity, gain, pan, `transform.*`, `crop.*` — static or keyframed), `setClipFade`, `setClipBlendMode`, `setClipSpeed` |
+| Clip properties | `setClipParam` (opacity, gain, pan, `transform.*`, `crop.*` — static or keyframed), `setClipFade`, `setClipBlendMode`, `setClipSpeed`, `setClipSpeedRamp`, `setTitleProps` |
 | Effects | `addEffect`, `removeEffect`, `moveEffect`, `setEffectParam`, `setEffectEnabled` |
 | Assets | `addAsset`, `removeAsset`, `setAssetStatus` |
 | Markers | `addMarker`, `removeMarker` |
@@ -115,7 +115,7 @@ Not yet: rotating snapshots, `FileSystemFileHandle` persistence for large files,
 
 | Later feature | Where it slots in |
 |---|---|
-| Speed ramps | `MediaClipFields.speed: Param<number>` |
+| Speed ramps | `MediaClipFields.speedRamp: Param<number> \| null` alongside legacy/static `speed` |
 | Multi-channel audio buses / sends | `Track.busId`, new `Bus` entity in `Project` |
 | Adjustment layers | `VideoClip.kind = 'adjustment'`, no assetId |
 | Masks / rotoscoping | `EffectInstance.mask?: MaskRef` + `masks{}` map |

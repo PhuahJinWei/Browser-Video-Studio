@@ -9,6 +9,9 @@ import {
   clipEnd,
   clipFitsTrack,
   clipRange,
+  clipSourceSpan,
+  clipSourceTimeAt,
+  clipSpeedAt,
   isMediaClip,
   isSyntheticClip,
   maxTransitionDuration,
@@ -72,12 +75,12 @@ function sourceDuration(d: Draft, clip: Clip): Time | null {
 function trimRoom(d: Draft, clip: Clip): { head: Time | null; tail: Time | null } {
   const total = sourceDuration(d, clip);
   if (!isMediaClip(clip) || total === null) return { head: null, tail: null };
-  const speed = Math.abs(clip.speed) || 1;
-  const used = T.abs(clip.speed === 1 ? clip.duration : T.scale(clip.duration, clip.speed));
-  const toTimeline = (source: Time): Time => T.scale(T.max(source, T.TIME_ZERO), 1 / speed);
+  const used = clipSourceSpan(clip);
+  const headSpeed = Math.abs(clipSpeedAt(clip, T.TIME_ZERO)) || 1;
+  const tailSpeed = Math.abs(clipSpeedAt(clip, clip.duration)) || 1;
   return {
-    head: toTimeline(clip.sourceIn),
-    tail: toTimeline(T.sub(total, T.add(clip.sourceIn, used))),
+    head: T.scale(T.max(clip.sourceIn, T.TIME_ZERO), 1 / headSpeed),
+    tail: T.scale(T.max(T.sub(total, T.add(clip.sourceIn, used)), T.TIME_ZERO), 1 / tailSpeed),
   };
 }
 
@@ -391,13 +394,25 @@ function handleSlipClip(d: Draft, cmd: Extract<Command, { type: 'slipClip' }>): 
   if (!isMediaClip(clip)) throw new ModelError(`"${clip.name}" has no source to slip`);
   assertUnlocked(draftTrack(d, clip.trackId));
 
-  const room = trimRoom(d, clip);
-  let by = cmd.by;
-  if (room.head && T.lt(by, T.neg(room.head))) by = T.neg(room.head);
-  if (room.tail && T.gt(by, room.tail)) by = room.tail;
-
-  const sourceDelta = clip.speed === 1 ? by : T.scale(by, clip.speed);
-  d.clips[clip.id] = { ...clip, sourceIn: T.add(clip.sourceIn, sourceDelta) };
+  const sourceDelta = clip.speedRamp
+    ? T.sub(
+        clipSourceTimeAt(clip, T.add(clip.start, cmd.by)),
+        clip.sourceIn,
+      )
+    : clip.speed === 1
+      ? cmd.by
+      : T.scale(cmd.by, clip.speed);
+  const total = sourceDuration(d, clip);
+  if (!total) {
+    d.clips[clip.id] = { ...clip, sourceIn: T.add(clip.sourceIn, sourceDelta) };
+    return;
+  }
+  const used = clipSourceSpan(clip);
+  const candidate = T.add(clip.sourceIn, sourceDelta);
+  const sourceIn = clip.speedRamp || clip.speed > 0
+    ? T.clamp(candidate, T.TIME_ZERO, T.max(T.sub(total, used), T.TIME_ZERO))
+    : T.clamp(candidate, used, total);
+  d.clips[clip.id] = { ...clip, sourceIn };
 }
 
 function handleSplitClips(d: Draft, cmd: Extract<Command, { type: 'splitClips' }>, ids: IdSource): void {
@@ -491,11 +506,37 @@ function handleSetSequenceSettings(
   };
 }
 
+function handleSetProjectProxyMode(
+  d: Draft,
+  cmd: Extract<Command, { type: 'setProjectProxyMode' }>,
+): void {
+  if (!['auto', 'always', 'never'].includes(cmd.mode)) {
+    throw new ModelError(`Unknown proxy mode "${String(cmd.mode)}"`);
+  }
+  d.settings = { ...d.settings, proxyMode: cmd.mode };
+}
+
 function handleSetSolidFill(d: Draft, cmd: Extract<Command, { type: 'setSolidFill' }>): void {
   const clip = draftClip(d, cmd.clipId);
   if (clip.kind !== 'solid') throw new ModelError(`"${clip.name}" is not a fill clip`);
   if (!cmd.fill.trim()) throw new ModelError('A fill needs a colour');
   d.clips[clip.id] = { ...clip, fill: cmd.fill };
+}
+
+function handleSetTitleProps(d: Draft, cmd: Extract<Command, { type: 'setTitleProps' }>): void {
+  const clip = draftClip(d, cmd.clipId);
+  if (clip.kind !== 'title') throw new ModelError(`"${clip.name}" is not a title`);
+  if (cmd.style?.fontSizePx !== undefined && (!Number.isFinite(cmd.style.fontSizePx) || cmd.style.fontSizePx <= 0)) {
+    throw new ModelError('Title font size must be positive');
+  }
+  if (cmd.style?.fontWeight !== undefined && (!Number.isFinite(cmd.style.fontWeight) || cmd.style.fontWeight < 100 || cmd.style.fontWeight > 900)) {
+    throw new ModelError('Title font weight must be between 100 and 900');
+  }
+  d.clips[clip.id] = {
+    ...clip,
+    ...(cmd.text !== undefined ? { text: cmd.text } : {}),
+    ...(cmd.style ? { style: { ...clip.style, ...cmd.style } } : {}),
+  };
 }
 
 function handleSetClipFade(d: Draft, cmd: Extract<Command, { type: 'setClipFade' }>): void {
@@ -588,7 +629,31 @@ function handleSetClipSpeed(d: Draft, cmd: Extract<Command, { type: 'setClipSpee
   if (!Number.isFinite(cmd.speed) || cmd.speed === 0) {
     throw new ModelError(`Speed must be finite and non-zero, got ${cmd.speed}`);
   }
-  d.clips[clip.id] = { ...clip, speed: cmd.speed };
+  d.clips[clip.id] = { ...clip, speed: cmd.speed, speedRamp: null };
+}
+
+function handleSetClipSpeedRamp(
+  d: Draft,
+  cmd: Extract<Command, { type: 'setClipSpeedRamp' }>,
+): void {
+  const clip = draftClip(d, cmd.clipId);
+  if (!isMediaClip(clip) || clip.kind === 'image') {
+    throw new ModelError(`"${clip.name}" has no time-based source to ramp`);
+  }
+  if (cmd.param) {
+    const values = cmd.param.kind === 'static'
+      ? [cmd.param.value]
+      : cmd.param.keyframes.map((item) => item.value);
+    if (values.some((value) => !Number.isFinite(value) || value <= 0)) {
+      throw new ModelError('A speed ramp needs finite rates greater than zero');
+    }
+  }
+  const next = { ...clip, speedRamp: cmd.param };
+  const total = sourceDuration(d, clip);
+  if (total && T.gt(T.add(next.sourceIn, clipSourceSpan(next)), total)) {
+    throw new ModelError('This speed ramp would run past the end of the source');
+  }
+  d.clips[clip.id] = next;
 }
 
 // ---------------------------------------------------------------------------
@@ -1090,10 +1155,14 @@ export function runCommand(d: Draft, command: Command, ids: IdSource): void {
       return handleSetClipBlendMode(d, command);
     case 'setSolidFill':
       return handleSetSolidFill(d, command);
+    case 'setTitleProps':
+      return handleSetTitleProps(d, command);
     case 'setSequenceParam':
       return handleSetSequenceParam(d, command);
     case 'setSequenceSettings':
       return handleSetSequenceSettings(d, command);
+    case 'setProjectProxyMode':
+      return handleSetProjectProxyMode(d, command);
     case 'addTransition':
       return handleAddTransition(d, command, ids);
     case 'removeTransition':
@@ -1114,6 +1183,8 @@ export function runCommand(d: Draft, command: Command, ids: IdSource): void {
       return handleSetTransitionOffset(d, command);
     case 'setClipSpeed':
       return handleSetClipSpeed(d, command);
+    case 'setClipSpeedRamp':
+      return handleSetClipSpeedRamp(d, command);
     case 'unlinkClips':
       return handleUnlinkClips(d, command);
     case 'linkClips':

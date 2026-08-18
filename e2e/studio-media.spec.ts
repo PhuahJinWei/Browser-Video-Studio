@@ -6,7 +6,19 @@ async function syntheticWebm(page: import('@playwright/test').Page): Promise<Buf
     canvas.width = 320;
     canvas.height = 180;
     const context = canvas.getContext('2d')!;
-    const stream = canvas.captureStream(30);
+    const videoStream = canvas.captureStream(30);
+    const audioContext = new AudioContext();
+    const oscillator = audioContext.createOscillator();
+    const level = audioContext.createGain();
+    const audioDestination = audioContext.createMediaStreamDestination();
+    oscillator.frequency.value = 220;
+    level.gain.value = 0.04;
+    oscillator.connect(level).connect(audioDestination);
+    oscillator.start();
+    const stream = new MediaStream([
+      ...videoStream.getVideoTracks(),
+      ...audioDestination.stream.getAudioTracks(),
+    ]);
     const recorder = new MediaRecorder(stream, {
       mimeType: MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
         ? 'video/webm;codecs=vp8'
@@ -33,6 +45,8 @@ async function syntheticWebm(page: import('@playwright/test').Page): Promise<Buf
     }
     recorder.stop();
     await stopped;
+    oscillator.stop();
+    await audioContext.close();
     stream.getTracks().forEach((track) => track.stop());
     return [...new Uint8Array(await new Blob(chunks, { type: 'video/webm' }).arrayBuffer())];
   });
@@ -49,6 +63,7 @@ test('imports real media and exercises source editing, keyframes, proxy, and exp
   await page.getByRole('button', { name: 'File' }).click();
   await page.getByRole('button', { name: 'New project' }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'New project' }).click();
+  await page.getByLabel('Editing proxies').selectOption('never');
 
   const media = await syntheticWebm(page);
   const chooser = page.waitForEvent('filechooser');
@@ -77,6 +92,19 @@ test('imports real media and exercises source editing, keyframes, proxy, and exp
   await expect(page.locator('.inspector-group', { hasText: 'Video' })).toBeVisible();
   await page.getByRole('button', { name: 'Add Opacity keyframe here' }).click();
   await expect(page.getByRole('button', { name: 'Remove Opacity keyframe here' })).toBeVisible();
+
+  await page.locator('.inspector-group').filter({ hasText: /^Speed/ }).getByText('Speed', { exact: true }).click();
+  await page.getByRole('button', { name: 'Add Playback rate keyframe here' }).click();
+  await expect(page.getByText('Speed · ramped')).toBeVisible();
+
+  const effectsGroup = page.locator('.inspector-group').filter({ hasText: /^Effects/ });
+  await effectsGroup.locator('summary').click();
+  await effectsGroup.locator('select').selectOption('color.basic');
+  await page.getByRole('button', { name: 'Add Brightness keyframe here' }).click();
+  await expect(page.getByRole('button', { name: 'Remove Brightness keyframe here' })).toBeVisible();
+  await effectsGroup.locator('select').selectOption('audio.eq');
+  await page.getByRole('button', { name: 'Add Low shelf keyframe here' }).click();
+  await expect(page.getByRole('button', { name: 'Remove Low shelf keyframe here' })).toBeVisible();
 
   await card.click({ button: 'right' });
   await page.getByRole('button', { name: 'Generate editing proxy' }).click();

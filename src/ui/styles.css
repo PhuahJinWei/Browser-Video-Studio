@@ -238,6 +238,7 @@ button.icon.tint-accent:disabled {
 
 input[type='number'],
 input[type='text'],
+textarea,
 select {
   font: inherit;
   color: inherit;
@@ -279,6 +280,11 @@ input[type='range'] {
   min-height: 24px;
   margin: 0;
   cursor: pointer;
+}
+textarea {
+  resize: vertical;
+  min-height: 54px;
+  line-height: 1.4;
 }
 .range > input[type='range']:focus-visible {
   outline: 2px solid var(--accent);
@@ -1872,6 +1878,23 @@ body.resizing-track-sections {
   min-width: 44px;
   text-align: right;
 }
+.title-align-buttons button {
+  flex: 1;
+}
+.title-align-buttons button.on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.colour-value-row input[type='color'] {
+  flex: 0 0 34px;
+  width: 34px;
+  height: 28px;
+  padding: 2px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: var(--field);
+}
 .field .value-row input.range-number {
   flex: 0 0 64px;
   width: 64px;
@@ -2877,6 +2900,28 @@ body.resizing-y {
  * them blank for several seconds. A sweep says the decoder is still coming rather
  * than that the clip is empty.
  */
+/*
+ * The preview-building bar along the foot of a clip.
+ *
+ * Under the badges and the handles, over the preview: it is about the preview and
+ * should sit on it, but nothing interactive should have to reach past it.
+ */
+.clip-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: rgb(0 0 0 / 35%);
+  pointer-events: none;
+  z-index: 2;
+}
+.clip-progress > div {
+  height: 100%;
+  background: var(--accent);
+  transition: width 200ms linear;
+}
+
 .clip.loading::after {
   content: '';
   position: absolute;

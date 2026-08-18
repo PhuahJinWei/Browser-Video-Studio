@@ -9,7 +9,7 @@
  * document, and adding a cache before profiling would just hide the real costs.
  */
 
-import { evalCrop, evalNumber, evalTransform } from './params';
+import { evalCrop, evalNumber, evalTransform, integrateNumberParam } from './params';
 import * as T from './time';
 import type {
   Asset,
@@ -190,12 +190,29 @@ export function clipRelativeTime(clip: Clip, at: Time): Time {
  */
 export function clipSourceTimeAt(clip: VideoClip | AudioClip, at: Time): Time {
   const elapsed = clipRelativeTime(clip, at);
-  return T.add(clip.sourceIn, clip.speed === 1 ? elapsed : T.scale(elapsed, clip.speed));
+  if (!clip.speedRamp) {
+    return T.add(clip.sourceIn, clip.speed === 1 ? elapsed : T.scale(elapsed, clip.speed));
+  }
+  return T.add(
+    clip.sourceIn,
+    T.fromSeconds(integrateNumberParam(clip.speedRamp, T.TIME_ZERO, elapsed), 1_000_000),
+  );
 }
 
 /** Length of source material a clip consumes: duration × |speed|. */
 export function clipSourceSpan(clip: VideoClip | AudioClip): Time {
-  return T.abs(clip.speed === 1 ? clip.duration : T.scale(clip.duration, clip.speed));
+  if (!clip.speedRamp) {
+    return T.abs(clip.speed === 1 ? clip.duration : T.scale(clip.duration, clip.speed));
+  }
+  return T.fromSeconds(
+    Math.abs(integrateNumberParam(clip.speedRamp, T.TIME_ZERO, clip.duration)),
+    1_000_000,
+  );
+}
+
+/** Playback rate at one clip-relative instant. */
+export function clipSpeedAt(clip: VideoClip | AudioClip, relative: Time): number {
+  return clip.speedRamp ? evalNumber(clip.speedRamp, relative) : clip.speed;
 }
 
 /**
@@ -231,14 +248,15 @@ export function clipTrimHandles(p: AssetLookup, clip: Clip): TrimHandles {
   const sourceDuration = clipSourceDuration(p, clip);
   if (!isMediaClip(clip) || sourceDuration === null) return { headroom: null, tailroom: null };
 
-  const speed = Math.abs(clip.speed) || 1;
   const used = clipSourceSpan(clip);
   const remaining = T.sub(sourceDuration, T.add(clip.sourceIn, used));
-  // Convert leftover source time back into timeline time.
-  const toTimeline = (source: Time): Time => T.scale(T.max(source, T.TIME_ZERO), 1 / speed);
+  // Outside the visible clip a ramp clamps to its edge value, so extension room is
+  // source room divided by the corresponding edge rate.
+  const headSpeed = Math.abs(clipSpeedAt(clip, T.TIME_ZERO)) || 1;
+  const tailSpeed = Math.abs(clipSpeedAt(clip, clip.duration)) || 1;
   return {
-    headroom: toTimeline(clip.sourceIn),
-    tailroom: toTimeline(remaining),
+    headroom: T.scale(T.max(clip.sourceIn, T.TIME_ZERO), 1 / headSpeed),
+    tailroom: T.scale(T.max(remaining, T.TIME_ZERO), 1 / tailSpeed),
   };
 }
 
@@ -591,7 +609,7 @@ export function audioSegments(
         trackId,
         timelineRange: overlap,
         sourceStart: clipSourceTimeAt(clip, overlap.start),
-        speed: clip.speed,
+        speed: clipSpeedAt(clip, T.sub(overlap.start, clip.start)),
         crossfadeIn: audible.crossfadeIn,
         crossfadeOut: audible.crossfadeOut,
         effects: resolveEffects(p, clip.effects),

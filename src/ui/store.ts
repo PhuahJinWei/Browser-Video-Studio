@@ -204,10 +204,6 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1e9).toFixed(2)} GB`;
 }
 
-/** Files above this size are not copied into OPFS; reopening asks for them again. */
-const MEDIA_COPY_LIMIT_BYTES = 2_000_000_000;
-
-
 function starterProject(): { project: Project; sequenceId: SequenceId } {
   const sequenceId = ids.sequence();
   const project = createProject({
@@ -391,6 +387,7 @@ export interface StudioState {
   relinkAsset: (assetId: AssetId) => Promise<void>;
   generateProxy: (assetId: AssetId) => Promise<void>;
   removeProxy: (assetId: AssetId) => Promise<void>;
+  setProxyMode: (mode: Project['settings']['proxyMode']) => void;
 
   attachEngine: (canvas: HTMLCanvasElement) => Promise<void>;
   /** `folder` files the imports straight into a media-bin folder as they land. */
@@ -502,6 +499,24 @@ let densityTimer: ReturnType<typeof setTimeout> | null = null;
 let densityRun = 0;
 let exportController: AbortController | null = null;
 const proxyControllers = new Map<AssetId, AbortController>();
+let automaticProxyQueue = Promise.resolve();
+
+function wantsAutomaticProxy(project: Project, asset: Asset): boolean {
+  if (asset.kind !== 'video' || !asset.video || asset.derived.proxyPath) return false;
+  if (project.settings.proxyMode === 'never') return false;
+  if (project.settings.proxyMode === 'always') return true;
+  return asset.video.size.width > 1280 || asset.video.size.height > 720;
+}
+
+/** Serialize background encodes so a multi-file import cannot exhaust VideoEncoder resources. */
+function queueAutomaticProxies(get: () => StudioState, assetIds: readonly AssetId[]): void {
+  automaticProxyQueue = automaticProxyQueue.then(async () => {
+    for (const assetId of assetIds) {
+      const asset = get().project().assets[assetId];
+      if (asset && wantsAutomaticProxy(get().project(), asset)) await get().generateProxy(assetId);
+    }
+  });
+}
 
 /** Ask the browser not to evict project media under storage pressure. */
 async function requestDurableStorage(): Promise<boolean | null> {
@@ -907,7 +922,12 @@ export const useStudio = create<StudioState>((set, get) => ({
       get().run({ type: 'replaceAsset', assetId, asset: replacement }, `Relink "${original.name}"`);
       await deleteProxy(get().project().id, assetId);
 
-      const copied = await saveMedia(get().project().id, assetId, file, MEDIA_COPY_LIMIT_BYTES).catch(() => false);
+      const copied = await saveMedia(
+        get().project().id,
+        assetId,
+        file,
+        get().project().settings.copyMediaToOpfsUpToBytes,
+      ).catch(() => false);
       const durable = copied ? await requestDurableStorage() : null;
       set({
         status: copied
@@ -915,6 +935,7 @@ export const useStudio = create<StudioState>((set, get) => ({
           : `Relinked "${original.name}", but the source is session-only; choose it again after reopening.`,
       });
       void get().buildPreviews();
+      queueAutomaticProxies(get, [assetId]);
     } catch (err) {
       if (decoderWasClosed && previousFile) {
         get().engine?.media.close(assetId);
@@ -1007,6 +1028,18 @@ export const useStudio = create<StudioState>((set, get) => ({
       );
       set({ status: `Removed proxy for "${asset.name}"; preview uses the original.` });
     }
+  },
+
+  setProxyMode: (mode) => {
+    get().run({ type: 'setProjectProxyMode', mode }, 'Set proxy policy');
+    set({
+      status: mode === 'never'
+        ? 'Automatic proxy generation is off. Existing proxies remain available.'
+        : mode === 'always'
+          ? 'All imported videos will receive editing proxies.'
+          : 'Large videos will receive editing proxies automatically.',
+    });
+    queueAutomaticProxies(get, Object.keys(get().project().assets) as AssetId[]);
   },
 
   assetUsage: (assetIds) => {
@@ -1261,6 +1294,7 @@ export const useStudio = create<StudioState>((set, get) => ({
         const kind = assets[assetId]?.kind;
         if (kind) await engine.openAsset(assetId, file, kind);
       }
+      queueAutomaticProxies(get, Object.keys(assets) as AssetId[]);
       engine.requestRender(get().playhead());
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
@@ -1292,7 +1326,12 @@ export const useStudio = create<StudioState>((set, get) => ({
         nextFiles.set(assetId, file);
         await get().engine?.openAsset(assetId, file, asset.kind);
         // Copy beside the project so it reopens after a reload.
-        const copied = await saveMedia(get().project().id, assetId, file, MEDIA_COPY_LIMIT_BYTES).catch(() => false);
+        const copied = await saveMedia(
+          get().project().id,
+          assetId,
+          file,
+          get().project().settings.copyMediaToOpfsUpToBytes,
+        ).catch(() => false);
         if (!copied) sessionOnly.push(file.name);
       } catch (err) {
         failures.push(`${file.name}: ${err instanceof Error ? err.message : String(err)}`);
@@ -1302,6 +1341,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     if (commands.length > 0) {
       set({ mediaFiles: nextFiles });
       get().runMany(commands, `Import ${commands.length} file(s)`);
+      queueAutomaticProxies(get, importedIds);
     }
     const durable = commands.length > sessionOnly.length ? await requestDurableStorage() : null;
     const durabilityNote = sessionOnly.length
@@ -1978,7 +2018,12 @@ export const useStudio = create<StudioState>((set, get) => ({
       await flushAutosave();
       await saveProject(project);
       for (const [assetId, media] of read.media) {
-        await saveMedia(project.id, assetId, media, MEDIA_COPY_LIMIT_BYTES).catch(() => false);
+        await saveMedia(
+          project.id,
+          assetId,
+          media,
+          project.settings.copyMediaToOpfsUpToBytes,
+        ).catch(() => false);
       }
 
       await adopt(set, get, { ...read, project }, 'Opened');
@@ -2111,6 +2156,7 @@ async function adopt(
       engine.media.closeProxy(assetId);
     }
   }
+  queueAutomaticProxies(get, Object.keys(project.assets) as AssetId[]);
 
   if (unreadable.length > 0) {
     // Same treatment as a file that has gone: the clips stay, and the library says

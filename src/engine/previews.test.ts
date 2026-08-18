@@ -3,6 +3,7 @@ import type { AssetId } from '../model/types';
 import {
   densityForZoom,
   PreviewCache,
+  sampleTimes,
   type Filmstrip,
   type Waveform,
   waveformDensityForZoom,
@@ -179,5 +180,52 @@ describe('zoom-specific waveform selection', () => {
       sourceStart: 4_096 / 4_000,
       sourceDuration: 1_024 / 4_000,
     });
+  });
+});
+
+const ASSET = 'asset' as AssetId;
+
+/** A source with keyframes at the given times and nothing else worth knowing. */
+function keyframesAt(times: readonly number[]) {
+  return { keyframeTimes: async () => times };
+}
+
+describe('where a filmstrip samples its source', () => {
+  it('takes the keyframe inside each slot when there is one per slot', async () => {
+    const times = await sampleTimes(keyframesAt([0, 2, 4, 6, 8]), ASSET, 10, 5, 2);
+    // A keyframe decodes on its own; a frame in between costs the whole run
+    // since the last keyframe. Slot 0 must therefore be the frame at 0, not 2.
+    expect(times).toEqual([0, 2, 4, 6, 8]);
+  });
+
+  it('starts each slot at its own first keyframe, so a strip cannot run one cell late', async () => {
+    // Keyframes on the 2 s boundaries, and slots a hair wider than 2 s because the
+    // audio runs on past the picture: cell 0 must still show the frame at 0.
+    const times = await sampleTimes(keyframesAt([0, 2, 4, 6, 8]), ASSET, 10.0035, 5, 10.0035 / 5);
+    expect(times[0]).toBe(0);
+    for (let i = 1; i < times.length; i++) expect(times[i]).toBeGreaterThan(times[i - 1]!);
+  });
+
+  it('samples the middle of each slot when keyframes are too sparse to use', async () => {
+    const times = await sampleTimes(keyframesAt([0, 5]), ASSET, 10, 10, 1);
+    expect(times).toEqual([0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5]);
+  });
+
+  it('decodes a slot exactly rather than repeat the keyframe next door', async () => {
+    // Enough keyframes on average for one per slot, but unevenly placed: slot 3
+    // has none of its own, and showing slot 2's again would make the strip stutter.
+    const times = await sampleTimes(keyframesAt([0, 0.5, 1, 2, 4, 5, 6, 7, 8, 9]), ASSET, 10, 10, 1);
+    expect(times).toEqual([0, 1, 2, 3.5, 4, 5, 6, 7, 8, 9]);
+    expect(new Set(times).size).toBe(times.length);
+  });
+
+  it('starts from the slot it is asked to, for a tile part-way through the source', async () => {
+    const times = await sampleTimes(keyframesAt([0, 2, 4, 6, 8]), ASSET, 10, 2, 2, 3);
+    expect(times).toEqual([6, 8]);
+  });
+
+  it('keeps the last sample inside the source', async () => {
+    const times = await sampleTimes(keyframesAt([0, 5]), ASSET, 10, 2, 5);
+    expect(times[1]).toBeLessThan(10);
   });
 });

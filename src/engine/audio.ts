@@ -12,14 +12,16 @@
  * audio thread.)
  */
 
-import { evalNumber } from '../model/params';
+import { evalNumber, isAnimated as isAnimatedParam } from '../model/params';
 import {
   audioSegments,
+  clipSourceTimeAt,
+  clipSpeedAt,
   getSequence,
   type SegmentCrossfade,
 } from '../model/selectors';
 import * as T from '../model/time';
-import type { Project, SequenceId, Time, TimeRange } from '../model/types';
+import type { AudioClip, EffectInstance, Param, Project, SequenceId, Time, TimeRange } from '../model/types';
 import { foldAudioGainDb } from './effects';
 import type { MediaLibrary } from './media';
 
@@ -53,11 +55,11 @@ export async function renderAudioRange(
   await Promise.all(
     segments.map(async (segment) => {
       const { clip } = segment;
-      const speed = clip.speed || 1;
       const segmentDuration = segment.timelineRange.duration;
 
       // Source span this segment consumes.
-      const sourceSpan = speed === 1 ? segmentDuration : T.scale(segmentDuration, Math.abs(speed));
+      const sourceEnd = clipSourceTimeAt(clip, T.rangeEnd(segment.timelineRange));
+      const sourceSpan = T.abs(T.sub(sourceEnd, segment.sourceStart));
       const sourceBuffer = await collectSource(
         media,
         clip.assetId,
@@ -69,22 +71,123 @@ export async function renderAudioRange(
 
       const source = context.createBufferSource();
       source.buffer = sourceBuffer;
-      source.playbackRate.value = Math.abs(speed);
+      const offsetSeconds = Math.max(0, T.toSeconds(T.sub(segment.timelineRange.start, range.start)));
+      const durationSeconds = T.toSeconds(segmentDuration);
+      const firstRate = Math.abs(clipSpeedAt(clip, T.sub(segment.timelineRange.start, clip.start)));
+      source.playbackRate.setValueAtTime(firstRate, offsetSeconds);
+      if (clip.speedRamp) {
+        const rateSteps = Math.max(1, Math.ceil(durationSeconds / AUTOMATION_STEP_SECONDS));
+        for (let i = 1; i <= rateSteps; i++) {
+          const progress = i / rateSteps;
+          const timeline = T.add(
+            segment.timelineRange.start,
+            T.fromSeconds(progress * durationSeconds, 1_000_000),
+          );
+          source.playbackRate.linearRampToValueAtTime(
+            Math.abs(clipSpeedAt(clip, T.sub(timeline, clip.start))),
+            offsetSeconds + progress * durationSeconds,
+          );
+        }
+      }
 
       const gain = context.createGain();
       const panner = context.createStereoPanner();
-      source.connect(gain).connect(panner).connect(master);
+      const effected = connectAudioEffects(
+        context,
+        source,
+        [...segment.effects, ...segment.trackEffects],
+        clip,
+        segment.timelineRange.start,
+        offsetSeconds,
+        durationSeconds,
+      );
+      effected.connect(gain).connect(panner).connect(master);
 
       // Offset of this segment within the rendered range.
-      const offsetSeconds = Math.max(0, T.toSeconds(T.sub(segment.timelineRange.start, range.start)));
-      const durationSeconds = T.toSeconds(segmentDuration);
-
       applyGainAutomation(gain, panner, project, segment, offsetSeconds, durationSeconds);
-      source.start(offsetSeconds, 0, durationSeconds);
+      source.start(offsetSeconds, 0);
+      source.stop(offsetSeconds + durationSeconds);
     }),
   );
 
   return context.startRendering();
+}
+
+function effectNumber(effect: EffectInstance, key: string, at: Time, fallback: number): number {
+  const param = effect.params[key] as Param<number> | undefined;
+  if (!param) return fallback;
+  try {
+    return evalNumber(param, at);
+  } catch {
+    return fallback;
+  }
+}
+
+function automateEffectNumber(
+  target: AudioParam,
+  effect: EffectInstance,
+  key: string,
+  fallback: number,
+  clip: AudioClip,
+  timelineStart: Time,
+  offsetSeconds: number,
+  durationSeconds: number,
+  scale = 1,
+): void {
+  const param = effect.params[key] as Param<number> | undefined;
+  if (!param || param.kind === 'static') {
+    target.setValueAtTime((param ? effectNumber(effect, key, T.TIME_ZERO, fallback) : fallback) * scale, offsetSeconds);
+    return;
+  }
+  const steps = Math.max(1, Math.ceil(durationSeconds / AUTOMATION_STEP_SECONDS));
+  for (let i = 0; i <= steps; i++) {
+    const progress = i / steps;
+    const timeline = T.add(timelineStart, T.fromSeconds(progress * durationSeconds, 1_000_000));
+    const relative = T.sub(timeline, clip.start);
+    const value = effectNumber(effect, key, relative, fallback) * scale;
+    if (i === 0) target.setValueAtTime(value, offsetSeconds);
+    else target.linearRampToValueAtTime(value, offsetSeconds + progress * durationSeconds);
+  }
+}
+
+/** Build the ordered clip + track DSP graph used by preview and export. */
+function connectAudioEffects(
+  context: OfflineAudioContext,
+  source: AudioNode,
+  effects: readonly EffectInstance[],
+  clip: AudioClip,
+  timelineStart: Time,
+  offsetSeconds: number,
+  durationSeconds: number,
+): AudioNode {
+  let tail = source;
+  for (const effect of effects) {
+    if (!effect.enabled) continue;
+    if (effect.effectType === 'audio.eq') {
+      const low = context.createBiquadFilter();
+      low.type = 'lowshelf';
+      low.frequency.value = 200;
+      const high = context.createBiquadFilter();
+      high.type = 'highshelf';
+      high.frequency.value = 4_000;
+      automateEffectNumber(low.gain, effect, 'lowGainDb', 0, clip, timelineStart, offsetSeconds, durationSeconds);
+      automateEffectNumber(high.gain, effect, 'highGainDb', 0, clip, timelineStart, offsetSeconds, durationSeconds);
+      tail.connect(low).connect(high);
+      tail = high;
+      continue;
+    }
+    if (effect.effectType === 'audio.compressor') {
+      const compressor = context.createDynamicsCompressor();
+      automateEffectNumber(compressor.threshold, effect, 'thresholdDb', -24, clip, timelineStart, offsetSeconds, durationSeconds);
+      automateEffectNumber(compressor.ratio, effect, 'ratio', 4, clip, timelineStart, offsetSeconds, durationSeconds);
+      automateEffectNumber(compressor.attack, effect, 'attackMs', 10, clip, timelineStart, offsetSeconds, durationSeconds, 1 / 1_000);
+      automateEffectNumber(compressor.release, effect, 'releaseMs', 250, clip, timelineStart, offsetSeconds, durationSeconds, 1 / 1_000);
+      automateEffectNumber(compressor.knee, effect, 'kneeDb', 12, clip, timelineStart, offsetSeconds, durationSeconds);
+      tail.connect(compressor);
+      tail = compressor;
+    }
+  }
+  return tail;
 }
 
 function applyGainAutomation(
@@ -98,8 +201,6 @@ function applyGainAutomation(
   const { clip } = segment;
   const track = project.tracks[segment.trackId];
 
-  const clipEffectGain = foldAudioGainDb(segment.effects, T.TIME_ZERO);
-  const trackEffectGain = foldAudioGainDb(segment.trackEffects, T.TIME_ZERO);
   const trackGainDb = track ? evalNumber(track.gainDb, T.TIME_ZERO) : 0;
   const trackPan = track ? evalNumber(track.pan, T.TIME_ZERO) : 0;
 
@@ -136,6 +237,8 @@ function applyGainAutomation(
   const gainAt = (timeline: Time): number => {
     const relative = T.sub(timeline, clip.start);
     const clipDb = evalNumber(clip.gainDb, relative);
+    const clipEffectGain = foldAudioGainDb(segment.effects, relative);
+    const trackEffectGain = foldAudioGainDb(segment.trackEffects, relative);
     let value = dbToGain(clipDb + clipEffectGain + trackGainDb + trackEffectGain);
 
     if (segment.crossfadeIn) value *= crossfadeGain(segment.crossfadeIn, timeline, true);
@@ -163,6 +266,10 @@ function applyGainAutomation(
   const isAnimated =
     clip.gainDb.kind === 'keyframed' ||
     clip.pan.kind === 'keyframed' ||
+    Boolean(clip.speedRamp) ||
+    [...segment.effects, ...segment.trackEffects].some((effect) =>
+      Object.values(effect.params).some((param) => isAnimatedParam(param)),
+    ) ||
     T.isPositive(clip.fadeIn) ||
     T.isPositive(clip.fadeOut) ||
     segment.crossfadeIn !== null ||

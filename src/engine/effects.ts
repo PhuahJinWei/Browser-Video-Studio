@@ -72,6 +72,27 @@ export const EFFECT_REGISTRY: Readonly<Record<string, EffectDefinition>> = {
       gainDb: number('Gain', -60, 12, 0, 0.1, 'dB'),
     },
   },
+  'audio.eq': {
+    type: 'audio.eq',
+    label: 'Two-band EQ',
+    category: 'audio',
+    params: {
+      lowGainDb: number('Low shelf', -24, 24, 0, 0.1, 'dB'),
+      highGainDb: number('High shelf', -24, 24, 0, 0.1, 'dB'),
+    },
+  },
+  'audio.compressor': {
+    type: 'audio.compressor',
+    label: 'Compressor',
+    category: 'audio',
+    params: {
+      thresholdDb: number('Threshold', -60, 0, -24, 0.5, 'dB'),
+      ratio: number('Ratio', 1, 20, 4, 0.1, ':1'),
+      attackMs: number('Attack', 0, 100, 10, 1, 'ms'),
+      releaseMs: number('Release', 10, 1000, 250, 5, 'ms'),
+      kneeDb: number('Knee', 0, 40, 12, 0.5, 'dB'),
+    },
+  },
 };
 
 export function effectDefinition(type: string): EffectDefinition | undefined {

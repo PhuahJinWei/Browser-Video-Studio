@@ -9,7 +9,7 @@
  *  - Additive evolution: bump SCHEMA_VERSION and add a migration; never repurpose a field.
  */
 
-export const SCHEMA_VERSION = 5 as const;
+export const SCHEMA_VERSION = 6 as const;
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -345,7 +345,9 @@ export interface ClipBase {
 export interface MediaClipFields {
   readonly assetId: AssetId;
   readonly sourceIn: Time;        // in source timebase
-  readonly speed: number;         // 1 = normal; L3 speed ramps become Param<number>
+  readonly speed: number;         // legacy/static speed; may be negative for reverse playback
+  /** Positive playback-rate curve in clip-relative time. Null keeps `speed`. */
+  readonly speedRamp: Param<number> | null;
 }
 
 export interface VideoClip extends ClipBase, MediaClipFields {
