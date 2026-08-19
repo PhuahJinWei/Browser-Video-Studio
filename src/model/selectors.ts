@@ -107,6 +107,44 @@ export function clipFitsTrack(clipKind: Clip['kind'], trackKind: Track['kind']):
   return trackKind === 'audio' ? clipKind === 'audio' : clipKind !== 'audio';
 }
 
+/**
+ * Whether a selection can be linked, and if not, why.
+ *
+ * A link is one specific thing: a picture and its own sound, edited as one. The
+ * model is built around that — linked members share an *absolute* trim edge and a
+ * split re-pairs the halves, which is right for two coincident halves of one take
+ * and meaningless for two unrelated clips. Grouping is the tool for anything else,
+ * and it already applies a shared *delta* instead.
+ *
+ * Nothing enforced that: the command stamped one group id onto whatever it was
+ * given, and the menu offered it for any two clips — including a pair that was
+ * already linked, where it made a fresh group id, changed nothing, and still cost
+ * an undo step.
+ *
+ * Sources are deliberately not compared. Sound recorded separately from the picture
+ * is linked to it after syncing, and that is the case a link is most useful for.
+ */
+export function linkability(
+  // Only the clips are read, so a command's working draft satisfies this as
+  // readily as a finished project and the rule has one implementation, not two.
+  p: { readonly clips: Readonly<Record<ClipId, Clip>> },
+  clipIds: readonly ClipId[],
+): { readonly ok: boolean; readonly reason: string | null } {
+  const clips = clipIds.map((id) => p.clips[id]).filter((clip): clip is Clip => clip !== undefined);
+  if (clips.length < 2) return { ok: false, reason: 'select a video and an audio clip' };
+  if (clips.length > 2) return { ok: false, reason: 'select one video and one audio clip' };
+
+  const [first, second] = clips as [Clip, Clip];
+  if (clips.filter(isAudioClip).length !== 1) {
+    return { ok: false, reason: 'needs one video and one audio clip' };
+  }
+  if (first.linkGroupId !== null && first.linkGroupId === second.linkGroupId) {
+    return { ok: false, reason: 'already linked' };
+  }
+  if (first.locked || second.locked) return { ok: false, reason: 'a clip is locked' };
+  return { ok: true, reason: null };
+}
+
 // ---------------------------------------------------------------------------
 // Selection units
 // ---------------------------------------------------------------------------

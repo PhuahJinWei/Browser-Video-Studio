@@ -292,7 +292,16 @@ function Studio(): React.JSX.Element {
         case 'Backspace':
           if (selection.length > 0) {
             event.preventDefault();
-            run({ type: 'removeClips', clipIds: selection, mode: 'lift' }, 'Delete clips');
+            // Shift closes the gap the removal leaves. The two deletes are one
+            // decision, so they sit on one key here as they sit together in the menu.
+            run(
+              {
+                type: 'removeClips',
+                clipIds: selection,
+                mode: event.shiftKey ? 'ripple' : 'lift',
+              },
+              event.shiftKey ? 'Ripple delete' : 'Delete clips',
+            );
           }
           break;
         default:

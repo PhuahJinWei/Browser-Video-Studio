@@ -204,10 +204,13 @@ export function MediaBin(): React.JSX.Element {
    */
   const [hoverCard, setHoverCard] = useState<HoverCardState | null>(null);
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** A card is on screen, so movement should not restart its clock. */
+  const hoverShown = useRef(false);
 
   const cancelHover = useCallback((): void => {
     if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
     hoverTimer.current = null;
+    hoverShown.current = false;
     setHoverCard(null);
   }, []);
 
@@ -216,10 +219,14 @@ export function MediaBin(): React.JSX.Element {
     asset: Asset,
     rows: readonly { label: string; value: string }[],
   ): void => {
+    // Dragging media out of the library is a gesture like any other, and already
+    // answered cards stay where they are rather than chasing the pointer.
+    if (useStudio.getState().draggingAssetId || hoverShown.current) return;
     if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
     const { clientX, clientY } = event;
     hoverTimer.current = setTimeout(() => {
       if (useStudio.getState().draggingAssetId) return;
+      hoverShown.current = true;
       setHoverCard({
         subjectId: asset.id,
         clientX,
@@ -785,6 +792,9 @@ function AssetCard({
         )
       }
       onPointerEnter={(event) => onHoverStart(event, asset, rows)}
+      // As on the timeline: the wait is for the pointer to settle, not merely to
+      // have arrived.
+      onPointerMove={(event) => onHoverStart(event, asset, rows)}
       onPointerLeave={onHoverEnd}
       onContextMenu={onContextMenu}
       onDoubleClick={() => previewAsset(asset.id)}

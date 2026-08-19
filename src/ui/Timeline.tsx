@@ -16,6 +16,7 @@ import {
   getTrack,
   isGrouped,
   isMediaClip,
+  linkability,
   pairedCuts,
   pairedTransitions,
   selectionUnit,
@@ -41,6 +42,7 @@ import type {
   Transition,
   TransitionId,
 } from '../model/types';
+import { clipMenuTargets } from './clipMenuTargets';
 import { LanePreview, type LaneClip } from './LanePreview';
 import { useContextMenu, type MenuEntry } from './ContextMenu';
 import { useDialog } from './Dialog';
@@ -536,25 +538,46 @@ export function Timeline(): React.JSX.Element {
    */
   const [hoverCard, setHoverCard] = useState<HoverCardState | null>(null);
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** A card is on screen, so movement should not restart its clock. */
+  const hoverShown = useRef(false);
+  /**
+   * Whether any gesture owns the pointer, read from inside the pending timer.
+   *
+   * A ref rather than the state itself: the timer was scheduled in an earlier render
+   * and closes over whatever was true then, which is exactly the moment before a
+   * drag begins.
+   */
+  const gestureRef = useRef(false);
+  gestureRef.current = drag !== null || transitionDrag !== null || marquee !== null;
 
   const cancelHover = useCallback((): void => {
     if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
     hoverTimer.current = null;
+    hoverShown.current = false;
     setHoverCard(null);
   }, []);
 
   const scheduleHover = useCallback(
     (event: React.PointerEvent, clip: Clip): void => {
+      // Never during a gesture. Dragging, trimming, sweeping a marquee — a card that
+      // appears in the middle of any of them lands on top of the work it describes,
+      // and the answer it gives is one nobody asked for.
+      if (gestureRef.current) return;
+      // Already answered: leave it be. Restarting the clock on a card that is on
+      // screen would make it flicker as the pointer drifts over the same clip.
+      if (hoverShown.current) return;
+
       if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
       const { clientX, clientY } = event;
       hoverTimer.current = setTimeout(() => {
         const latest = useStudio.getState();
         // Gone, or a gesture started while we were waiting.
         const current = latest.project().clips[clip.id];
-        if (!current) return;
+        if (!current || gestureRef.current) return;
         const detail = clipDetails(latest.project(), current, frameRateRef.current);
+        hoverShown.current = true;
         setHoverCard({ subjectId: clip.id, clientX, clientY, ...detail, subtitle: detail.subtitle });
-      }, HOVER_DELAY_MS);
+      }, TIMELINE_HOVER_DELAY_MS);
     },
     [],
   );
@@ -1443,8 +1466,21 @@ export function Timeline(): React.JSX.Element {
     run({ type: 'splitClips', trackIds, at }, 'Split');
 
   const openClipMenu = (event: React.MouseEvent, clip: Clip): void => {
-    if (!selection.includes(clip.id)) select([clip.id]);
-    const targets = selection.includes(clip.id) && selection.length > 1 ? selection : [clip.id];
+    const alreadySelected = selection.includes(clip.id);
+    if (!alreadySelected) select([clip.id]);
+
+    /*
+     * What the delete entries act on.
+     *
+     * Worked out from the document rather than read back from `selection`, which is
+     * this render's value and so does not yet know about the `select` above — the
+     * menu's entries are built now and captured as they stand. Right-clicking a
+     * linked or grouped clip that was not already selected therefore lit the whole
+     * unit up and then deleted one member of it, which is the very split
+     * `selectionUnit` exists to prevent. Del never had the problem, since it reads
+     * the live selection, so the menu and the key disagreed on the same clip.
+     */
+    const targets = clipMenuTargets(project, selection, clip.id);
 
     // Only offer "detach" when the clip is actually tied to another one.
     const linked = clip.linkGroupId
@@ -1459,6 +1495,11 @@ export function Timeline(): React.JSX.Element {
      * stays available the moment anything else is in the selection, because grouping
      * a linked pair *with* a third clip is a real edit.
      */
+    // Says why, rather than only whether: a greyed entry with no reason is a dead
+    // end, and the commonest case — the clips are already linked — is one a person
+    // will otherwise keep retrying.
+    const link = linkability(project, selection);
+
     const isOnlyOneLinkUnit =
       selection.length > 1 &&
       clip.linkGroupId !== null &&
@@ -1488,9 +1529,9 @@ export function Timeline(): React.JSX.Element {
         onSelect: () => run({ type: 'unlinkClips', clipIds: [clip.id] }, 'Detach audio'),
       },
       {
-        label: 'Link selected clips',
+        label: link.ok ? 'Link selected clips' : `Link selected clips (${link.reason})`,
         icon: <IconLink />,
-        disabled: selection.length < 2,
+        disabled: !link.ok,
         onSelect: () => run({ type: 'linkClips', clipIds: selection }, 'Link clips'),
       },
       'separator',
@@ -1556,8 +1597,12 @@ export function Timeline(): React.JSX.Element {
         onSelect: () => run({ type: 'removeClips', clipIds: targets, mode: 'lift' }, 'Delete clips'),
       },
       {
-        label: 'Ripple delete',
+        // Counted like its neighbour: the two take the same clips and differ only in
+        // whether the gap closes, so a count on one and not the other read as though
+        // they also disagreed about what they would take.
+        label: targets.length > 1 ? `Ripple delete ${targets.length} clips` : 'Ripple delete',
         icon: <IconRipple />,
+        hint: 'Shift+Del',
         danger: true,
         onSelect: () => run({ type: 'removeClips', clipIds: targets, mode: 'ripple' }, 'Ripple delete'),
       },
@@ -2912,6 +2957,10 @@ function ClipView({
       // No `title`: the hover card replaces it. Leaving both would show a styled card
       // and then the browser's own tooltip on top of it a moment later.
       onPointerEnter={onHoverStart}
+      // Movement restarts the clock, so the delay measures a *rest* rather than the
+      // time since the pointer crossed an edge. Sweeping across a clip on the way
+      // somewhere else never summons anything, however long the crossing takes.
+      onPointerMove={onHoverStart}
       onPointerLeave={onHoverEnd}
       onContextMenu={onContextMenu}
       onPointerDown={(event) => {
@@ -2988,13 +3037,23 @@ function formatDelta(delta: Time, frameRate: FrameRate): string {
 }
 
 /**
- * How long the pointer must rest before a hover card appears.
+ * How long the pointer must rest before a hover card appears, in the library.
  *
- * Long enough that sweeping across a track does not strobe cards, short enough that
- * deliberately pointing at something feels answered. The native `title` tooltip this
- * replaces waits about a second, which is past the point of being useful.
+ * Hovering a card there is a question — what is this file — so it should be answered
+ * quickly. The native `title` tooltip this replaces waits about a second, which is
+ * past the point of being useful.
  */
-export const HOVER_DELAY_MS = 400;
+export const HOVER_DELAY_MS = 450;
+
+/**
+ * The same, on the timeline, where it is deliberately slower.
+ *
+ * Pointing at a bin card is asking; pointing at a clip is usually *working*. At the
+ * library's pace an ordinary pause while lining up an edit summons a card, and it
+ * appears over the very thing being edited. This is about the length of a pause that
+ * means "what is this?" rather than one that means "hold on".
+ */
+export const TIMELINE_HOVER_DELAY_MS = 800;
 
 export interface HoverRow {
   readonly label: string;

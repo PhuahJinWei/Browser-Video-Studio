@@ -14,6 +14,7 @@ import {
   clipSpeedAt,
   isMediaClip,
   isSyntheticClip,
+  linkability,
   maxTransitionDuration,
   ModelError,
   rollBounds,
@@ -615,11 +616,29 @@ function handleUngroupClips(d: Draft, cmd: Extract<Command, { type: 'ungroupClip
 }
 
 function handleLinkClips(d: Draft, cmd: Extract<Command, { type: 'linkClips' }>, ids: IdSource): void {
-  if (cmd.clipIds.length < 2) return;
+  // Refused rather than ignored: the menu asks the same question before offering the
+  // action, so anything that reaches here is a caller that did not, and silently
+  // stamping a link onto two video clips would give them shared trim edges that make
+  // no sense for unrelated media.
+  const check = linkability(d, cmd.clipIds);
+  if (!check.ok) throw new ModelError(`Cannot link these clips — ${check.reason}`);
+
   const groupId = `lg_${ids.clip()}`;
+  const vacated = new Set<string>();
   for (const clipId of cmd.clipIds) {
     const clip = draftClip(d, clipId);
+    if (clip.linkGroupId) vacated.add(clip.linkGroupId);
     d.clips[clipId] = { ...clip, linkGroupId: groupId };
+  }
+
+  // A clip that was linked to one of these is now the only member of its old group.
+  // A link of one is not a link, and leaving it would make the clip claim a
+  // relationship it no longer has.
+  for (const group of vacated) {
+    const remaining = Object.values(d.clips).filter((clip) => clip.linkGroupId === group);
+    for (const clip of remaining) {
+      if (remaining.length < 2) d.clips[clip.id] = { ...clip, linkGroupId: null };
+    }
   }
 }
 

@@ -41,6 +41,7 @@ import {
   IconUnlocked,
   IconVideo,
 } from './Icons';
+import { linkability } from '../model/selectors';
 import * as T from '../model/time';
 import { useLayout } from './layout';
 import { emptyTracksToRemove, useStudio } from './store';
@@ -163,6 +164,9 @@ export function MenuBar({
   const linkedCount = clip?.linkGroupId
     ? Object.values(project.clips).filter((c) => c.linkGroupId === clip.linkGroupId).length
     : 0;
+  // Says why, rather than only whether: a greyed entry with no reason is a dead end,
+  // and "they are already linked" is a state a person will otherwise keep retrying.
+  const link = linkability(project, selection);
 
   useEffect(() => {
     if (!open) return;
@@ -238,7 +242,9 @@ export function MenuBar({
         { label: 'Deselect', disabled: !hasSelection, onSelect: () => select([]) },
         'separator',
         {
-          label: 'Delete',
+          // Both entries count what they will take, matching the timeline's own
+          // clip menu — the pair differs in whether the gap closes, nothing else.
+          label: selection.length > 1 ? `Delete ${selection.length} clips` : 'Delete',
           icon: <IconTrash />,
           hint: 'Del',
           danger: true,
@@ -246,8 +252,10 @@ export function MenuBar({
           onSelect: () => run({ type: 'removeClips', clipIds: selection, mode: 'lift' }, 'Delete clips'),
         },
         {
-          label: 'Ripple delete',
+          label:
+            selection.length > 1 ? `Ripple delete ${selection.length} clips` : 'Ripple delete',
           icon: <IconRipple />,
+          hint: 'Shift+Del',
           danger: true,
           disabled: !hasSelection,
           onSelect: () => run({ type: 'removeClips', clipIds: selection, mode: 'ripple' }, 'Ripple delete'),
@@ -266,9 +274,9 @@ export function MenuBar({
           onSelect: () => run({ type: 'unlinkClips', clipIds: selection }, 'Detach audio'),
         },
         {
-          label: 'Link selected clips',
+          label: link.ok ? 'Link selected clips' : `Link selected clips (${link.reason})`,
           icon: <IconLink />,
-          disabled: selection.length < 2,
+          disabled: !link.ok,
           onSelect: () => run({ type: 'linkClips', clipIds: selection }, 'Link clips'),
         },
         'separator',
