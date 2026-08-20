@@ -44,6 +44,9 @@ import type {
 } from '../model/types';
 import { clipMenuTargets } from './clipMenuTargets';
 import { LanePreview, type LaneClip } from './LanePreview';
+import { edgeScrollDelta, pageScrollTo } from './edgeScroll';
+import { playback } from './playback';
+import { usePlaybackPaint, usePlayheadLeft } from './PlayheadMarker';
 import { useContextMenu, type MenuEntry } from './ContextMenu';
 import { useDialog } from './Dialog';
 import { clipsForDragOrigin } from './dragOrigin';
@@ -280,6 +283,15 @@ interface DragState {
   readonly kind: DragKind;
   readonly clipId: ClipId;
   readonly originClientX: number;
+  /**
+   * How far the view was scrolled when the drag began.
+   *
+   * A drag is measured from where the pointer started, but the pointer is in screen
+   * coordinates and a clip lives in the timeline's. Auto-scrolling moves one under
+   * the other, so without this a clip held against the edge stops dead while the
+   * timeline slides away beneath it.
+   */
+  readonly originScrollX: number;
   readonly originStart: Time;
   readonly originDuration: Time;
   readonly originTrackId: TrackId;
@@ -416,7 +428,15 @@ export function Timeline(): React.JSX.Element {
   const zoomRef = useRef(sequence.view.zoom);
   const pxPerSecond = sequence.view.zoom;
   zoomRef.current = pxPerSecond;
-  const playhead = sequence.view.playhead;
+  /*
+   * Read live, not from the document.
+   *
+   * The play head moves forty times a second and the document is only told where it
+   * ended up. Anything that acts at the head — snapping, the split entries, rolling
+   * a cut — has to ask the channel at the moment it runs, and anything that *draws*
+   * the head does it imperatively rather than through a render.
+   */
+  const playheadNow = (): Time => playback.get().position;
   const trackIds = useMemo(() => orderedTrackIds(project, sequenceId), [project, sequenceId]);
   const emptyTrackCount = emptyTracksToRemove(project, sequenceId).length;
 
@@ -714,23 +734,203 @@ export function Timeline(): React.JSX.Element {
     return found;
   }, []);
 
-  /** Keep a dragged clip or asset moving through a pane's independently-scrolled stack. */
-  const autoScrollPaneAt = useCallback((clientY: number): void => {
-    const threshold = 32;
-    const maximumStep = 18;
+  /*
+   * Scroll the timeline while a gesture is held near an edge.
+   *
+   * Driven by a frame loop rather than by pointer events. The pane-scrolling
+   * version this replaces ran inside `pointermove`, so it only scrolled while the
+   * mouse was moving — and holding still against the edge, which is exactly how one
+   * asks a view to keep going, did nothing at all.
+   *
+   * `apply` re-runs the gesture at the last known pointer position after each
+   * scroll. Without it a held pointer would slide the view under a play head that
+   * never moved, because no pointer event ever fired to tell it the world had
+   * changed.
+   */
+  /** Width the panes' scrollbar gutter currently takes, for the content boundary. */
+  const gutterRef = useRef(0);
+  const edgePointer = useRef({ clientX: 0, clientY: 0 });
+  const edgeApply = useRef<((clientX: number, clientY: number) => void) | null>(null);
+  const edgeFrame = useRef<number | null>(null);
+
+  const stopEdgeScroll = useCallback((): void => {
+    if (edgeFrame.current !== null) cancelAnimationFrame(edgeFrame.current);
+    edgeFrame.current = null;
+    edgeApply.current = null;
+  }, []);
+
+  const playheadHeadRef = useRef<HTMLDivElement>(null);
+  const playheadLineRef = useRef<HTMLDivElement>(null);
+  usePlayheadLeft(playheadHeadRef, pxPerSecond);
+  usePlayheadLeft(playheadLineRef, pxPerSecond);
+  // The title carries the time, so it is written by the same tick that moves it —
+  // a value baked in at render would be stale the moment playback started.
+  /**
+   * Hide the flag once the head itself is off screen, not once its last pixel is.
+   *
+   * The flag is nineteen pixels wide and drawn centred, so clipping alone leaves it
+   * showing a sliver for nine pixels after the play head has left the view — while
+   * the two-pixel line, clipped at the same boundary, has already gone. Judging it
+   * by the head's own position is what makes the two one object.
+   */
+  const paintHead = useCallback((at: Time): void => {
+    const element = playheadHeadRef.current;
+    const scroller = scrollRef.current;
+    if (!element) return;
+    element.title = `Playhead ${T.toTimecode(at, frameRateRef.current)} — drag to scrub`;
+    if (!scroller) return;
+
+    // Rounded exactly as the flag itself is placed — `left` is rounded and the
+    // scroll translate is rounded — so this asks where the element really is. An
+    // unrounded comparison disagrees with it by a fraction of a pixel, and at the
+    // boundary that fraction is the difference between shown and hidden.
+    const x = Math.round(T.toSeconds(at) * zoomRef.current) - Math.round(scroller.scrollLeft);
+    const width = Math.max(0, scroller.clientWidth - HEADER_WIDTH - gutterRef.current);
+    element.style.visibility = x < 0 || x > width ? 'hidden' : '';
+  }, []);
+
+  usePlaybackPaint((state) => paintHead(state.position));
+
+  /**
+   * Tell the stylesheet where the view is scrolled to.
+   *
+   * Anything positioned against the viewport rather than against the content — the
+   * ruler, the lane preview canvases, the play head line — is placed from this. The
+   * `scroll` event alone is not enough: it is delivered asynchronously, so code that
+   * sets `scrollLeft` itself (the follow, the edge loop) would leave every one of
+   * them a frame behind, and in a background tab the event may not arrive at all.
+   */
+  const publishScrollX = useCallback((el: HTMLElement): void => {
+    el.style.setProperty('--timeline-scroll-x', `${Math.round(el.scrollLeft)}px`);
+  }, []);
+
+  const edgeScrollTick = useCallback((): void => {
+    edgeFrame.current = null;
+    if (!edgeApply.current) return;
+
+    const { clientX, clientY } = edgePointer.current;
+    let moved = false;
+
+    const horizontal = scrollRef.current;
+    if (horizontal) {
+      const rect = horizontal.getBoundingClientRect();
+      const delta = edgeScrollDelta({
+        pointer: clientX,
+        start: rect.left,
+        end: rect.right,
+        scroll: horizontal.scrollLeft,
+        maxScroll: Math.max(0, horizontal.scrollWidth - horizontal.clientWidth),
+        // The track headers sit over the first stretch of the view, so the content's
+        // own left edge is where "near the start" begins.
+        inset: HEADER_WIDTH,
+      });
+      if (delta !== 0) {
+        horizontal.scrollLeft += delta;
+        publishScrollX(horizontal);
+        moved = true;
+      }
+    }
+
     for (const pane of [videoPaneRef.current, audioPaneRef.current]) {
       if (!pane) continue;
       const rect = pane.getBoundingClientRect();
       if (clientY < rect.top || clientY > rect.bottom) continue;
-      const fromTop = clientY - rect.top;
-      const fromBottom = rect.bottom - clientY;
-      if (fromTop < threshold) {
-        pane.scrollTop -= Math.ceil(maximumStep * (1 - fromTop / threshold));
-      } else if (fromBottom < threshold) {
-        pane.scrollTop += Math.ceil(maximumStep * (1 - fromBottom / threshold));
+      const delta = edgeScrollDelta({
+        pointer: clientY,
+        start: rect.top,
+        end: rect.bottom,
+        scroll: pane.scrollTop,
+        maxScroll: Math.max(0, pane.scrollHeight - pane.clientHeight),
+      });
+      if (delta !== 0) {
+        pane.scrollTop += delta;
+        moved = true;
       }
-      return;
+      break;
     }
+
+    // Only when something actually moved: re-running the gesture on a view that is
+    // already against its stop would fight a drag that is deliberately parked there.
+    if (moved) {
+      // The gesture first, then the flag. The scroll has just moved the view out
+      // from under a play head that has not caught up yet, so painting before this
+      // judges the head against a scroll it does not belong to — which put it one
+      // frame outside the view, and one frame back in, for every frame of a drag.
+      edgeApply.current(clientX, clientY);
+      paintHead(playback.get().position);
+    }
+    edgeFrame.current = requestAnimationFrame(edgeScrollTick);
+  }, [publishScrollX, paintHead]);
+
+  /** Track the pointer for a gesture that may want the view to follow it. */
+  const edgeScrollAt = useCallback(
+    (clientX: number, clientY: number, apply?: (x: number, y: number) => void): void => {
+      edgePointer.current = { clientX, clientY };
+      if (apply) edgeApply.current = apply;
+      if (edgeApply.current && edgeFrame.current === null) {
+        edgeFrame.current = requestAnimationFrame(edgeScrollTick);
+      }
+    },
+    [edgeScrollTick],
+  );
+
+  useEffect(() => stopEdgeScroll, [stopEdgeScroll]);
+
+  /*
+   * Keep the play head on screen while it is playing.
+   *
+   * Without this the head simply runs off the right edge and playback continues
+   * against a timeline that is no longer showing the part being played. It pages
+   * rather than sliding: the view jumps a screen ahead and then holds still, which
+   * is far easier to read than content sliding continuously under a fixed line, and
+   * costs one scroll a screen rather than one a frame.
+   *
+   * Only while playing. Scrubbing already moves the view by its own edge scrolling,
+   * and yanking the timeline about after every click of the ruler would take it out
+   * of the user's hands.
+   */
+  useEffect(
+    () =>
+      playback.subscribe((state) => {
+        if (!state.playing || state.mode !== 'program') return;
+        const el = scrollRef.current;
+        if (!el) return;
+
+        const next = pageScrollTo(T.toSeconds(state.position) * zoomRef.current, {
+          scroll: el.scrollLeft,
+          // The header column covers the start of the view, so the window of content
+          // actually on screen is that much narrower than the element.
+          length: Math.max(0, el.clientWidth - HEADER_WIDTH),
+          maxScroll: Math.max(0, el.scrollWidth - el.clientWidth),
+        });
+        if (next === null) return;
+        el.scrollLeft = next;
+        publishScrollX(el);
+        paintHead(state.position);
+      }),
+    [],
+  );
+
+  /**
+   * The pointer, held inside the part of the view that shows time.
+   *
+   * The track headers cover the left of the timeline and the panes' scrollbar
+   * gutter the right; neither is on the time axis, so a pointer over them names no
+   * instant. Left unclamped, dragging the play head over the headers put it that far
+   * off-screen and held it there — visible only as a sliver of its flag — for as
+   * long as the pointer stayed. Clamping means a gesture that runs past the edge
+   * advances time by scrolling the view under a pointer pinned to the boundary,
+   * which is what the auto-scroll is for. Re-entering the content picks it straight
+   * back up: the head is already at the edge, so movement always means movement.
+   */
+  const clampToContent = useCallback((clientX: number): number => {
+    const el = scrollRef.current;
+    if (!el) return clientX;
+    const rect = el.getBoundingClientRect();
+    return Math.min(
+      Math.max(clientX, rect.left + HEADER_WIDTH),
+      rect.right - gutterRef.current,
+    );
   }, []);
 
   const timeAtClientX = useCallback(
@@ -739,10 +939,10 @@ export function Timeline(): React.JSX.Element {
       if (!el) return T.TIME_ZERO;
       const rect = el.getBoundingClientRect();
       // The header column scrolls with the lanes now, so subtract its width.
-      const x = clientX - rect.left + el.scrollLeft - HEADER_WIDTH;
+      const x = clampToContent(clientX) - rect.left + el.scrollLeft - HEADER_WIDTH;
       return T.max(T.TIME_ZERO, T.fromSeconds(x / pxPerSecond, 100_000));
     },
-    [pxPerSecond],
+    [pxPerSecond, clampToContent],
   );
 
   /**
@@ -767,7 +967,7 @@ export function Timeline(): React.JSX.Element {
       };
 
       consider(T.TIME_ZERO);
-      consider(playhead);
+      consider(playheadNow());
       for (const trackId of trackIds) {
         for (const clip of trackClips(project, trackId)) {
           if (exclude.has(clip.id)) continue;
@@ -777,7 +977,7 @@ export function Timeline(): React.JSX.Element {
       }
       return best === null ? { at, hit: null } : { at: best, hit: best };
     },
-    [pxPerSecond, playhead, project, trackIds],
+    [pxPerSecond, project, trackIds],
   );
 
   /**
@@ -943,12 +1143,23 @@ export function Timeline(): React.JSX.Element {
   useEffect(() => {
     if (!drag) return;
 
+    // Named so the loop can re-run the drag at a pointer that has not moved while
+    // the view scrolls out from under it.
+    const applyAt = (clientX: number, clientY: number): void => {
+      move({ clientX, clientY } as PointerEvent);
+    };
+
     const move = (event: PointerEvent): void => {
       const clip = project.clips[drag.clipId];
       if (!clip) return;
-      autoScrollPaneAt(event.clientY);
+      edgeScrollAt(event.clientX, event.clientY, applyAt);
 
-      const deltaSeconds = (event.clientX - drag.originClientX) / pxPerSecond;
+      // Both halves of the movement: the pointer across the screen, and the screen
+      // across the timeline. Holding still at the edge is the case where only the
+      // second one is happening.
+      const scrolledBy = (scrollRef.current?.scrollLeft ?? 0) - drag.originScrollX;
+      const deltaSeconds =
+        (clampToContent(event.clientX) - drag.originClientX + scrolledBy) / pxPerSecond;
       const delta = T.fromSeconds(deltaSeconds, 100_000);
       const excluded = new Set(drag.groupIds);
 
@@ -1061,6 +1272,7 @@ export function Timeline(): React.JSX.Element {
     };
 
     const up = (): void => {
+      stopEdgeScroll();
       const pending = insertionRef.current;
       if (pending) {
         // Read the document back rather than using this render's copy: the drag has
@@ -1105,6 +1317,11 @@ export function Timeline(): React.JSX.Element {
     cancelHover();
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+    // Deliberately not stopping the edge scroll here. This effect depends on the
+    // project, which a drag rewrites on every pointer event, so it tears down and
+    // re-registers constantly — cancelling the loop in the cleanup cancelled it on
+    // every frame of the very gesture it exists to serve. Releasing the pointer ends
+    // it, and unmounting is covered separately.
     return () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
@@ -1119,12 +1336,14 @@ export function Timeline(): React.JSX.Element {
     endGesture,
     trackAtClientY,
     insertionAt,
+    clampToContent,
     moveClipsToNewTrack,
     sequence,
     clearGestureHints,
     showHint,
     frameRate,
-    autoScrollPaneAt,
+    edgeScrollAt,
+    stopEdgeScroll,
   ]);
 
   useEffect(() => {
@@ -1230,13 +1449,17 @@ export function Timeline(): React.JSX.Element {
   useEffect(() => {
     if (!marquee) return;
 
+    const applyAt = (clientX: number, clientY: number): void => {
+      setMarquee((current) => (current ? { ...current, clientX, clientY } : current));
+    };
+
     const move = (event: PointerEvent): void => {
-      setMarquee((current) =>
-        current ? { ...current, clientX: event.clientX, clientY: event.clientY } : current,
-      );
+      edgeScrollAt(event.clientX, event.clientY, applyAt);
+      applyAt(event.clientX, event.clientY);
     };
 
     const up = (): void => {
+      stopEdgeScroll();
       const covered = tracksBetweenClientY(marquee.originClientY, marquee.clientY);
       const from = timeAtClientX(Math.min(marquee.originClientX, marquee.clientX));
       const to = timeAtClientX(Math.max(marquee.originClientX, marquee.clientX));
@@ -1319,6 +1542,7 @@ export function Timeline(): React.JSX.Element {
       kind,
       clipId: clip.id,
       originClientX: event.clientX,
+      originScrollX: scrollRef.current?.scrollLeft ?? 0,
       originStart: clip.start,
       originDuration: clip.duration,
       originTrackId: clip.trackId,
@@ -1518,7 +1742,7 @@ export function Timeline(): React.JSX.Element {
         icon: <IconSplit />,
         hint: 'S',
         // Only does anything when the playhead is actually inside the clip.
-        disabled: !(T.lt(clip.start, playhead) && T.gt(clipEnd(clip), playhead)),
+        disabled: !(T.lt(clip.start, playheadNow()) && T.gt(clipEnd(clip), playheadNow())),
         onSelect: () => splitAtPlayhead(),
       },
       'separator',
@@ -1613,7 +1837,7 @@ export function Timeline(): React.JSX.Element {
   /** Would rolling this cut to the playhead actually move it anywhere legal? */
   const rollableToPlayhead = (transition: Transition): boolean => {
     const to = transition.toClipId === null ? null : project.clips[transition.toClipId];
-    return to !== null && to !== undefined && !T.eq(to.start, playhead);
+    return to !== null && to !== undefined && !T.eq(to.start, playheadNow());
   };
 
   const openTransitionMenu = (event: React.MouseEvent, transition: Transition): void => {
@@ -1664,7 +1888,7 @@ export function Timeline(): React.JSX.Element {
                 type: 'rollEdit' as const,
                 fromClipId: t.fromClipId!,
                 toClipId: t.toClipId!,
-                to: playhead,
+                to: playheadNow(),
               })),
             'Roll edit',
           ),
@@ -1744,7 +1968,7 @@ export function Timeline(): React.JSX.Element {
         label: 'Split all tracks at playhead',
         icon: <IconSplit />,
         hint: 'S',
-        onSelect: () => splitAt(playhead, trackIds),
+        onSelect: () => splitAt(playheadNow(), trackIds),
       },
       'separator',
       {
@@ -1784,7 +2008,7 @@ export function Timeline(): React.JSX.Element {
         label: 'Split all tracks at playhead',
         icon: <IconSplit />,
         hint: 'S',
-        onSelect: () => splitAt(playhead, trackIds),
+        onSelect: () => splitAt(playheadNow(), trackIds),
       },
       {
         label: 'Split all tracks here',
@@ -1820,12 +2044,25 @@ export function Timeline(): React.JSX.Element {
    */
   const scrubPointer = useRef<number | null>(null);
 
-  const scrubFromEvent = (event: React.PointerEvent): void => {
-    const at = timeAtClientX(event.clientX);
+  /**
+   * Move the head to a pointer position, and let the view follow the pointer.
+   *
+   * The scroll is what makes the whole timeline reachable in one gesture: at a
+   * working zoom the pointer runs out of window long before the sequence runs out
+   * of content, and `timeAtClientX` reads `scrollLeft`, so a view that moves under
+   * a stationary pointer carries the head along with it.
+   */
+  const scrubTo = (clientX: number, clientY: number): void => {
+    const at = timeAtClientX(clientX);
     setPlayhead(at);
     // Scrubbing gets the same readout as a clip drag: the ruler's own ticks thin
     // out as you zoom out, so the nearest label can be half a minute away.
-    showHint(event, T.toTimecode(at, frameRate), null, false);
+    showHint({ clientX, clientY }, T.toTimecode(at, frameRate), null, false);
+  };
+
+  const scrubFromEvent = (event: React.PointerEvent): void => {
+    edgeScrollAt(event.clientX, event.clientY, scrubTo);
+    scrubTo(event.clientX, event.clientY);
   };
 
   const onRulerPointerDown = (event: React.PointerEvent): void => {
@@ -1840,6 +2077,7 @@ export function Timeline(): React.JSX.Element {
   };
   const finishRulerScrub = (event: React.PointerEvent): void => {
     if (!ownsPointerGesture(scrubPointer.current, event.pointerId)) return;
+    stopEdgeScroll();
     scrubPointer.current = null;
     clearGestureHints();
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
@@ -1899,29 +2137,52 @@ export function Timeline(): React.JSX.Element {
   }, [pxPerSecond]);
 
   /*
-   * Publish how much room the panes' scrollbar gutters take.
+   * Reserve room for a vertical scrollbar, but only when there is one to reserve for.
    *
-   * The panes reserve a stable gutter on their right edge; the guide overlay spans
-   * the split, so without this a play head scrolled to the far right would be drawn
-   * across that gutter. Measured rather than assumed, because the width of a
-   * scrollbar is a platform and setting decision, and it is zero on overlay ones.
+   * The two track stacks scroll independently, so the gutter cannot simply be left
+   * to each pane: if the video stack overflowed and the audio stack did not, their
+   * lanes would end at different places and the same instant would sit at two
+   * different x positions. That is why the gutter was reserved permanently — and
+   * why an empty fifteen-pixel column ran down the right of the timeline whether or
+   * not anything could scroll.
+   *
+   * So it is decided for both panes at once, from whether *either* of them
+   * overflows, and published for the ruler to match. With a handful of tracks the
+   * timeline now runs to its own edge; with enough to scroll, the column appears for
+   * the ruler and both stacks together and nothing falls out of step.
    */
   useEffect(() => {
-    const pane = videoPaneRef.current;
+    const scroller = scrollRef.current;
     const split = lanesRef.current;
-    if (!pane || !split) return;
+    const panes = [videoPaneRef.current, audioPaneRef.current].filter(
+      (pane): pane is HTMLDivElement => pane !== null,
+    );
+    if (!scroller || !split || panes.length === 0) return;
 
     const measure = (): void => {
-      split.style.setProperty(
-        '--timeline-pane-gutter',
-        `${Math.max(0, pane.offsetWidth - pane.clientWidth)}px`,
-      );
+      const scrollable = panes.some((pane) => pane.scrollHeight > pane.clientHeight);
+      split.classList.toggle('reserving-gutter', scrollable);
+      // Read after the class has been applied, so this is the width the gutter
+      // actually took rather than the width it is about to take.
+      const reserved = scrollable
+        ? Math.max(0, ...panes.map((pane) => pane.offsetWidth - pane.clientWidth))
+        : 0;
+      gutterRef.current = reserved;
+      scroller.style.setProperty('--timeline-pane-gutter', `${reserved}px`);
     };
+
     measure();
     const observer = new ResizeObserver(measure);
-    observer.observe(pane);
+    for (const pane of panes) {
+      observer.observe(pane);
+      // The pane's own box does not change when a track is added or made taller —
+      // its *content* grows, and that is what decides whether it can scroll.
+      const grid = pane.firstElementChild;
+      if (grid) observer.observe(grid);
+    }
+    observer.observe(split);
     return () => observer.disconnect();
-  }, []);
+  }, [trackIds]);
 
   /*
    * Publish the horizontal scroll offset for anything positioned against the
@@ -1935,11 +2196,14 @@ export function Timeline(): React.JSX.Element {
 
     const publish = (): void => {
       el.style.setProperty('--timeline-scroll-x', `${Math.round(el.scrollLeft)}px`);
+      // Scrolling moves the head across the view's edge without the head itself
+      // moving, so its visibility is decided here as well as on every tick.
+      paintHead(playback.get().position);
     };
     publish();
     el.addEventListener('scroll', publish, { passive: true });
     return () => el.removeEventListener('scroll', publish);
-  }, []);
+  }, [paintHead]);
 
   const ticks = useMemo(
     () => buildTicks(totalSeconds, pxPerSecond, sequence.frameRate),
@@ -1948,7 +2212,11 @@ export function Timeline(): React.JSX.Element {
 
   // Rounded, because the line is drawn from this and a fractional left edge makes a
   // 2px rule antialias across three columns and read as a soft grey smear.
-  const playheadX = Math.round(T.toSeconds(playhead) * pxPerSecond);
+  /*
+   * The head and the line are the same number in two places, so they share one
+   * subscription each rather than a shared React value that would have to re-render
+   * the whole timeline to reach them.
+   */
 
   const draggedClip = drag?.kind === 'move' ? project.clips[drag.clipId] : null;
   const draggedClipTrackKind: TrackKind | null = draggedClip
@@ -2070,34 +2338,39 @@ export function Timeline(): React.JSX.Element {
                 {tick.label && <span>{tick.label}</span>}
               </div>
             ))}
-            {/*
-              The grab handle lives inside the ruler rather than in a full-height
-              overlay, so the sticky corner covers it when the timeline is scrolled
-              right instead of it floating over the track headers.
-            */}
-            <div
-              className="playhead-head"
-              style={{ left: playheadX }}
-              title={`Playhead ${T.toTimecode(playhead, frameRate)} — drag to scrub`}
-              onPointerDown={(event) => {
-                if (!isPrimaryButton(event)) return;
-                event.stopPropagation();
-                event.preventDefault();
-                scrubPointer.current = event.pointerId;
-                event.currentTarget.setPointerCapture(event.pointerId);
-                showHint(event, T.toTimecode(playhead, frameRate), null, false);
-              }}
-              onPointerMove={(event) => {
-                if (!ownsPointerGesture(scrubPointer.current, event.pointerId)) return;
-                const at = timeAtClientX(event.clientX);
-                setPlayhead(at);
-                showHint(event, T.toTimecode(at, frameRate), null, false);
-              }}
-              onPointerUp={finishRulerScrub}
-              onPointerCancel={finishRulerScrub}
-              onLostPointerCapture={finishRulerScrub}
-            />
               </div>
+            </div>
+
+            {/*
+              The grab handle, in a strip clipped to exactly the span the line below
+              is clipped to.
+
+              It used to sit inside the ruler and rely on the sticky corner covering
+              it. A cover is not a clip: the flag is nineteen pixels wide, so a play
+              head just off the left of the view still showed nine pixels of itself
+              past the corner's edge while its line — properly clipped — was gone.
+              Sharing a boundary is what makes the two appear and disappear together.
+            */}
+            <div className="ruler-guides" style={{ left: HEADER_WIDTH }}>
+              <div
+                className="playhead-head"
+                ref={playheadHeadRef}
+                onPointerDown={(event) => {
+                  if (!isPrimaryButton(event)) return;
+                  event.stopPropagation();
+                  event.preventDefault();
+                  scrubPointer.current = event.pointerId;
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                  showHint(event, T.toTimecode(playheadNow(), frameRate), null, false);
+                }}
+                onPointerMove={(event) => {
+                  if (!ownsPointerGesture(scrubPointer.current, event.pointerId)) return;
+                  scrubFromEvent(event);
+                }}
+                onPointerUp={finishRulerScrub}
+                onPointerCancel={finishRulerScrub}
+                onLostPointerCapture={finishRulerScrub}
+              />
             </div>
           </div>
 
@@ -2120,7 +2393,7 @@ export function Timeline(): React.JSX.Element {
                   onScroll={(event) =>
                     setTimelinePaneScroll(paneKind, event.currentTarget.scrollTop)
                   }
-                  onDragOver={(event) => autoScrollPaneAt(event.clientY)}
+                  onDragOver={(event) => edgeScrollAt(event.clientX, event.clientY, () => undefined)}
                 >
                   <div
                     className="timeline-pane-grid"
@@ -2445,7 +2718,7 @@ export function Timeline(): React.JSX.Element {
               to sit below the clips they are meant to be read against.
             */}
             <div className="timeline-guides" style={{ left: HEADER_WIDTH }}>
-              <div className="playhead-line" style={{ left: playheadX }} />
+              <div className="playhead-line" ref={playheadLineRef} />
               {snapMark !== null && (
                 <div
                   className="snap-line"

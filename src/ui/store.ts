@@ -50,6 +50,7 @@ import {
   trackDuration,
 } from '../model/selectors';
 import * as T from '../model/time';
+import { playback } from './playback';
 import { staticParam } from '../model/params';
 import { encoderSafeSequenceSize } from '../model/sequenceFormat';
 import type {
@@ -239,7 +240,6 @@ export interface StudioState {
   /** Null is the edited program; an id opens that library asset in the source monitor. */
   previewAssetId: AssetId | null;
   /** Current source-monitor position, kept here so global capture commands use what is visible. */
-  sourcePreviewTime: Time;
   /** Per-source edit marks; source metadata, not timeline document state. */
   sourceMarks: ReadonlyMap<AssetId, { readonly inPoint: Time | null; readonly outPoint: Time | null }>;
   engine: Engine | null;
@@ -369,7 +369,7 @@ export interface StudioState {
   captureFrame: () => Promise<void>;
   previewAsset: (assetId: AssetId) => void;
   showProgramPreview: () => void;
-  setSourcePreviewTime: (at: Time) => void;
+  setSourceTime: (at: Time) => void;
   setSourceMark: (edge: 'in' | 'out') => void;
   clearSourceMarks: () => void;
   editSourceToTimeline: (mode: 'insert' | 'overwrite') => void;
@@ -491,6 +491,55 @@ export function flushAutosave(): Promise<void> {
 
 const initial = starterProject();
 
+/**
+ * Copy the live position back into the document, eventually.
+ *
+ * The document keeps a play head only so that reopening a project starts where it
+ * was left — nothing reads it during an edit. Writing it on every tick is what used
+ * to re-render the whole application forty times a second, so it is written on a
+ * delay instead, and never while playing: pausing does it once, at the end.
+ */
+let playheadCommitTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Write a known position into the document now, cancelling anything pending.
+ *
+ * Takes the time rather than reading it, because the callers that need it now are
+ * the ones about to change it — handing the monitor to a source, or stopping. A
+ * deferred read would fetch whatever replaced it.
+ */
+function commitPlayhead(get: () => StudioState, at: Time): void {
+  if (playheadCommitTimer !== null) {
+    clearTimeout(playheadCommitTimer);
+    playheadCommitTimer = null;
+  }
+  const state = get();
+  const sequence = state.project().sequences[state.sequenceId];
+  if (!sequence || T.cmp(sequence.view.playhead, at) === 0) return;
+  state.runTransient({ type: 'setView', sequenceId: state.sequenceId, view: { playhead: at } });
+}
+
+/** Write wherever the head ends up, once it stops moving. */
+function commitPlayheadSoon(get: () => StudioState): void {
+  if (playheadCommitTimer !== null) clearTimeout(playheadCommitTimer);
+  playheadCommitTimer = setTimeout(() => {
+    playheadCommitTimer = null;
+    // Never while a source is in the monitor: the channel is carrying that clip's
+    // own time, which has nothing to do with where the edit is.
+    if (playback.get().mode !== 'program') return;
+    commitPlayhead(get, playback.get().position);
+  }, PLAYHEAD_COMMIT_MS);
+}
+
+/** Long enough that a scrub is one write rather than a hundred. */
+const PLAYHEAD_COMMIT_MS = 400;
+
+/** Point the transport at a document's saved position, without writing back. */
+function adoptPlayheadFrom(project: Project, sequenceId: SequenceId): void {
+  const sequence = project.sequences[sequenceId];
+  if (sequence) playback.set({ position: sequence.view.playhead });
+}
+
 let exportController: AbortController | null = null;
 const proxyControllers = new Map<AssetId, AbortController>();
 let automaticProxyQueue = Promise.resolve();
@@ -533,7 +582,6 @@ export const useStudio = create<StudioState>((set, get) => ({
   selectedAssetIds: [],
   assetSelectionAnchor: null,
   previewAssetId: null,
-  sourcePreviewTime: T.TIME_ZERO,
   sourceMarks: new Map(),
   engine: null,
   mediaFiles: new Map(),
@@ -553,7 +601,10 @@ export const useStudio = create<StudioState>((set, get) => ({
   showTelemetry: false,
 
   project: () => current(get().history),
-  playhead: () => getSequence(get().project(), get().sequenceId).view.playhead,
+  // The live position, not the document's copy of it. Every command that acts "at
+  // the play head" — split, add title, add transition — has to see where the head
+  // actually is, which during playback the document deliberately does not know.
+  playhead: () => playback.get().position,
   duration: () => sequenceDuration(get().project(), get().sequenceId),
 
   run: (command, label, coalesceKey) => {
@@ -605,12 +656,18 @@ export const useStudio = create<StudioState>((set, get) => ({
   undoEdit: () => {
     const history = undo(get().history);
     set({ history, selection: [] });
+    // The head stays where it is. Undo takes back an edit, not where you were
+    // standing when you made it — and now that the position is not part of the
+    // document, a restored snapshot carries a stale copy that would teleport it.
+    // Writing the live position over that copy is what keeps the two agreeing.
+    commitPlayhead(get, playback.get().position);
     autosaver.schedule(current(history));
     get().engine?.refresh();
   },
   redoEdit: () => {
     const history = redo(get().history);
     set({ history, selection: [] });
+    commitPlayhead(get, playback.get().position);
     autosaver.schedule(current(history));
     get().engine?.refresh();
   },
@@ -735,9 +792,17 @@ export const useStudio = create<StudioState>((set, get) => ({
     const asset = get().project().assets[assetId];
     if (!asset || asset.status.state === 'missing') return;
     void get().engine?.pause();
+    // The program position is written back before the monitor changes hands — with
+    // the value read now, not later, since the next line replaces it.
+    commitPlayhead(get, playback.get().position);
+    playback.set({
+      mode: 'source',
+      position: T.TIME_ZERO,
+      playing: false,
+      duration: asset.video?.duration ?? asset.audio?.duration ?? T.TIME_ZERO,
+    });
     set({
       previewAssetId: assetId,
-      sourcePreviewTime: T.TIME_ZERO,
       selectedAssetIds: [assetId],
       assetSelectionAnchor: assetId,
       status: `Previewing source "${asset.name}".`,
@@ -747,14 +812,23 @@ export const useStudio = create<StudioState>((set, get) => ({
 
   showProgramPreview: () => {
     if (get().previewAssetId === null) return;
-    set({ previewAssetId: null, sourcePreviewTime: T.TIME_ZERO });
+    // Back to the program, at the position the document kept for exactly this.
+    const sequence = get().project().sequences[get().sequenceId];
+    playback.set({
+      mode: 'program',
+      playing: false,
+      position: sequence?.view.playhead ?? T.TIME_ZERO,
+      duration: get().duration(),
+    });
+    set({ previewAssetId: null });
     get().engine?.requestRender(get().playhead());
   },
 
-  setSourcePreviewTime: (at) => {
-    const asset = get().previewAssetId ? get().project().assets[get().previewAssetId!] : null;
+  setSourceTime: (at) => {
+    const state = get();
+    const asset = state.previewAssetId ? state.project().assets[state.previewAssetId] : null;
     const duration = asset?.video?.duration ?? asset?.audio?.duration ?? T.TIME_ZERO;
-    set({ sourcePreviewTime: T.clamp(at, T.TIME_ZERO, duration) });
+    playback.set({ position: T.clamp(at, T.TIME_ZERO, duration) });
   },
 
   setSourceMark: (edge) => {
@@ -764,7 +838,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     const duration = state.project().assets[assetId]?.video?.duration
       ?? state.project().assets[assetId]?.audio?.duration
       ?? T.TIME_ZERO;
-    const at = T.clamp(state.sourcePreviewTime, T.TIME_ZERO, duration);
+    const at = T.clamp(playback.get().position, T.TIME_ZERO, duration);
     const current = state.sourceMarks.get(assetId) ?? { inPoint: null, outPoint: null };
     let next = edge === 'in' ? { ...current, inPoint: at } : { ...current, outPoint: at };
     // Keep the range meaningful: moving one edge through the other clears the
@@ -1122,7 +1196,10 @@ export const useStudio = create<StudioState>((set, get) => ({
 
   setPlayhead: (at) => {
     const clamped = T.max(T.TIME_ZERO, at);
-    get().runTransient({ type: 'setView', sequenceId: get().sequenceId, view: { playhead: clamped } });
+    // Published first and synchronously: the play head and the timecode are drawn
+    // straight from this, so a drag follows the pointer without waiting for a render.
+    playback.set({ position: clamped });
+    commitPlayheadSoon(get);
     // Goes through the engine rather than requestRender so that seeking while
     // playing re-bases the transport instead of being dragged straight back.
     void get().engine?.seek(clamped);
@@ -1527,7 +1604,8 @@ export const useStudio = create<StudioState>((set, get) => ({
       const project = state.project();
       const sequence = getSequence(project, state.sequenceId);
       const source = state.previewAssetId ? project.assets[state.previewAssetId] : null;
-      const at = source ? state.sourcePreviewTime : state.playhead();
+      // One position for both monitors: the channel knows which one is live.
+      const at = state.playhead();
       const blob = source
         ? await engine.grabAssetStill(source.id, at)
         : await engine.grabStill(at);
@@ -1590,7 +1668,6 @@ export const useStudio = create<StudioState>((set, get) => ({
       selectedAssetIds: [],
       assetSelectionAnchor: null,
       previewAssetId: null,
-      sourcePreviewTime: T.TIME_ZERO,
       sourceMarks: new Map(),
       mediaFiles: new Map(),
       previews: null,
@@ -1599,6 +1676,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       error: null,
     });
     get().engine?.setSequence(sequenceId);
+    playback.set({ position: T.TIME_ZERO, playing: false, mode: 'program', duration: T.TIME_ZERO });
     autosaver.schedule(project);
     get().engine?.requestRender(T.TIME_ZERO);
   },
@@ -1609,6 +1687,10 @@ export const useStudio = create<StudioState>((set, get) => ({
 
     if (engine.isPlaying) {
       await engine.pause();
+      playback.set({ playing: false });
+      // Once, now that it has stopped: the document's copy is for reopening the
+      // project, and this is the moment it becomes worth having.
+      commitPlayhead(get, playback.get().position);
       set({ status: 'Paused.' });
       return;
     }
@@ -1622,13 +1704,8 @@ export const useStudio = create<StudioState>((set, get) => ({
     // Restart from the beginning when the playhead is parked at the end.
     const from = T.gte(get().playhead(), duration) ? T.TIME_ZERO : get().playhead();
     set({ status: 'Playing.' });
-    await engine.play(
-      from,
-      (at) => {
-        get().runTransient({ type: 'setView', sequenceId: get().sequenceId, view: { playhead: at } });
-      },
-      duration,
-    );
+    playback.set({ playing: true, duration, mode: 'program', position: from });
+    await engine.play(from, (at) => playback.set({ position: at }), duration);
   },
 
   runExport: async (settings) => {
@@ -1985,7 +2062,6 @@ async function adopt(
     selectedAssetIds: [],
     assetSelectionAnchor: null,
     previewAssetId: null,
-    sourcePreviewTime: T.TIME_ZERO,
     sourceMarks: new Map(),
     mediaFiles: loaded.media,
     previews: null,
@@ -2005,6 +2081,8 @@ async function adopt(
 
   await engine.pause();
   engine.setSequence(sequenceId);
+  playback.set({ playing: false, mode: 'program' });
+  adoptPlayheadFrom(project, sequenceId);
 
   /*
    * Opened one at a time and forgiven individually. A file the decoder will not

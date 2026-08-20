@@ -3,7 +3,7 @@
  * belong in every editor.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { snapPoints } from '../model/selectors';
 import * as T from '../model/time';
 import type { FrameRate, Time } from '../model/types';
@@ -25,14 +25,21 @@ import {
   IconVolume,
 } from './Icons';
 import { useLayout } from './layout';
+import { playback, usePlayback } from './playback';
+import { usePlaybackPaint } from './PlayheadMarker';
 import { Scrubber } from './Scrubber';
 import { useStudio } from './store';
 
+/**
+ * What the source monitor still has to hand over.
+ *
+ * Its position, its length and whether it is playing all live on the playback
+ * channel now, so the bar reads exactly the same things whichever monitor is live.
+ * What is left is what genuinely differs: what it can do, and how to ask it.
+ */
 export interface SourceTransport {
-  readonly at: Time;
   readonly duration: Time;
   readonly frameRate: FrameRate | null;
-  readonly playing: boolean;
   readonly playable: boolean;
   readonly hasPicture: boolean;
   readonly seek: (at: Time) => void;
@@ -123,8 +130,42 @@ export function Transport({ source = null }: { source?: SourceTransport | null }
   const frameRate = source?.frameRate ?? sequence.frameRate;
   const frame = T.frameDuration(frameRate);
   const total = source?.duration ?? duration();
-  const at = source?.at ?? sequence.view.playhead;
-  const transportPlaying = source?.playing ?? playing;
+  /*
+   * Read at the moment it is used, not at render.
+   *
+   * The bar is drawn once and then moved by the channel, so anything captured in a
+   * render — stepping a frame, jumping to the next edit — would be working from
+   * wherever the head was when the component last happened to re-render.
+   */
+  const atNow = (): Time => playback.get().position;
+  const transportPlaying = usePlayback((state) => state.playing) || playing;
+
+  // The rail and the timecode are moved by hand; `total` is a render value because
+  // the length of a sequence changes when it is edited, not while it plays.
+  const railRef = useRef<HTMLDivElement>(null);
+  const timeRef = useRef<HTMLSpanElement>(null);
+  const totalRef = useRef(total);
+  totalRef.current = total;
+  const frameRateRef = useRef(frameRate);
+  frameRateRef.current = frameRate;
+
+  useEffect(() => {
+    playback.set({ duration: total });
+  }, [total]);
+
+  usePlaybackPaint((state) => {
+    const rail = railRef.current;
+    if (rail) {
+      const span = T.toSeconds(totalRef.current);
+      const value = span > 0 ? Math.min(1, Math.max(0, T.toSeconds(state.position) / span)) : 0;
+      rail.style.setProperty('--scrub-value', `${value}`);
+    }
+    const time = timeRef.current;
+    if (time) {
+      const text = T.toTimecode(state.position, frameRateRef.current);
+      if (time.textContent !== text) time.textContent = text;
+    }
+  });
   const seek = (next: Time): void => {
     if (source) source.seek(next);
     else setPlayhead(next);
@@ -139,19 +180,20 @@ export function Transport({ source = null }: { source?: SourceTransport | null }
     });
 
   const goPrevEdit = (): void => {
-    const before = editPoints().filter((p) => T.lt(p, at));
+    const before = editPoints().filter((p) => T.lt(p, atNow()));
     seek(before[before.length - 1] ?? T.TIME_ZERO);
   };
 
   const goNextEdit = (): void => {
-    const after = editPoints().find((p) => T.gt(p, at));
+    const after = editPoints().find((p) => T.gt(p, atNow()));
     seek(after ?? total);
   };
 
   const step = (frames: number): void =>
-    seek(T.clamp(T.add(at, T.mulInt(frame, frames)), T.TIME_ZERO, total));
+    seek(T.clamp(T.add(atNow(), T.mulInt(frame, frames)), T.TIME_ZERO, total));
 
-  const progress = T.isPositive(total) ? Math.min(1, T.ratio(at, total)) : 0;
+  const progress = (): number =>
+    T.isPositive(total) ? Math.min(1, T.ratio(atNow(), total)) : 0;
   const setProgress = (ratio: number): void => {
     if (!T.isPositive(total)) return;
     seek(T.mulRational(total, T.fromSeconds(ratio, 100_000)));
@@ -166,18 +208,20 @@ export function Transport({ source = null }: { source?: SourceTransport | null }
   return (
     <div className="transport">
       <Scrubber
-        value={progress}
+        value={progress()}
+        getValue={progress}
+        railRef={railRef}
         onChange={setProgress}
         step={T.isPositive(total) ? T.ratio(frame, total) : 0.01}
         ariaLabel="Preview position"
-        ariaValueText={`${T.toTimecode(at, frameRate)} of ${T.toTimecode(total, frameRate)}`}
+        ariaValueText={`of ${T.toTimecode(total, frameRate)}`}
         title="Click to seek"
         {...(sourceRange ? { range: sourceRange } : {})}
       />
 
       <div className="transport-buttons">
         <span className="transport-time">
-          {T.toTimecode(at, frameRate)}
+          <span ref={timeRef}>{T.toTimecode(playback.get().position, frameRate)}</span>
           <span className="dim"> / {T.toTimecode(total, frameRate)}</span>
         </span>
 

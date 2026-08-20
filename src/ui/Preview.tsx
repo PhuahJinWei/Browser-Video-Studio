@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import * as T from '../model/time';
 import { IconAudio, IconClose } from './Icons';
 import { useLayout } from './layout';
+import { playback, usePlayback } from './playback';
 import { useStudio } from './store';
 import { Transport, type SourceTransport } from './Transport';
 
@@ -18,15 +19,15 @@ export function Preview(): React.JSX.Element {
   const sequenceId = useStudio((s) => s.sequenceId);
   const mediaFiles = useStudio((s) => s.mediaFiles);
   const previewAssetId = useStudio((s) => s.previewAssetId);
-  const sourcePreviewTime = useStudio((s) => s.sourcePreviewTime);
-  const setSourcePreviewTime = useStudio((s) => s.setSourcePreviewTime);
   const sourceMarks = useStudio((s) => s.sourceMarks);
   const showProgramPreview = useStudio((s) => s.showProgramPreview);
   const previews = useStudio((s) => s.previews);
   useStudio((s) => s.previewVersion);
   const monitorVolume = useLayout((s) => s.monitorVolume);
   const monitorMuted = useLayout((s) => s.monitorMuted);
-  const [sourcePlaying, setSourcePlaying] = useState(false);
+  // Whether it is playing is the one part of the transport a render cares about,
+  // and it changes when someone presses a button rather than sixty times a second.
+  const sourcePlaying = usePlayback((state) => state.mode === 'source' && state.playing);
 
   const project = history.present.project;
   const sequence = project.sequences[sequenceId]!;
@@ -52,19 +53,24 @@ export function Preview(): React.JSX.Element {
   }, [sequence.size.width, sequence.size.height]);
 
   useEffect(() => {
-    setSourcePlaying(false);
     const media = sourceMediaRef.current;
-    if (media) media.currentTime = T.toSeconds(sourcePreviewTime);
+    if (media) media.currentTime = T.toSeconds(playback.get().position);
   }, [previewAssetId]);
 
-  // Keyboard transport updates the shared source position. Reflect those seeks in
-  // the native source element without fighting its ordinary timeupdate events.
-  useEffect(() => {
+  /*
+   * Seeks made anywhere else — the keyboard, the scrub rail, the timeline — reach
+   * the element through the channel.
+   *
+   * The tolerance is what stops a feedback loop: the element reports its own time
+   * back into the channel while it plays, and reacting to that by seeking it would
+   * make it stutter against itself.
+   */
+  useEffect(() => playback.subscribe((state) => {
     const media = sourceMediaRef.current;
-    if (!media) return;
-    const wanted = T.toSeconds(sourcePreviewTime);
+    if (!media || state.mode !== 'source') return;
+    const wanted = T.toSeconds(state.position);
     if (Math.abs(media.currentTime - wanted) > 0.08) media.currentTime = wanted;
-  }, [sourcePreviewTime]);
+  }), []);
 
   useEffect(() => {
     const media = sourceMediaRef.current;
@@ -85,16 +91,16 @@ export function Preview(): React.JSX.Element {
         if (outPoint && media.currentTime >= T.toSeconds(outPoint)) {
           media.currentTime = T.toSeconds(outPoint);
           media.pause();
-          setSourcePreviewTime(outPoint);
+          playback.set({ position: outPoint, playing: false });
           return;
         }
-        setSourcePreviewTime(T.fromSeconds(media.currentTime, 1_000_000));
+        playback.set({ position: T.fromSeconds(media.currentTime, 1_000_000) });
       }
       frame = requestAnimationFrame(update);
     };
     frame = requestAnimationFrame(update);
     return () => cancelAnimationFrame(frame);
-  }, [sourcePlaying, setSourcePreviewTime, sourceAsset, sourceMarks]);
+  }, [sourcePlaying, sourceAsset, sourceMarks]);
 
   useEffect(() => {
     const toggle = (): void => {
@@ -110,7 +116,7 @@ export function Preview(): React.JSX.Element {
   const sourceDuration = sourceAsset?.video?.duration ?? sourceAsset?.audio?.duration ?? T.TIME_ZERO;
   const seekSource = (at: T.Time): void => {
     const clamped = T.clamp(at, T.TIME_ZERO, sourceDuration);
-    setSourcePreviewTime(clamped);
+    playback.set({ position: clamped });
     if (sourceMediaRef.current) sourceMediaRef.current.currentTime = T.toSeconds(clamped);
   };
   const toggleSourcePlay = (): void => {
@@ -121,10 +127,8 @@ export function Preview(): React.JSX.Element {
   };
   const sourceTransport: SourceTransport | null = sourceAsset
     ? {
-        at: sourcePreviewTime,
         duration: sourceDuration,
         frameRate: sourceAsset.video?.frameRate ?? null,
-        playing: sourcePlaying,
         playable: sourceAsset.kind !== 'image' && sourceUrl !== null,
         hasPicture: sourceAsset.video !== null,
         seek: seekSource,
@@ -137,13 +141,13 @@ export function Preview(): React.JSX.Element {
     onLoadedMetadata: (event: React.SyntheticEvent<HTMLMediaElement>) => {
       event.currentTarget.volume = monitorVolume;
       event.currentTarget.muted = monitorMuted;
-      event.currentTarget.currentTime = T.toSeconds(sourcePreviewTime);
+      event.currentTarget.currentTime = T.toSeconds(playback.get().position);
     },
     onTimeUpdate: (event: React.SyntheticEvent<HTMLMediaElement>) =>
-      setSourcePreviewTime(T.fromSeconds(event.currentTarget.currentTime, 1_000_000)),
-    onPlay: () => setSourcePlaying(true),
-    onPause: () => setSourcePlaying(false),
-    onEnded: () => setSourcePlaying(false),
+      playback.set({ position: T.fromSeconds(event.currentTarget.currentTime, 1_000_000) }),
+    onPlay: () => playback.set({ playing: true }),
+    onPause: () => playback.set({ playing: false }),
+    onEnded: () => playback.set({ playing: false }),
   };
 
   // The source monitor's scrub rail uses the same one-per-asset picture the bin does.

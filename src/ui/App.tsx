@@ -11,6 +11,7 @@ import {
   percentToGainDb,
 } from './format';
 import { MIDDLE_MIN, useLayout } from './layout';
+import { playback } from './playback';
 import { PanelDivider } from './PanelDivider';
 import { staticParam } from '../model/params';
 import { DEFAULT_TRACK_HEIGHT } from '../model/factories';
@@ -132,7 +133,7 @@ function Studio(): React.JSX.Element {
   const duration = useStudio((s) => s.duration);
   const captureFrame = useStudio((s) => s.captureFrame);
   const previewAssetId = useStudio((s) => s.previewAssetId);
-  const setSourcePreviewTime = useStudio((s) => s.setSourcePreviewTime);
+  const setSourceTime = useStudio((s) => s.setSourceTime);
   const setSourceMark = useStudio((s) => s.setSourceMark);
   const editSourceToTimeline = useStudio((s) => s.editSourceToTimeline);
   const addTitle = useStudio((s) => s.addTitle);
@@ -255,7 +256,7 @@ function Studio(): React.JSX.Element {
       const activeFrameRate = source?.video?.frameRate ?? sequence.frameRate;
       const frame = T.frameDuration(activeFrameRate);
       const sourceDuration = source?.video?.duration ?? source?.audio?.duration ?? T.TIME_ZERO;
-      const sourceAt = useStudio.getState().sourcePreviewTime;
+      const sourceAt = playback.get().position;
       switch (event.key) {
         case ' ':
           event.preventDefault();
@@ -265,7 +266,7 @@ function Studio(): React.JSX.Element {
         case 'ArrowLeft':
           event.preventDefault();
           if (source) {
-            setSourcePreviewTime(T.sub(sourceAt, event.shiftKey ? T.mulInt(frame, 10) : frame));
+            setSourceTime(T.sub(sourceAt, event.shiftKey ? T.mulInt(frame, 10) : frame));
           } else {
             setPlayhead(T.sub(playhead(), event.shiftKey ? T.mulInt(frame, 10) : frame));
           }
@@ -273,19 +274,19 @@ function Studio(): React.JSX.Element {
         case 'ArrowRight':
           event.preventDefault();
           if (source) {
-            setSourcePreviewTime(T.add(sourceAt, event.shiftKey ? T.mulInt(frame, 10) : frame));
+            setSourceTime(T.add(sourceAt, event.shiftKey ? T.mulInt(frame, 10) : frame));
           } else {
             setPlayhead(T.add(playhead(), event.shiftKey ? T.mulInt(frame, 10) : frame));
           }
           break;
         case 'Home':
           event.preventDefault();
-          if (source) setSourcePreviewTime(T.TIME_ZERO);
+          if (source) setSourceTime(T.TIME_ZERO);
           else setPlayhead(T.TIME_ZERO);
           break;
         case 'End':
           event.preventDefault();
-          if (source) setSourcePreviewTime(sourceDuration);
+          if (source) setSourceTime(sourceDuration);
           else setPlayhead(duration());
           break;
         case 'Delete':
@@ -327,7 +328,7 @@ function Studio(): React.JSX.Element {
     setPlayhead,
     captureFrame,
     previewAssetId,
-    setSourcePreviewTime,
+    setSourceTime,
     setSourceMark,
     editSourceToTimeline,
     togglePlay,

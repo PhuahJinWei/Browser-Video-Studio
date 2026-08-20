@@ -11,6 +11,17 @@ export interface ScrubberProps {
   readonly step?: number;
   /** Optional selected source range, normalised to this rail. */
   readonly range?: { readonly start: number; readonly end: number };
+  /**
+   * The rail element, for a caller that drives the fill itself.
+   *
+   * A transport moves its rail as often as the play head ticks, which is far too
+   * often to render. Handing the element over lets it set `--scrub-value` directly;
+   * this component then leaves the property alone rather than fighting it on every
+   * render with a `value` that is always one frame behind.
+   */
+  readonly railRef?: React.RefObject<HTMLDivElement | null>;
+  /** Reads the live value for keyboard steps, when `value` is not the truth. */
+  readonly getValue?: () => number;
 }
 
 export function clampScrubValue(value: number): number {
@@ -41,14 +52,19 @@ export function Scrubber({
   title,
   step = 0.01,
   range,
+  railRef,
+  getValue,
 }: ScrubberProps): React.JSX.Element {
-  const railRef = useRef<HTMLDivElement>(null);
+  const ownRail = useRef<HTMLDivElement>(null);
+  const rail = railRef ?? ownRail;
   const activePointer = useRef<number | null>(null);
+  const driven = railRef !== undefined;
   const progress = clampScrubValue(value);
+  const liveProgress = (): number => clampScrubValue(getValue ? getValue() : value);
   const keyboardStep = Math.max(1 / 100_000, Math.abs(step));
 
   const updateFromClientX = (clientX: number): void => {
-    const rect = railRef.current?.getBoundingClientRect();
+    const rect = rail.current?.getBoundingClientRect();
     if (!rect) return;
     onChange(scrubValueAtClientX(clientX, rect.left, rect.width));
   };
@@ -89,17 +105,17 @@ export function Scrubber({
         switch (event.key) {
           case 'ArrowLeft':
           case 'ArrowDown':
-            next = progress - keyboardStep;
+            next = liveProgress() - keyboardStep;
             break;
           case 'ArrowRight':
           case 'ArrowUp':
-            next = progress + keyboardStep;
+            next = liveProgress() + keyboardStep;
             break;
           case 'PageDown':
-            next = progress - keyboardStep * 10;
+            next = liveProgress() - keyboardStep * 10;
             break;
           case 'PageUp':
-            next = progress + keyboardStep * 10;
+            next = liveProgress() + keyboardStep * 10;
             break;
           case 'Home':
             next = 0;
@@ -113,7 +129,12 @@ export function Scrubber({
         onChange(clampScrubValue(next));
       }}
     >
-      <div className="scrub-rail" ref={railRef}>
+      <div
+        className="scrub-rail"
+        ref={rail}
+        // Left to the driver when there is one; otherwise this is the only writer.
+        {...(driven ? {} : { style: { '--scrub-value': progress } as React.CSSProperties })}
+      >
         {range && (
           <div
             className="scrub-range"
@@ -123,8 +144,8 @@ export function Scrubber({
             }}
           />
         )}
-        <div className="scrub-fill" style={{ width: `${progress * 100}%` }} />
-        <div className="scrub-knob" style={{ left: `${progress * 100}%` }} />
+        <div className="scrub-fill" />
+        <div className="scrub-knob" />
       </div>
     </div>
   );
