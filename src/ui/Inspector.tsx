@@ -906,19 +906,35 @@ function UnitInspector({ unit }: { unit: SelectedUnit }): React.JSX.Element {
         </p>
       )}
 
+      {/*
+        One value to a row, each with its own name.
+
+        These were a single line — `0:16.10 → 0:32.03 · 0:15.93` — which asked the
+        reader to work out from an arrow and a middle dot which number was what. The
+        third is the worst of it: a *duration* formatted identically to the two clock
+        times beside it, so it reads as a third position on the timeline. Naming them
+        costs a few rows in a panel that scrolls anyway.
+      */}
       <div className="field">
         <label>Timing</label>
-        <p className="hint" style={{ margin: 0 }}>
-          {T.formatDuration(clip.start, { decimals: 2 })} →{' '}
-          {T.formatDuration(T.add(clip.start, clip.duration), { decimals: 2 })} ·{' '}
-          {T.formatDuration(clip.duration, { decimals: 2 })}
+        <dl className="readout">
+          <dt>Starts</dt>
+          <dd>{T.formatDuration(clip.start, { decimals: 2 })}</dd>
+          <dt>Ends</dt>
+          <dd>{T.formatDuration(T.add(clip.start, clip.duration), { decimals: 2 })}</dd>
+          <dt>Duration</dt>
+          <dd>{T.formatDuration(clip.duration, { decimals: 2 })}</dd>
           {isMediaClip(clip) && (
             <>
-              <br />
-              source @ {T.formatDuration(clip.sourceIn, { decimals: 2 })} · {clip.speed}×
+              {/* Where in the original file this clip starts — a different clock to
+                  the three above, which are all positions in the sequence. */}
+              <dt>Source in</dt>
+              <dd>{T.formatDuration(clip.sourceIn, { decimals: 2 })}</dd>
+              <dt>Speed</dt>
+              <dd>{clip.speed}&times;</dd>
             </>
           )}
-        </p>
+        </dl>
       </div>
 
       <div className="field">
@@ -982,6 +998,15 @@ function UnitInspector({ unit }: { unit: SelectedUnit }): React.JSX.Element {
           <summary>Title</summary>
           <div className="inspector-group-body">
             <TitleControls clip={unit.visual} onCommit={endGesture} />
+          </div>
+        </details>
+      )}
+
+      {unit.visual?.kind === 'solid' && (
+        <details className="inspector-group" open>
+          <summary>Colour</summary>
+          <div className="inspector-group-body">
+            <SolidControls clip={unit.visual} />
           </div>
         </details>
       )}
@@ -1187,16 +1212,77 @@ function TitleControls({ clip, onCommit }: { clip: TitleClip; onCommit: () => vo
   );
 }
 
+/**
+ * A fill clip's colour.
+ *
+ * Its own group above the video controls, for the same reason a title's text has
+ * one: this is the clip, and opacity, scale and rotation are things done to it.
+ * Sat at the foot of the video group it was below the fold on a short panel — the
+ * one control the clip exists for, reached last.
+ */
+function SolidControls({ clip }: { clip: SolidClip }): React.JSX.Element {
+  const run = useStudio((s) => s.run);
+  return (
+    <>
+      <div className="field">
+        <label>Fill</label>
+        <div className="value-row">
+          <input
+            type="color"
+            value={cssHex(clip.fill)}
+            onChange={(event) =>
+              run({ type: 'setSolidFill', clipId: clip.id, fill: event.target.value }, 'Set fill')
+            }
+          />
+          <span className="hint">{clip.fill}</span>
+        </div>
+      </div>
+      {/* What the colour does to what is under it — a fill's other half, not a
+          video adjustment, so it travels with the colour rather than sitting in
+          the video group a scroll away from it. */}
+      <BlendModeField clip={clip} />
+    </>
+  );
+}
+
+/** Shared by the fill group and the video controls, which both blend. */
+function BlendModeField({ clip }: { clip: VideoClip | SolidClip }): React.JSX.Element {
+  const run = useStudio((s) => s.run);
+  return (
+    <div className="field">
+      <label>Blend mode</label>
+      <select
+        value={clip.blendMode}
+        onChange={(event) =>
+          run(
+            {
+              type: 'setClipBlendMode',
+              clipId: clip.id,
+              blendMode: event.target.value as BlendMode,
+            },
+            'Set blend mode',
+          )
+        }
+      >
+        {BLEND_MODES.map((mode) => (
+          <option key={mode} value={mode}>
+            {mode}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 function VisualControls({
   clip,
   onCommit,
 }: ControlProps & { clip: VideoClip | TitleClip | SolidClip }): React.JSX.Element {
-  const run = useStudio((s) => s.run);
   const { transform } = clip;
   // Generated layers already fill the frame, so there is no source to crop into.
   const framed: VideoClip | null = isSyntheticClip(clip) ? null : clip;
-  // Blending, though, is the point of a fill: a colour over footage is a tint.
-  const blended: VideoClip | SolidClip | null = clip.kind === 'title' ? null : clip;
+  // A fill carries its own blend mode, up beside the colour it applies to.
+  const blended: VideoClip | null = clip.kind === 'title' || clip.kind === 'solid' ? null : clip;
 
   return (
     <>
@@ -1301,49 +1387,7 @@ function VisualControls({
         </>
       )}
 
-      {clip.kind === 'solid' && (
-        <div className="field">
-          <label>Fill</label>
-          <div className="value-row">
-            <input
-              type="color"
-              value={cssHex(clip.fill)}
-              onChange={(event) =>
-                run(
-                  { type: 'setSolidFill', clipId: clip.id, fill: event.target.value },
-                  'Set fill',
-                )
-              }
-            />
-            <span className="hint">{clip.fill}</span>
-          </div>
-        </div>
-      )}
-
-      {blended && (
-        <div className="field">
-          <label>Blend mode</label>
-          <select
-            value={blended.blendMode}
-            onChange={(event) =>
-              run(
-                {
-                  type: 'setClipBlendMode',
-                  clipId: blended.id,
-                  blendMode: event.target.value as BlendMode,
-                },
-                'Set blend mode',
-              )
-            }
-          >
-            {BLEND_MODES.map((mode) => (
-              <option key={mode} value={mode}>
-                {mode}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
+      {blended && <BlendModeField clip={blended} />}
     </>
   );
 }

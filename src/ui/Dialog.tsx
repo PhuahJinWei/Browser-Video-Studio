@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { IconAlert } from './Icons';
 
 interface BaseDialogOptions {
   readonly title: string;
@@ -33,6 +34,7 @@ export function DialogProvider({ children }: { children: React.ReactNode }): Rea
   const [active, setActive] = useState<ActiveDialog | null>(null);
   const [value, setValue] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
+  const confirmRef = useRef<HTMLButtonElement>(null);
 
   const open = useCallback(<T extends boolean | string | null>(
     options: Omit<ActiveDialog, 'resolve'>,
@@ -58,7 +60,11 @@ export function DialogProvider({ children }: { children: React.ReactNode }): Rea
 
   useEffect(() => {
     if (!active) return;
+    // Focus lands inside the dialog either way: the field when there is one to fill
+    // in, the confirming button otherwise. Without this it stays on whatever opened
+    // the dialog, behind the backdrop, where a keystroke reaches the wrong thing.
     if (active.kind === 'prompt') inputRef.current?.select();
+    else confirmRef.current?.focus();
 
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') finish(active.kind === 'confirm' ? false : null);
@@ -81,16 +87,36 @@ export function DialogProvider({ children }: { children: React.ReactNode }): Rea
         >
           <form
             className="modal studio-dialog"
+            data-tone={active.danger ? 'danger' : 'default'}
             role="dialog"
             aria-modal="true"
             aria-labelledby="studio-dialog-title"
+            {...(active.message ? { 'aria-describedby': 'studio-dialog-message' } : {})}
             onSubmit={(event) => {
               event.preventDefault();
               finish(active.kind === 'prompt' ? value : true);
             }}
           >
-            <h3 id="studio-dialog-title">{active.title}</h3>
-            {active.message && <p className="studio-dialog-message">{active.message}</p>}
+            <div className="studio-dialog-head">
+              {/*
+                Only where something is at stake. An icon on every dialog is the
+                look of an older desktop; reserving it for the destructive case is
+                what makes it mean anything when it does appear.
+              */}
+              {active.danger && (
+                <span className="studio-dialog-icon" aria-hidden="true">
+                  <IconAlert size={17} />
+                </span>
+              )}
+              <div className="studio-dialog-copy">
+                <h3 id="studio-dialog-title">{active.title}</h3>
+                {active.message && (
+                  <p id="studio-dialog-message" className="studio-dialog-message">
+                    {active.message}
+                  </p>
+                )}
+              </div>
+            </div>
             {active.kind === 'prompt' && (
               <label className="studio-dialog-field">
                 {active.inputLabel && <span>{active.inputLabel}</span>}
@@ -108,7 +134,11 @@ export function DialogProvider({ children }: { children: React.ReactNode }): Rea
                   Cancel
                 </button>
               )}
-              <button type="submit" className={active.danger ? 'danger' : 'primary'}>
+              <button
+                ref={confirmRef}
+                type="submit"
+                className={active.danger ? 'danger' : 'primary'}
+              >
                 {active.confirmLabel ?? (active.kind === 'notice' ? 'Close' : 'OK')}
               </button>
             </div>

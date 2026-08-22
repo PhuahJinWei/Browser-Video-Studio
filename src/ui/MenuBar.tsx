@@ -44,6 +44,7 @@ import {
 import { linkability } from '../model/selectors';
 import * as T from '../model/time';
 import { useLayout } from './layout';
+import { GENERATORS } from './generators';
 import { emptyTracksToRemove, useStudio } from './store';
 import { useDialog } from './Dialog';
 
@@ -137,8 +138,7 @@ export function MenuBar({
   const newProject = useStudio((s) => s.newProject);
   const saveProjectToFile = useStudio((s) => s.saveProjectToFile);
   const openProjectFileViaPicker = useStudio((s) => s.openProjectFileViaPicker);
-  const addTitle = useStudio((s) => s.addTitle);
-  const addSolid = useStudio((s) => s.addSolid);
+  const addGeneratorAtPlayhead = useStudio((s) => s.addGeneratorAtPlayhead);
   const splitAtPlayhead = useStudio((s) => s.splitAtPlayhead);
   const removeEmptyTracks = useStudio((s) => s.removeEmptyTracks);
   const captureFrame = useStudio((s) => s.captureFrame);
@@ -149,6 +149,9 @@ export function MenuBar({
   const toggleTelemetry = useStudio((s) => s.toggleTelemetry);
   const setPlayhead = useStudio((s) => s.setPlayhead);
   const playhead = useStudio((s) => s.playhead);
+  const setSequenceMark = useStudio((s) => s.setSequenceMark);
+  const clearSequenceMarks = useStudio((s) => s.clearSequenceMarks);
+  const goToSequenceMark = useStudio((s) => s.goToSequenceMark);
   const duration = useStudio((s) => s.duration);
   const setZoom = useStudio((s) => s.setZoom);
   const select = useStudio((s) => s.select);
@@ -318,22 +321,13 @@ export function MenuBar({
             ),
         },
         'separator',
-        {
-          label: 'Add title at playhead',
-          icon: <IconText />,
-          onSelect: () => void (async () => {
-            const text = await dialog.prompt({ title: 'Add title', inputLabel: 'Title text', initialValue: 'Hello', confirmLabel: 'Add title' });
-            if (text) addTitle(text);
-          })(),
-        },
-        {
-          label: 'Add colour at playhead',
-          icon: <IconSwatch />,
-          onSelect: () => void (async () => {
-            const fill = await dialog.prompt({ title: 'Add colour', inputLabel: 'CSS colour', initialValue: '#1f6feb', confirmLabel: 'Add colour' });
-            if (fill) addSolid(fill);
-          })(),
-        },
+        // Same action the toolbar's own controls run, so the menu cannot drift from
+        // them — and no dialog here either, for the same reason.
+        ...GENERATORS.map((generator) => ({
+          label: `Add ${generator.label.toLowerCase()} at playhead`,
+          icon: generator.id === 'title' ? <IconText /> : <IconSwatch />,
+          onSelect: () => addGeneratorAtPlayhead(generator.id),
+        })),
       ],
     },
     {
@@ -364,6 +358,29 @@ export function MenuBar({
           label: 'Add marker at playhead',
           icon: <IconMarker />,
           onSelect: () => run({ type: 'addMarker', sequenceId, at: playhead() }, 'Add marker'),
+        },
+        'separator',
+        // Alongside the markers, which are the other thing here that annotates the
+        // sequence rather than the tracks in it.
+        { label: 'Mark In', hint: 'I', onSelect: () => setSequenceMark('in') },
+        { label: 'Mark Out', hint: 'O', onSelect: () => setSequenceMark('out') },
+        {
+          label: 'Go to In',
+          hint: 'Shift+I',
+          disabled: !sequence.view.inPoint,
+          onSelect: () => goToSequenceMark('in'),
+        },
+        {
+          label: 'Go to Out',
+          hint: 'Shift+O',
+          disabled: !sequence.view.outPoint,
+          onSelect: () => goToSequenceMark('out'),
+        },
+        {
+          label: 'Clear In and Out',
+          hint: 'Ctrl+Shift+X',
+          disabled: !sequence.view.inPoint && !sequence.view.outPoint,
+          onSelect: clearSequenceMarks,
         },
       ],
     },
@@ -419,6 +436,9 @@ export function MenuBar({
                 '← / → — step one frame (Shift for ten)',
                 'Home / End — go to start / end',
                 'S — split all tracks at the playhead',
+                'I / O — mark In / Out at the playhead',
+                'Shift+I / Shift+O — go to the In / Out mark',
+                'Ctrl+Shift+X — clear In and Out',
                 'Del — delete selected clips',
                 'Ctrl+Z / Ctrl+Shift+Z — undo / redo',
                 'Ctrl+A — select all clips',

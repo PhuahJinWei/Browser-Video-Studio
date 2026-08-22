@@ -12,9 +12,10 @@ import {
   AudioBufferSource,
   BufferTarget,
   type AudioCodec,
+  canEncodeAudio,
+  canEncodeVideo,
   Mp4OutputFormat,
   Output,
-  Quality,
   StreamTarget,
   type StreamTargetChunk,
   VideoSample,
@@ -53,13 +54,19 @@ export interface ExportProgress {
   readonly elapsedMs: number;
 }
 
+export type ContainerKey = 'mp4' | 'webm';
+
 export interface ExportSettings {
-  readonly container: 'mp4' | 'webm';
+  readonly container: ContainerKey;
+  /** Must be one the container can carry; see `CONTAINERS`. */
+  readonly videoCodec: VideoCodec;
   readonly size: Size;
   readonly frameRate: FrameRate;
   /** Target video bitrate in bits per second. */
   readonly bitrate: number;
   readonly includeAudio: boolean;
+  /** Target audio bitrate in bits per second. Ignored when audio is off. */
+  readonly audioBitrate: number;
   readonly range?: { readonly start: Time; readonly end: Time };
 }
 
@@ -72,10 +79,78 @@ export interface ExportResult {
   readonly framesEncoded: number;
 }
 
-const CONTAINER_CODECS = {
-  mp4: { video: 'avc' as VideoCodec, audio: 'aac' as AudioCodec, extension: 'mp4', mime: 'video/mp4' },
-  webm: { video: 'vp9' as VideoCodec, audio: 'opus' as AudioCodec, extension: 'webm', mime: 'video/webm' },
-} as const;
+/** A video codec the UI offers, and what a person needs in order to choose it. */
+export interface VideoCodecChoice {
+  readonly codec: VideoCodec;
+  readonly label: string;
+  /** What picking it buys or costs, in one clause. */
+  readonly note: string;
+  /**
+   * Bits needed for a comparable picture, relative to H.264.
+   *
+   * Newer codecs buy smaller files with encode time, and the suggested bitrate has to
+   * know it: offering AV1 while still asking for H.264's bitrate would hand back the
+   * entire saving and leave only the slowness.
+   */
+  readonly efficiency: number;
+}
+
+export interface ContainerProfile {
+  readonly label: string;
+  readonly extension: string;
+  readonly mime: string;
+  /**
+   * The audio codec, fixed per container rather than chosen.
+   *
+   * MP4 can technically carry Opus and WebM can carry Vorbis, but neither pairing has
+   * a use that outweighs handing someone a file their player will not open. One less
+   * decision, and the one that would only ever be got wrong.
+   */
+  readonly audio: AudioCodec;
+  readonly audioLabel: string;
+  /** Most compatible first: the head of this list is the safe default. */
+  readonly video: readonly VideoCodecChoice[];
+}
+
+export const CONTAINERS: Readonly<Record<ContainerKey, ContainerProfile>> = {
+  mp4: {
+    label: 'MP4',
+    extension: 'mp4',
+    mime: 'video/mp4',
+    audio: 'aac',
+    audioLabel: 'AAC',
+    video: [
+      { codec: 'avc', label: 'H.264', note: 'Plays everywhere', efficiency: 1 },
+      { codec: 'hevc', label: 'H.265', note: 'Smaller, needs a recent player', efficiency: 0.62 },
+      { codec: 'av1', label: 'AV1', note: 'Smallest, slowest to encode', efficiency: 0.55 },
+    ],
+  },
+  webm: {
+    label: 'WebM',
+    extension: 'webm',
+    mime: 'video/webm',
+    audio: 'opus',
+    audioLabel: 'Opus',
+    video: [
+      { codec: 'vp9', label: 'VP9', note: 'Good size, broad browser support', efficiency: 0.68 },
+      { codec: 'av1', label: 'AV1', note: 'Smallest, slowest to encode', efficiency: 0.55 },
+      { codec: 'vp8', label: 'VP8', note: 'Oldest, widest legacy support', efficiency: 1.2 },
+    ],
+  },
+};
+
+/** The safe codec for a container: the most compatible one it offers. */
+export function defaultVideoCodec(container: ContainerKey): VideoCodec {
+  return CONTAINERS[container].video[0]?.codec ?? 'avc';
+}
+
+/** The codec choice for a container, or undefined when that container cannot carry it. */
+export function videoCodecChoice(
+  container: ContainerKey,
+  codec: VideoCodec,
+): VideoCodecChoice | undefined {
+  return CONTAINERS[container].video.find((choice) => choice.codec === codec);
+}
 
 export interface ExportOptions {
   readonly project: Project;
@@ -100,9 +175,34 @@ export interface ExportSupport {
   readonly webm: boolean;
   readonly mp4Reason: string | null;
   readonly webmReason: string | null;
+  /**
+   * Per video codec, whether this browser can encode it at this size and rate.
+   *
+   * Separate from the container flags because the dialog has to grey out individual
+   * codecs, not just refuse a whole format: a machine without an AV1 encoder can
+   * still write a perfectly good MP4.
+   */
+  readonly videoCodecs: Readonly<Partial<Record<VideoCodec, boolean>>>;
 }
 
-/** Probe the exact resolution/rate requested instead of assuming boot-time 1080p support. */
+/** Every codec any container offers, each probed once even where two share it. */
+const PROBED_VIDEO_CODECS: readonly VideoCodec[] = [
+  ...new Set(Object.values(CONTAINERS).flatMap((profile) => profile.video.map((v) => v.codec))),
+];
+
+/**
+ * What this browser can actually encode at the requested size and rate.
+ *
+ * Probed rather than assumed: encoder support is a function of the exact
+ * configuration, so a machine that manages 720p H.264 may refuse 4K, and boot-time
+ * capability says nothing about what the dialog is currently asking for.
+ *
+ * The codec strings are built by mediabunny from the dimensions rather than written
+ * out here. Getting an H.264 level string right means mapping frame size and bitrate
+ * onto a table, and the hand-rolled pair this replaced only knew two of them — so
+ * anything above 1080p was probed as though it were 1080p and reported support that
+ * the encoder need not have had.
+ */
 export async function detectExportSupport(settings: ExportSettings): Promise<ExportSupport> {
   if (typeof VideoEncoder === 'undefined') {
     return {
@@ -110,53 +210,63 @@ export async function detectExportSupport(settings: ExportSettings): Promise<Exp
       webm: false,
       mp4Reason: 'VideoEncoder is unavailable',
       webmReason: 'VideoEncoder is unavailable',
+      videoCodecs: {},
     };
   }
 
-  const videoConfig = {
+  const shape = {
     width: settings.size.width,
     height: settings.size.height,
     bitrate: settings.bitrate,
-    framerate: T.fpsToNumber(settings.frameRate),
   };
-  const supportsVideo = async (codec: string): Promise<boolean> => {
+  const audioShape = {
+    numberOfChannels: 2,
+    sampleRate: 48_000,
+    bitrate: settings.audioBitrate,
+  };
+
+  const probeVideo = async (codec: VideoCodec): Promise<boolean> => {
     try {
-      return (await VideoEncoder.isConfigSupported({ codec, ...videoConfig })).supported === true;
+      return await canEncodeVideo(codec, shape);
     } catch {
       return false;
     }
   };
-  const supportsAudio = async (codec: string): Promise<boolean> => {
+  const probeAudio = async (codec: AudioCodec): Promise<boolean> => {
+    // Audio that is not being written cannot be the reason a format is unavailable.
     if (!settings.includeAudio) return true;
-    if (typeof AudioEncoder === 'undefined') return false;
     try {
-      return (
-        await AudioEncoder.isConfigSupported({
-          codec,
-          sampleRate: 48_000,
-          numberOfChannels: 2,
-          bitrate: 192_000,
-        })
-      ).supported === true;
+      return await canEncodeAudio(codec, audioShape);
     } catch {
       return false;
     }
   };
 
-  const h264Codec = settings.size.width <= 1280 && settings.size.height <= 720
-    ? 'avc1.42001f'
-    : 'avc1.42002a';
-  const [h264, aac, vp9, opus] = await Promise.all([
-    supportsVideo(h264Codec),
-    supportsAudio('mp4a.40.2'),
-    supportsVideo('vp09.00.10.08'),
-    supportsAudio('opus'),
+  const [videoResults, mp4Audio, webmAudio] = await Promise.all([
+    Promise.all(PROBED_VIDEO_CODECS.map(async (codec) => [codec, await probeVideo(codec)] as const)),
+    probeAudio(CONTAINERS.mp4.audio),
+    probeAudio(CONTAINERS.webm.audio),
   ]);
+  const videoCodecs: Partial<Record<VideoCodec, boolean>> = Object.fromEntries(videoResults);
+
+  const verdict = (key: ContainerKey, audioOk: boolean): { ok: boolean; reason: string | null } => {
+    const profile = CONTAINERS[key];
+    const anyVideo = profile.video.some((choice) => videoCodecs[choice.codec] === true);
+    if (!anyVideo) {
+      return { ok: false, reason: `No ${profile.label} video codec works at this size and rate` };
+    }
+    if (!audioOk) return { ok: false, reason: `${profile.audioLabel} encoding is unavailable` };
+    return { ok: true, reason: null };
+  };
+
+  const mp4 = verdict('mp4', mp4Audio);
+  const webm = verdict('webm', webmAudio);
   return {
-    mp4: h264 && aac,
-    webm: vp9 && opus,
-    mp4Reason: h264 ? (aac ? null : 'AAC encoding is unavailable') : 'H.264 is unavailable for these settings',
-    webmReason: vp9 ? (opus ? null : 'Opus encoding is unavailable') : 'VP9 is unavailable for these settings',
+    mp4: mp4.ok,
+    webm: webm.ok,
+    mp4Reason: mp4.reason,
+    webmReason: webm.reason,
+    videoCodecs,
   };
 }
 
@@ -167,7 +277,12 @@ export async function exportSequence(options: ExportOptions): Promise<ExportResu
   if (!sequence) throw new ExportError(`No sequence "${sequenceId}"`);
 
   const started = performance.now();
-  const codecs = CONTAINER_CODECS[settings.container];
+  const codecs = CONTAINERS[settings.container];
+  // A codec the container cannot carry is a caller's mistake, and one that would
+  // otherwise surface as a muxer error halfway through a long encode.
+  if (!videoCodecChoice(settings.container, settings.videoCodec)) {
+    throw new ExportError(`${codecs.label} cannot carry ${settings.videoCodec}`);
+  }
 
   const start = settings.range?.start ?? T.TIME_ZERO;
   const end = settings.range?.end ?? sequenceDuration(project, sequenceId);
@@ -220,14 +335,14 @@ export async function exportSequence(options: ExportOptions): Promise<ExportResu
   });
 
   const videoSource = new VideoSampleSource({
-    codec: codecs.video,
+    codec: settings.videoCodec,
     bitrate: settings.bitrate,
   });
   output.addVideoTrack(videoSource, { frameRate: T.fpsToNumber(settings.frameRate) });
 
   let audioSource: AudioBufferSource | null = null;
   if (settings.includeAudio) {
-    audioSource = new AudioBufferSource({ codec: codecs.audio, bitrate: new Quality(0.7) });
+    audioSource = new AudioBufferSource({ codec: codecs.audio, bitrate: settings.audioBitrate });
     output.addAudioTrack(audioSource);
   }
 
@@ -403,9 +518,87 @@ async function collectExportLayers(
   return { layers, owned };
 }
 
-/** Sensible bitrate for a resolution and frame rate, in bits per second. */
-export function suggestBitrate(size: Size, frameRate: FrameRate): number {
+// ---------------------------------------------------------------------------
+// Bitrate
+// ---------------------------------------------------------------------------
+
+/**
+ * How good the picture should be, as a person would put it.
+ *
+ * Bits per second is the wrong unit to ask anyone for: the number that means "good"
+ * depends on the frame size, the frame rate and the codec all at once, so the same
+ * 8 Mbps is generous at 720p and thin at 4K. A quality level holds still across all
+ * three, and the bitrate is derived from it — which is also why changing resolution
+ * or codec can move the slider on its own.
+ */
+export type ExportQuality = 'low' | 'medium' | 'high' | 'best';
+
+export const EXPORT_QUALITIES: readonly {
+  readonly key: ExportQuality;
+  readonly label: string;
+  readonly factor: number;
+}[] = [
+  { key: 'low', label: 'Low', factor: 0.45 },
+  { key: 'medium', label: 'Medium', factor: 1 },
+  { key: 'high', label: 'High', factor: 1.8 },
+  { key: 'best', label: 'Best', factor: 3 },
+];
+
+/**
+ * Bits per pixel per second for H.264 at medium.
+ *
+ * Calibrated against the rates the large video services publish: this puts 1080p30 at
+ * about 7.5 Mbps and 2160p30 at about 30 Mbps, both within their recommended bands.
+ */
+const BASE_BITS_PER_PIXEL = 0.12;
+
+/** Floor and ceiling, so a postage stamp is not starved and 8K is not absurd. */
+const MIN_BITRATE = 200_000;
+const MAX_BITRATE = 100_000_000;
+
+/** The audio rates worth offering, in bits per second. */
+export const AUDIO_BITRATES: readonly number[] = [128_000, 192_000, 256_000, 320_000];
+
+/** Transparent enough for stereo music in both AAC and Opus, and a common default. */
+export const DEFAULT_AUDIO_BITRATE = 192_000;
+
+/**
+ * A sensible video bitrate for a size, rate, codec and quality, in bits per second.
+ *
+ * Codec efficiency is folded in, so switching to AV1 lowers the suggestion rather
+ * than keeping the file the same size as H.264's and spending the saving on nothing.
+ */
+export function suggestBitrate(
+  size: Size,
+  frameRate: FrameRate,
+  codec: VideoCodec = 'avc',
+  quality: ExportQuality = 'medium',
+): number {
   const pixelsPerSecond = size.width * size.height * T.fpsToNumber(frameRate);
-  // ~0.08 bits per pixel, clamped to a range that stays useful for tiny and huge frames.
-  return Math.round(Math.max(1_000_000, Math.min(60_000_000, pixelsPerSecond * 0.08)));
+  const efficiency = codecEfficiency(codec);
+  const factor = EXPORT_QUALITIES.find((level) => level.key === quality)?.factor ?? 1;
+  const raw = pixelsPerSecond * BASE_BITS_PER_PIXEL * efficiency * factor;
+  return Math.round(Math.max(MIN_BITRATE, Math.min(MAX_BITRATE, raw)));
+}
+
+/** Relative bits needed by a codec; 1 is H.264. Unknown codecs are treated as H.264. */
+function codecEfficiency(codec: VideoCodec): number {
+  for (const profile of Object.values(CONTAINERS)) {
+    const choice = profile.video.find((entry) => entry.codec === codec);
+    if (choice) return choice.efficiency;
+  }
+  return 1;
+}
+
+/**
+ * Roughly how large the finished file will be, in bytes.
+ *
+ * Both tracks run at a target rate, so the payload is simply rate × time; the few
+ * percent added on top is container overhead — sample tables, cluster headers — which
+ * is small but not nothing, and rounding it away would make every estimate read low.
+ */
+export function estimateExportBytes(settings: ExportSettings, durationSeconds: number): number {
+  if (!(durationSeconds > 0)) return 0;
+  const audio = settings.includeAudio ? settings.audioBitrate : 0;
+  return Math.round(((settings.bitrate + audio) / 8) * durationSeconds * 1.02);
 }

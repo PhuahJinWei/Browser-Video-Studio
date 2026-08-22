@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { canRun, detectCapabilities, type CapabilityResult } from '../capabilities';
+import { setDragChip } from './dragChip';
 import { Fader } from './Fader';
+import { GENERATORS, GENERATOR_DRAG_TYPE } from './generators';
 import {
   formatGain,
   formatGainPercent,
@@ -17,7 +19,7 @@ import { staticParam } from '../model/params';
 import { DEFAULT_TRACK_HEIGHT } from '../model/factories';
 import * as T from '../model/time';
 import { ContextMenuProvider } from './ContextMenu';
-import { DialogProvider, useDialog } from './Dialog';
+import { DialogProvider } from './Dialog';
 import { ExportDialog } from './ExportDialog';
 import { OpenDialog } from './OpenDialog';
 import {
@@ -95,7 +97,6 @@ function Unsupported({ capabilities }: { capabilities: readonly CapabilityResult
 }
 
 function Studio(): React.JSX.Element {
-  const dialog = useDialog();
   const [showExport, setShowExport] = useState(false);
   const [showOpen, setShowOpen] = useState(false);
 
@@ -135,9 +136,12 @@ function Studio(): React.JSX.Element {
   const previewAssetId = useStudio((s) => s.previewAssetId);
   const setSourceTime = useStudio((s) => s.setSourceTime);
   const setSourceMark = useStudio((s) => s.setSourceMark);
+  const setSequenceMark = useStudio((s) => s.setSequenceMark);
+  const clearSequenceMarks = useStudio((s) => s.clearSequenceMarks);
+  const goToSequenceMark = useStudio((s) => s.goToSequenceMark);
   const editSourceToTimeline = useStudio((s) => s.editSourceToTimeline);
-  const addTitle = useStudio((s) => s.addTitle);
-  const addSolid = useStudio((s) => s.addSolid);
+  const addGeneratorAtPlayhead = useStudio((s) => s.addGeneratorAtPlayhead);
+  const setDraggingGenerator = useStudio((s) => s.setDraggingGenerator);
   const canAddTransition = useStudio((s) => s.canAddTransitionNearPlayhead);
   const saveState = useStudio((s) => s.saveState);
   const theme = useLayout((s) => s.theme);
@@ -218,6 +222,12 @@ function Studio(): React.JSX.Element {
         return;
       }
 
+      if (mod && event.shiftKey && event.key.toLowerCase() === 'x') {
+        event.preventDefault();
+        clearSequenceMarks();
+        return;
+      }
+
       // Final Cut's inspector key, and nothing else here claims a digit.
       if (mod && event.key === '4') {
         event.preventDefault();
@@ -246,6 +256,18 @@ function Studio(): React.JSX.Element {
             // Shift+S grabs the frame, next to the key that cuts it.
             event.preventDefault();
             void captureFrame();
+            return;
+          case 'i':
+          case 'o':
+            event.preventDefault();
+            setSequenceMark(event.key === 'i' ? 'in' : 'out');
+            return;
+          case 'I':
+          case 'O':
+            // Shift jumps to the mark rather than setting it, as it does everywhere
+            // else that owns these two keys.
+            event.preventDefault();
+            goToSequenceMark(event.key === 'I' ? 'in' : 'out');
             return;
           default:
             break;
@@ -330,6 +352,9 @@ function Studio(): React.JSX.Element {
     previewAssetId,
     setSourceTime,
     setSourceMark,
+    setSequenceMark,
+    clearSequenceMarks,
+    goToSequenceMark,
     editSourceToTimeline,
     togglePlay,
     undoEdit,
@@ -507,28 +532,34 @@ function Studio(): React.JSX.Element {
           <span className="header-divider" />
 
           <span className="toolgroup">
-            <button
-              className="action"
-              title="Add a title at the playhead"
-              onClick={() => void (async () => {
-                const text = await dialog.prompt({ title: 'Add title', inputLabel: 'Title text', initialValue: 'Hello', confirmLabel: 'Add title' });
-                if (text) addTitle(text);
-              })()}
-            >
-              <IconText size={18} />
-              <span>Title</span>
-            </button>
-            <button
-              className="action"
-              title="Add a colour background at the playhead"
-              onClick={() => void (async () => {
-                const fill = await dialog.prompt({ title: 'Add colour', inputLabel: 'CSS colour', initialValue: '#1f6feb', confirmLabel: 'Add colour' });
-                if (fill) addSolid(fill);
-              })()}
-            >
-              <IconSwatch size={18} />
-              <span>Colour</span>
-            </button>
+            {/*
+              One control, two gestures: click to put it in at the play head, drag to
+              place it where you point. They were two UIs for a moment — these buttons
+              and a strip in the library — which is one more than the job needs.
+
+              No dialog before either. The clip arrives selected with the inspector on
+              it, so asking for the text up front only put a modal in front of the
+              answer, and it was the one creation path in the app that did.
+            */}
+            {GENERATORS.map((generator) => (
+              <button
+                key={generator.id}
+                className="action"
+                draggable
+                title={`Add a ${generator.label.toLowerCase()} at the playhead — or drag it onto a track`}
+                onClick={() => addGeneratorAtPlayhead(generator.id)}
+                onDragStart={(event) => {
+                  event.dataTransfer.setData(GENERATOR_DRAG_TYPE, generator.id);
+                  event.dataTransfer.effectAllowed = 'copy';
+                  setDragChip(event, generator.label);
+                  setDraggingGenerator(generator.id);
+                }}
+                onDragEnd={() => setDraggingGenerator(null)}
+              >
+                {generator.id === 'title' ? <IconText size={18} /> : <IconSwatch size={18} />}
+                <span>{generator.label}</span>
+              </button>
+            ))}
             <button
               className="action"
               /*

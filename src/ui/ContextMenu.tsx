@@ -20,7 +20,23 @@ export interface MenuItem {
   readonly checked?: boolean;
 }
 
-export type MenuEntry = MenuItem | 'separator';
+/**
+ * A row of colours rather than one entry per colour.
+ *
+ * Eight labels as eight menu lines would bury the actions underneath them, and the
+ * thing being chosen is a colour — showing it beats naming it. The name rides on
+ * the title attribute for anyone who needs it.
+ */
+export interface MenuSwatches {
+  readonly kind: 'swatches';
+  readonly label: string;
+  readonly options: readonly { readonly value: string | null; readonly name: string }[];
+  /** Which one is currently set, ticked in the row. */
+  readonly value: string | null;
+  readonly onPick: (value: string | null) => void;
+}
+
+export type MenuEntry = MenuItem | MenuSwatches | 'separator';
 
 interface MenuState {
   readonly x: number;
@@ -72,6 +88,28 @@ export function renderMenuEntries(
   return entries.map((entry, index) =>
     entry === 'separator' ? (
       <div key={`sep-${index}`} className="menu-separator" />
+    ) : 'kind' in entry ? (
+      <div className="menu-swatches" key={entry.label}>
+        <span className="menu-swatches-label">{entry.label}</span>
+        <div className="menu-swatch-row">
+          {entry.options.map((option) => (
+            <button
+              key={option.name}
+              type="button"
+              className={`menu-swatch${option.value === null ? ' none' : ''}${
+                entry.value === option.value ? ' on' : ''
+              }`}
+              title={option.name}
+              aria-label={option.name}
+              style={option.value ? { background: option.value } : undefined}
+              onClick={() => {
+                onClose();
+                entry.onPick(option.value);
+              }}
+            />
+          ))}
+        </div>
+      </div>
     ) : (
       <button
         key={entry.label}

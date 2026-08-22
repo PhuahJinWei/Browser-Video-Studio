@@ -12,6 +12,8 @@ import { planTransition, type PlannedCut } from '../model/planTransition';
 import { DEFAULT_TRANSITION_SECONDS } from './transitions';
 import { Engine, type EngineTelemetry } from '../engine/engine';
 import {
+  DEFAULT_AUDIO_BITRATE,
+  defaultVideoCodec,
   exportSequence,
   suggestBitrate,
   type ExportDestination,
@@ -25,6 +27,7 @@ import { PreviewStore } from '../engine/previewStore';
 import { apply, type Command, type NewClipSpec } from '../model/commands';
 import { normaliseFolder } from '../model/commands/handlers';
 import { repairProjectTimes } from '../model/repairTimes';
+import { generatorById, type GeneratorId } from './generators';
 import { randomIdSource } from '../model/ids';
 import { createProject } from '../model/factories';
 import {
@@ -212,7 +215,7 @@ async function chooseExportDestination(
 }
 
 /** Bytes in the units a person thinks in, for anything about to hand over a file. */
-function formatBytes(bytes: number): string {
+export function formatBytes(bytes: number): string {
   if (bytes < 1000) return `${bytes} B`;
   if (bytes < 1e6) return `${(bytes / 1e3).toFixed(0)} KB`;
   if (bytes < 1e9) return `${(bytes / 1e6).toFixed(1)} MB`;
@@ -277,6 +280,8 @@ export interface StudioState {
    * the ghost cannot learn the asset's duration from the event — it comes from here.
    */
   draggingAssetId: AssetId | null;
+  /** The generator in flight, so the timeline can ghost it before it lands. */
+  draggingGeneratorId: GeneratorId | null;
   status: string;
   error: string | null;
   showTelemetry: boolean;
@@ -353,6 +358,18 @@ export interface StudioState {
   setZoom: (pixelsPerSecond: number) => void;
 
   /**
+   * Mark one end of the sequence's In/Out range, at `at` or else at the play head.
+   *
+   * The program counterpart of `setSourceMark`, and deliberately the same shape: a
+   * mark is a mark whichever monitor is in front, and the two behaving differently
+   * would be a difference to remember for no reason.
+   */
+  setSequenceMark: (edge: 'in' | 'out', at?: Time) => void;
+  clearSequenceMarks: () => void;
+  /** Move the play head to a mark, if that mark is set. */
+  goToSequenceMark: (edge: 'in' | 'out') => void;
+
+  /**
    * Move clips onto a track that does not exist yet — dropping into the gap above,
    * below or between the lanes.
    *
@@ -380,6 +397,15 @@ export interface StudioState {
       readonly clipIds: readonly ClipId[];
     },
   ) => void;
+  /**
+   * Drop a generator — a title, a colour — onto a track at `start`.
+   *
+   * Every drop makes its own clip. There is nothing shared to point back at, which
+   * is the whole reason generators are templates in the library rather than items
+   * in it: two titles dragged from the same entry are two titles.
+   */
+  dropGeneratorOnTrack: (generatorId: GeneratorId, trackId: TrackId, start?: Time) => void;
+
   /** Place an asset on a track created for it at `index` — the media-bin half of the same gesture. */
   dropAssetOnNewTrack: (assetId: AssetId, kind: TrackKind, index: number, start?: Time) => void;
 
@@ -408,6 +434,15 @@ export interface StudioState {
   addAssetToTimeline: (assetId: AssetId) => Promise<void>;
   addTitle: (text: string) => void;
   addSolid: (fill: string) => void;
+  /**
+   * Put a generator in at the play head — the click half of the toolbar control
+   * whose drag half is `dropGeneratorOnTrack`.
+   *
+   * Content comes from the generator's own defaults rather than from a dialog. The
+   * clip arrives selected with the inspector already on it, so asking for the text
+   * before the thing exists only put a modal in front of the answer.
+   */
+  addGeneratorAtPlayhead: (generatorId: GeneratorId) => void;
   /**
    * Put a transition on the cut nearest the playhead.
    *
@@ -457,6 +492,7 @@ export interface StudioState {
    */
   dropAssetOnTrack: (assetId: AssetId, trackId: TrackId, start?: Time) => void;
   setDraggingAsset: (assetId: AssetId | null) => void;
+  setDraggingGenerator: (generatorId: GeneratorId | null) => void;
   newProject: () => void;
   togglePlay: () => Promise<void>;
   runExport: (settings: ExportSettings) => Promise<void>;
@@ -617,6 +653,7 @@ export const useStudio = create<StudioState>((set, get) => ({
   exportBusy: false,
   proxyProgress: new Map(),
   draggingAssetId: null,
+  draggingGeneratorId: null,
   status: 'Import media to begin.',
   error: null,
   saveState: 'idle',
@@ -1237,6 +1274,46 @@ export const useStudio = create<StudioState>((set, get) => ({
     void get().engine?.seek(clamped);
   },
 
+  setSequenceMark: (edge, at) => {
+    const state = get();
+    const sequence = state.project().sequences[state.sequenceId];
+    if (!sequence) return;
+    const where = T.clamp(at ?? state.playhead(), T.TIME_ZERO, state.duration());
+    const current = { inPoint: sequence.view.inPoint, outPoint: sequence.view.outPoint };
+    let next = edge === 'in' ? { ...current, inPoint: where } : { ...current, outPoint: where };
+    // Keep the range meaningful: moving one edge through the other clears the stale
+    // opposite edge instead of silently creating a negative selection.
+    if (next.inPoint && next.outPoint && !T.lt(next.inPoint, next.outPoint)) {
+      next = edge === 'in' ? { inPoint: where, outPoint: null } : { inPoint: null, outPoint: where };
+    }
+    // Transient, like the play head and the zoom: where you are looking is not an
+    // edit, and undo should take back the last change to the film rather than the
+    // last change to your view of it.
+    state.runTransient({ type: 'setView', sequenceId: state.sequenceId, view: next });
+    set({
+      status: `Marked ${edge === 'in' ? 'In' : 'Out'} at ${T.formatDuration(where, { decimals: 2 })}.`,
+    });
+  },
+
+  clearSequenceMarks: () => {
+    const state = get();
+    const sequence = state.project().sequences[state.sequenceId];
+    if (!sequence || (!sequence.view.inPoint && !sequence.view.outPoint)) return;
+    state.runTransient({
+      type: 'setView',
+      sequenceId: state.sequenceId,
+      view: { inPoint: null, outPoint: null },
+    });
+    set({ status: 'Cleared In and Out.' });
+  },
+
+  goToSequenceMark: (edge) => {
+    const state = get();
+    const sequence = state.project().sequences[state.sequenceId];
+    const at = edge === 'in' ? sequence?.view.inPoint : sequence?.view.outPoint;
+    if (at) state.setPlayhead(at);
+  },
+
   setZoom: (pixelsPerSecond) => {
     get().runTransient({
       type: 'setView',
@@ -1395,6 +1472,26 @@ export const useStudio = create<StudioState>((set, get) => ({
       status: plan.createdTrack
         ? 'Added a title on a new track above — the one below was busy at the playhead.'
         : 'Added a title.',
+    });
+  },
+
+  addGeneratorAtPlayhead: (generatorId) => {
+    const state = get();
+    const generator = generatorById(generatorId);
+    if (!generator) return;
+
+    const subject = generator.label.toLowerCase();
+    const plan = planGenerated(
+      state.project(),
+      state.sequenceId,
+      generator.spec(state.playhead(), generator.duration),
+    );
+    state.runMany(plan.commands, `Add ${subject}`);
+    get().select([plan.clipId]);
+    set({
+      status: plan.createdTrack
+        ? `Added a ${subject} on a new track above — the one below was busy at the playhead.`
+        : `Added a ${subject}.`,
     });
   },
 
@@ -1632,6 +1729,30 @@ export const useStudio = create<StudioState>((set, get) => ({
     });
   },
 
+  dropGeneratorOnTrack: (generatorId, trackId, start) => {
+    const state = get();
+    const project = state.project();
+    const generator = generatorById(generatorId);
+    const track = project.tracks[trackId];
+    if (!generator || !track) return;
+
+    // Sound has no picture to put a title over, and a colour is a picture.
+    if (track.kind !== 'video') {
+      set({ error: `${generator.label} needs a video track` });
+      return;
+    }
+
+    const clipId = ids.clip();
+    const at = start ?? state.playhead();
+    const spec = { ...generator.spec(at, generator.duration), clipId };
+
+    state.run({ type: 'insertClip', trackId, mode: 'overwrite', clip: spec }, `Add ${generator.label.toLowerCase()}`);
+    // Only select it if it actually landed; `run` swallows a rejected command into
+    // the error line rather than throwing, so a blind select could point at nothing.
+    if (get().project().clips[clipId]) get().select([clipId]);
+    set({ status: `Added a ${generator.label.toLowerCase()}.` });
+  },
+
   captureFrame: async () => {
     const state = get();
     const engine = state.engine;
@@ -1696,6 +1817,7 @@ export const useStudio = create<StudioState>((set, get) => ({
   },
 
   setDraggingAsset: (assetId) => set({ draggingAssetId: assetId }),
+  setDraggingGenerator: (generatorId) => set({ draggingGeneratorId: generatorId }),
 
   newProject: () => {
     const { project, sequenceId } = starterProject();
@@ -2206,12 +2328,15 @@ function placementNotes(placement: PlacementPlan): string {
 /** Default export settings derived from the sequence. */
 export function defaultExportSettings(project: Project, sequenceId: SequenceId): ExportSettings {
   const sequence = getSequence(project, sequenceId);
+  const videoCodec = defaultVideoCodec('mp4');
   return {
     container: 'mp4',
+    videoCodec,
     size: sequence.size,
     frameRate: sequence.frameRate,
-    bitrate: suggestBitrate(sequence.size, sequence.frameRate),
+    bitrate: suggestBitrate(sequence.size, sequence.frameRate, videoCodec, 'medium'),
     includeAudio: true,
+    audioBitrate: DEFAULT_AUDIO_BITRATE,
   };
 }
 

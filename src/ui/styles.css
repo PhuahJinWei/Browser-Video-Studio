@@ -43,10 +43,21 @@
 
   --danger: #d92d20;
   --danger-text: #b42318;
+  /* Text and icons sitting on top of a filled danger button. */
+  --on-danger: #ffffff;
   --danger-wash: rgba(217, 45, 32, 0.12);
   --ok: #1a8245;
   --warn: #b45309;
   --on-warn: #ffffff;
+  /*
+   * In and Out marks.
+   *
+   * Their own colour rather than a borrowed one: red already means the play head,
+   * blue already means selection, and amber is what a range marker reads as in every
+   * editor that has one.
+   */
+  --mark: #b06a00;
+  --mark-wash: rgba(176, 106, 0, 0.16);
   /* Folders read as amber everywhere else; the icon follows suit. */
   --folder: #d18b0a;
 
@@ -109,11 +120,14 @@
 
   --danger: #f85149;
   --danger-text: #ff8b84;
+  --on-danger: #120605;
   --danger-wash: rgba(248, 81, 73, 0.22);
   --ok: #56d364;
   --warn: #e3b341;
   --on-warn: #14100a;
   --folder: #e3b341;
+  --mark: #f0b429;
+  --mark-wash: rgba(240, 180, 41, 0.18);
 
   --float: rgba(10, 12, 16, 0.94);
   --overlay: rgba(0, 0, 0, 0.6);
@@ -183,6 +197,24 @@ button.primary:hover:not(:disabled) {
   background: var(--accent-dim);
   border-color: var(--accent-dim);
 }
+/*
+ * Destructive actions are filled, like the primary they sit beside.
+ *
+ * An outlined red button next to a solid blue one reads as the lesser of the two,
+ * which is backwards: the red one is the consequential press. Filling it makes the
+ * weight match the stakes, and `--on-danger` keeps the label legible on a fill that
+ * is dark in one theme and light in the other.
+ */
+button.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--on-danger);
+}
+button.danger:hover:not(:disabled) {
+  background: var(--danger-text);
+  border-color: var(--danger-text);
+}
+
 button.icon {
   padding: 4px;
   min-width: 24px;
@@ -1598,7 +1630,8 @@ body.resizing-track-sections {
  * that is measured in time rather than in screen space.
  */
 .playhead-line,
-.snap-line {
+.snap-line,
+.mark-line {
   transform: translateX(calc(0px - var(--timeline-scroll-x)));
 }
 
@@ -1642,6 +1675,70 @@ body.resizing-track-sections {
   overflow: hidden;
   pointer-events: none;
   z-index: 2;
+}
+
+/* ------------------------------------------------------------- In / Out marks */
+
+/*
+ * The marked span, shaded across the ruler.
+ *
+ * Under the ticks in the stacking order, so the numbers stay readable through it —
+ * a band that hid the very timecodes it is meant to bracket would be no help at all.
+ */
+.mark-band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--mark-wash);
+  border-left: 1px solid var(--mark);
+  border-right: 1px solid var(--mark);
+  pointer-events: none;
+}
+
+/*
+ * The brackets at each end.
+ *
+ * Each one leans into the span it belongs to — In extends rightward from its frame,
+ * Out leftward — so the pair reads as holding the range between them rather than as
+ * two unrelated tabs. It also means neither ever covers the frame it marks.
+ */
+.mark-flag {
+  position: absolute;
+  top: 0;
+  width: 7px;
+  height: var(--ruler-h);
+  background: var(--mark);
+  /* Placed in content pixels and carried by the scroll, like the play head's flag. */
+  transform: translateX(calc(0px - var(--timeline-scroll-x)));
+  pointer-events: none;
+}
+.mark-flag.in {
+  clip-path: polygon(0 0, 100% 0, 100% 30%, 40% 30%, 40% 70%, 100% 70%, 100% 100%, 0 100%);
+}
+.mark-flag.out {
+  margin-left: -7px;
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%, 0 70%, 60% 70%, 60% 30%, 0 30%);
+}
+
+/*
+ * The two boundaries continued down the lanes.
+ *
+ * Dashed, and a single pixel: the play head is a solid two-pixel red line and these
+ * must not be mistaken for it at a glance. They are there to say where the range
+ * ends against the clips, which wants a boundary, not another moving part.
+ */
+.mark-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--mark) 0 4px,
+    transparent 4px 8px
+  );
+  opacity: 0.75;
+  pointer-events: none;
 }
 
 .playhead-head {
@@ -2007,6 +2104,31 @@ body.resizing-track-sections {
   align-items: center;
   gap: 6px;
 }
+/*
+ * A read-only list of named values — the clip's timing, and anything else that is
+ * reported rather than edited.
+ *
+ * Two columns so the names sit clear of the numbers, and tabular figures so the
+ * timecodes line up digit under digit: a column of times that does not align is
+ * harder to compare than one line of prose.
+ */
+.readout {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  margin: 0;
+}
+.readout dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+.readout dd {
+  margin: 0;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .field .value-row output {
   font-family: ui-monospace, Menlo, monospace;
   font-size: 11px;
@@ -2214,6 +2336,13 @@ button.sequence-match.matched:disabled {
   padding: 16px;
   width: 380px;
   max-width: calc(100vw - 32px);
+  /*
+   * Every other surface that floats over the page — the menu dropdowns, the context
+   * menu, the hover card — carries this. A dialog is the most floating thing in the
+   * application and was the one without it, which is what made it read as painted
+   * onto the backdrop rather than lifted above it.
+   */
+  box-shadow: var(--shadow-lg);
 }
 .modal h3 {
   margin: 0 0 12px;
@@ -2448,7 +2577,13 @@ button.sequence-match.matched:disabled {
 .menu-item:disabled {
   opacity: 0.35;
 }
+/* A destructive entry in a menu is a row, not a filled button. `button.danger`
+ * is the more specific selector against `.menu-item`'s transparent background,
+ * so its solid fill has to be turned back off here explicitly.
+ */
 .menu-item.danger {
+  background: transparent;
+  border-color: transparent;
   color: var(--danger-text);
 }
 .menu-item.danger:hover:not(:disabled) {
@@ -2741,31 +2876,201 @@ body.focus-mode .preview-panel .preview {
   background: transparent;
   cursor: pointer;
 }
+/* ------------------------------------------------------- confirm / prompt */
+
 .studio-dialog-backdrop {
   z-index: 100;
+  /*
+   * The studio behind a dialog is dense — lanes, waveforms, a moving play head — and
+   * a flat scrim over it still competes for the eye. Softening it puts the dialog
+   * plainly in front instead of merely on top.
+   */
+  backdrop-filter: blur(3px);
+  animation: dialog-backdrop-in 120ms ease-out;
+}
+
+.studio-dialog {
+  width: 400px;
+  padding: 20px;
+  animation: dialog-in 150ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+/* The icon column and the words beside it, so a long message wraps under itself. */
+.studio-dialog-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.studio-dialog-copy {
+  min-width: 0;
+}
+.studio-dialog-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--danger-wash);
+  color: var(--danger);
+}
+
+.studio-dialog h3 {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.3;
 }
 .studio-dialog-message {
-  margin: 0;
+  margin: 6px 0 0;
   color: var(--muted);
-  line-height: 1.45;
+  font-size: 12.5px;
+  line-height: 1.5;
+  /* Callers pass multi-line explanations; the breaks they wrote are meant. */
   white-space: pre-line;
 }
+
 .studio-dialog-field {
   display: grid;
   gap: 6px;
-  margin-top: 14px;
+  margin-top: 16px;
   color: var(--muted);
   font-size: 12px;
 }
 .studio-dialog-field input {
   width: 100%;
+  padding: 6px 8px;
 }
-.studio-dialog .actions button.primary {
+.studio-dialog-field input:focus-visible {
+  outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-wash);
 }
-.studio-dialog .actions button.danger {
-  color: var(--danger);
-  border-color: var(--danger);
+
+.studio-dialog .actions {
+  margin-top: 20px;
+}
+.studio-dialog .actions button {
+  padding: 6px 14px;
+}
+
+@keyframes dialog-backdrop-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .studio-dialog-backdrop,
+  .studio-dialog {
+    animation: none;
+  }
+}
+
+/* ------------------------------------------------------------------ export */
+
+.export-dialog {
+  width: 460px;
+  /* A tall dialog on a short window has to be reachable, not merely present. */
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+}
+
+/*
+ * What the settings add up to, kept above them.
+ *
+ * The estimate is the reason this exists: every other number here can be read off a
+ * control, but the size of the file is a product of four of them and a duration, and
+ * that is precisely the one anyone actually wants to know before starting an encode.
+ */
+.export-summary {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 10px 12px;
+  margin-bottom: 4px;
+}
+.export-summary-main {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.export-summary-main strong {
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.export-summary-main span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.export-summary-sub {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+/* Format and codec are one decision made in two parts, so they sit on one line. */
+.export-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.export-row .field {
+  margin-bottom: 0;
+}
+
+/*
+ * Preset rows wrap rather than squeeze. Five resolutions at 460px would otherwise
+ * each be narrower than their own label.
+ */
+.export-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.export-choices button {
+  flex: 1 0 auto;
+}
+
+/* Set off from the summary above it, since it answers a different question. */
+.export-range {
+  margin-top: 10px;
+}
+
+.export-audio-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.export-audio-row select {
+  flex: 1;
+}
+.export-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* Overrides `.field label`, which is a muted caption above a control rather than
+     the label of one sitting beside it. */
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.export-check input {
+  width: auto;
+  margin: 0;
+}
+
+.export-problem {
+  color: var(--danger-text);
 }
 .range.track-volume > input[type='range']::-webkit-slider-runnable-track,
 .master-volume input[type='range']::-webkit-slider-runnable-track,
@@ -3457,4 +3762,84 @@ body.resizing-y {
   overflow: hidden;
   text-overflow: ellipsis;
   pointer-events: none;
+}
+
+
+/*
+ * What a title or a colour shows of itself.
+ *
+ * Laid out after the badges rather than over them, so state still reads first, and
+ * inset clear of both trim handles so grabbing an edge never means grabbing this.
+ *
+ * The mark sits on its own dark chip because a colour clip is painted whatever fill
+ * it carries — white ink alone would vanish on a pale one, and the mark is the only
+ * thing telling a brown colour apart from a title.
+ */
+.clip-generated {
+  flex: 1 1 auto;
+  min-width: 0;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  overflow: hidden;
+  /* The clip owns the drag; this is something to read, not something to hit. */
+  pointer-events: none;
+}
+.clip-generated .mark {
+  flex: none;
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 3px;
+  background: rgb(4 10 16 / 55%);
+  color: #fff;
+}
+.clip-generated .text {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  /* Legible over the lighter end of the title gradient. */
+  text-shadow: 0 1px 2px rgb(0 0 0 / 55%);
+}
+
+/* A row of label colours inside a context menu. */
+.menu-swatches {
+  padding: 4px 10px 6px;
+}
+.menu-swatches-label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.menu-swatch-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.menu-swatch {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid rgb(0 0 0 / 25%);
+  border-radius: 4px;
+  cursor: pointer;
+}
+/* "No label" reads as an absence rather than as another colour to choose. */
+.menu-swatch.none {
+  background:
+    linear-gradient(45deg, transparent 44%, var(--danger) 44%, var(--danger) 56%, transparent 56%),
+    var(--panel-2);
+  border-color: var(--line-strong);
+}
+.menu-swatch:hover {
+  transform: scale(1.12);
+}
+.menu-swatch.on {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }

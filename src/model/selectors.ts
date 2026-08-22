@@ -363,6 +363,28 @@ export function sequenceDuration(p: Project, sequenceId: SequenceId): Time {
   return end;
 }
 
+/** A span of the sequence, as the exporter and the marks both describe one. */
+export interface MarkedRange {
+  readonly start: Time;
+  readonly end: Time;
+}
+
+/**
+ * The span between the In and Out marks, or null when there is not a usable one.
+ *
+ * Both marks have to be present and in order. A lone mark is a perfectly reasonable
+ * thing to have set — it is half of a range still being decided — but it does not
+ * describe a span, and every caller here wants a span or nothing.
+ */
+export function markedRange(p: Project, sequenceId: SequenceId): MarkedRange | null {
+  const sequence = p.sequences[sequenceId];
+  if (!sequence) return null;
+  const { inPoint, outPoint } = sequence.view;
+  if (!inPoint || !outPoint) return null;
+  if (!T.lt(inPoint, outPoint)) return null;
+  return { start: inPoint, end: outPoint };
+}
+
 // ---------------------------------------------------------------------------
 // Mute / solo
 // ---------------------------------------------------------------------------

@@ -44,6 +44,8 @@ import type {
   TransitionId,
 } from '../model/types';
 import { clipMenuTargets } from './clipMenuTargets';
+import { CLIP_LABELS, clipBackground } from './clipLabels';
+import { GENERATOR_DRAG_TYPE, generatorById } from './generators';
 import { timelineContentWidth } from './timelineWidth';
 import { LanePreview, type LaneClip } from './LanePreview';
 import { createFrameLoop, edgeScrollDelta, pageScrollTo, type FrameLoop } from './edgeScroll';
@@ -74,6 +76,7 @@ import {
   IconSkipStart,
   IconSolo,
   IconSplit,
+  IconSwatch,
   IconText,
   IconTransition,
   IconTrash,
@@ -424,11 +427,15 @@ export function Timeline(): React.JSX.Element {
   const selectedTrackId = useStudio((s) => s.selectedTrackId);
   const toggleSelect = useStudio((s) => s.toggleSelect);
   const setPlayhead = useStudio((s) => s.setPlayhead);
+  const setSequenceMark = useStudio((s) => s.setSequenceMark);
+  const clearSequenceMarks = useStudio((s) => s.clearSequenceMarks);
   const setZoom = useStudio((s) => s.setZoom);
   const duration = useStudio((s) => s.duration);
   const previews = useStudio((s) => s.previews);
   const dropAssetOnTrack = useStudio((s) => s.dropAssetOnTrack);
   const dropAssetOnNewTrack = useStudio((s) => s.dropAssetOnNewTrack);
+  const dropGeneratorOnTrack = useStudio((s) => s.dropGeneratorOnTrack);
+  const draggingGeneratorId = useStudio((s) => s.draggingGeneratorId);
   const moveClipsToNewTrack = useStudio((s) => s.moveClipsToNewTrack);
   const draggingAssetId = useStudio((s) => s.draggingAssetId);
   const menu = useContextMenu();
@@ -1046,6 +1053,16 @@ export function Timeline(): React.JSX.Element {
     [project, sequenceId, assetDropStart],
   );
 
+  /** The same question for a generator, which occupies one lane and needs no partner. */
+  const generatorDropStart = useCallback(
+    (generatorId: string, trackId: TrackId, clientX: number): Time | null => {
+      const generator = generatorById(generatorId);
+      if (!generator || getTrack(project, trackId).kind !== 'video') return null;
+      return assetDropStart(clientX, [trackId], generator.duration);
+    },
+    [project, assetDropStart],
+  );
+
   /**
    * Where a dropped asset would land, as a pixel rect, keyed by track.
    *
@@ -1057,10 +1074,30 @@ export function Timeline(): React.JSX.Element {
    * partner stream is being dropped somewhere unknown.
    */
   const dropGhosts = useMemo(() => {
-    if (!dropTrackId || !draggingAssetId) return null;
-    const asset = project.assets[draggingAssetId];
+    if (!dropTrackId) return null;
     const hovered = project.tracks[dropTrackId];
-    if (!asset || !hovered) return null;
+    if (!hovered) return null;
+
+    // A generator is the simpler half: one lane, a fixed length, no partner stream.
+    const generator = draggingGeneratorId ? generatorById(draggingGeneratorId) : null;
+    if (generator) {
+      if (hovered.kind !== 'video') return null;
+      const start =
+        dropClientX === null
+          ? playheadNow()
+          : assetDropStart(dropClientX, [dropTrackId], generator.duration);
+      return {
+        trackIds: [dropTrackId],
+        left: T.toSeconds(start) * pxPerSecond,
+        width: Math.max(2, T.toSeconds(generator.duration) * pxPerSecond),
+        label: generator.label,
+        newTrackNote: null as string | null,
+      };
+    }
+
+    if (!draggingAssetId) return null;
+    const asset = project.assets[draggingAssetId];
+    if (!asset) return null;
 
     const duration = asset.video?.duration ?? asset.audio?.duration;
     if (!duration || !T.isPositive(duration)) return null;
@@ -1089,7 +1126,7 @@ export function Timeline(): React.JSX.Element {
         ? `+ new ${hovered.kind === 'video' ? 'audio' : 'video'} track`
         : null,
     };
-  }, [dropTrackId, dropClientX, draggingAssetId, project, sequenceId, pxPerSecond, assetDropStart]);
+  }, [dropTrackId, dropClientX, draggingAssetId, draggingGeneratorId, project, sequenceId, pxPerSecond, assetDropStart, playheadNow]);
 
   /**
    * Where a new track would go for a clip of this kind, or null to drop normally.
@@ -1127,7 +1164,7 @@ export function Timeline(): React.JSX.Element {
       width: Math.max(2, T.toSeconds(clip.duration) * pxPerSecond),
       kind: clipKindClass(clip),
       height: Math.max(TRACK_HEIGHT_MIN, getTrack(project, clip.trackId).height),
-      appearance: clip.kind === 'solid' ? { background: clip.fill } : {},
+      appearance: clipBackground(clip) ?? {},
     });
 
     sides[gapPlan.primaryTrack.side].push(ghostFor(gapPlan.primary));
@@ -1361,14 +1398,24 @@ export function Timeline(): React.JSX.Element {
       const snapped = snap(onFrameGrid(T.add(anchor, delta)), excluded);
       const shift = T.sub(snapped.at, anchor);
 
-      const commands: Command[] = drag.groupIds
-        .map((id) => project.clips[id])
-        .filter((c): c is Clip => c !== undefined)
-        .map((c) => ({
+      /*
+       * Measured from where each clip *started*, never from where it is now.
+       *
+       * `shift` is the whole gesture's distance from the anchor it began at, so
+       * adding it to the edge the document currently holds re-applies every earlier
+       * pointer event on top of itself: the edge runs away from the pointer, faster
+       * the further the drag has gone. The move branch above already recomputes from
+       * its origin for exactly this reason. Absolute targets also mean a dropped
+       * pointer event costs nothing, and an edge clamped to the material the source
+       * can supply comes back the moment the pointer does.
+       */
+      const commands: Command[] = drag.origins
+        .filter((origin) => project.clips[origin.clipId] !== undefined)
+        .map((origin) => ({
           type: 'trimClip' as const,
-          clipId: c.id,
+          clipId: origin.clipId,
           edge,
-          to: T.add(edge === 'in' ? c.start : clipEnd(c), shift),
+          to: T.add(edge === 'in' ? origin.start : T.add(origin.start, origin.duration), shift),
         }));
       runMany(commands, 'Trim clip', `trim-${edge}:${drag.clipId}`);
 
@@ -1929,6 +1976,27 @@ export function Timeline(): React.JSX.Element {
             'separator',
           ] as MenuEntry[])),
       {
+        kind: 'swatches' as const,
+        label: 'Label',
+        options: [
+          { value: null, name: 'No label' },
+          ...CLIP_LABELS.map((entry) => ({ value: entry.color, name: entry.name })),
+        ],
+        // The clip under the pointer decides what is ticked; applying covers the
+        // whole selection, the way the delete below it does.
+        value: clip.color,
+        onPick: (color: string | null) =>
+          runMany(
+            targets.map((clipId) => ({
+              type: 'setClipProps' as const,
+              clipId,
+              props: { color },
+            })),
+            color === null ? 'Clear label' : 'Set label',
+          ),
+      },
+      'separator',
+      {
         label: targets.length > 1 ? `Delete ${targets.length} clips` : 'Delete',
         icon: <IconTrash />,
         hint: 'Del',
@@ -2139,6 +2207,17 @@ export function Timeline(): React.JSX.Element {
         icon: <IconMarker />,
         onSelect: () => run({ type: 'addMarker', sequenceId, at }, 'Add marker'),
       },
+      'separator',
+      // Marked where the menu was opened, not at the play head: the point of asking
+      // here is that this is the frame being pointed at.
+      { label: 'Mark In here', hint: 'I', onSelect: () => setSequenceMark('in', at) },
+      { label: 'Mark Out here', hint: 'O', onSelect: () => setSequenceMark('out', at) },
+      {
+        label: 'Clear In and Out',
+        hint: 'Ctrl+Shift+X',
+        disabled: !sequence.view.inPoint && !sequence.view.outPoint,
+        onSelect: clearSequenceMarks,
+      },
       {
         label: 'Go to start',
         icon: <IconSkipStart />,
@@ -2325,6 +2404,18 @@ export function Timeline(): React.JSX.Element {
     [totalSeconds, pxPerSecond, sequence.frameRate],
   );
 
+  /*
+   * The In and Out marks, in the same content pixels as everything else on the ruler.
+   *
+   * Rounded here rather than per element so the band, the flag and the line down the
+   * lanes all land on the same column. Half a pixel of disagreement between them
+   * reads as a blurred edge at exactly the place someone is trying to cut.
+   */
+  const markX = (at: Time | null): number | null =>
+    at ? Math.round(T.toSeconds(at) * pxPerSecond) : null;
+  const inX = markX(sequence.view.inPoint);
+  const outX = markX(sequence.view.outPoint);
+
   // Rounded, because the line is drawn from this and a fractional left edge makes a
   // 2px rule antialias across three columns and read as a soft grey smear.
   /*
@@ -2460,6 +2551,17 @@ export function Timeline(): React.JSX.Element {
             onLostPointerCapture={finishRulerScrub}
             onContextMenu={openRulerMenu}
           >
+            {/*
+              The marked span, drawn in the ruler's own content pixels.
+
+              It belongs here rather than in the guides strip because a band has no
+              overhang: it is bounded by its own two edges, so the sticky corner
+              covers it correctly as it covers the ticks. The flags do overhang, and
+              are in the clipped strip below for exactly that reason.
+            */}
+            {inX !== null && outX !== null && outX > inX && (
+              <div className="mark-band" style={{ left: inX, width: outX - inX }} />
+            )}
             {ticks.map((tick) => (
               <div
                 key={`${tick.frame ? 'f' : 't'}${tick.seconds}`}
@@ -2483,6 +2585,9 @@ export function Timeline(): React.JSX.Element {
               Sharing a boundary is what makes the two appear and disappear together.
             */}
             <div className="ruler-guides" style={{ left: HEADER_WIDTH }}>
+              {/* Before the play head, so the head is never hidden behind a mark. */}
+              {inX !== null && <div className="mark-flag in" style={{ left: inX }} />}
+              {outX !== null && <div className="mark-flag out" style={{ left: outX }} />}
               <div
                 className="playhead-head"
                 ref={playheadHeadRef}
@@ -2558,7 +2663,13 @@ export function Timeline(): React.JSX.Element {
                   }`}
                   style={{ width: contentWidth }}
                   onDragOver={(event) => {
-                    if (!event.dataTransfer.types.includes(ASSET_DRAG_TYPE)) return;
+                    const types = event.dataTransfer.types;
+                    if (
+                      !types.includes(ASSET_DRAG_TYPE) &&
+                      !types.includes(GENERATOR_DRAG_TYPE)
+                    ) {
+                      return;
+                    }
                     event.preventDefault();
                     event.dataTransfer.dropEffect = 'copy';
                     setDropTrackId(trackId);
@@ -2570,14 +2681,18 @@ export function Timeline(): React.JSX.Element {
                   }}
                   onDrop={(event) => {
                     const assetId = event.dataTransfer.getData(ASSET_DRAG_TYPE);
+                    const generatorId = event.dataTransfer.getData(GENERATOR_DRAG_TYPE);
                     // Read before the state is cleared: this is the position the
                     // ghost has been promising all the way in.
-                    const at = dropStartFor(assetId as AssetId, trackId, event.clientX);
+                    const at = assetId
+                      ? dropStartFor(assetId as AssetId, trackId, event.clientX)
+                      : generatorDropStart(generatorId, trackId, event.clientX);
                     setDropTrackId(null);
                     setDropClientX(null);
-                    if (!assetId) return;
+                    if (!assetId && !generatorId) return;
                     event.preventDefault();
-                    dropAssetOnTrack(assetId as never, trackId, at ?? undefined);
+                    if (assetId) dropAssetOnTrack(assetId as never, trackId, at ?? undefined);
+                    else dropGeneratorOnTrack(generatorId as never, trackId, at ?? undefined);
                   }}
                   onDragEnd={() => {
                     setDropTrackId(null);
@@ -2634,9 +2749,7 @@ export function Timeline(): React.JSX.Element {
                             style={{
                               left: T.toSeconds(origin.start) * pxPerSecond,
                               width: Math.max(2, T.toSeconds(origin.duration) * pxPerSecond),
-                              ...(original.kind === 'solid'
-                                ? { background: original.fill }
-                                : {}),
+                              ...(clipBackground(original) ?? {}),
                             }}
                           />
                         );
@@ -2741,6 +2854,21 @@ export function Timeline(): React.JSX.Element {
                       }}
                       onDragStart={(event, kind, modifier) => startDrag(event, clip, kind, modifier)}
                       onContextMenu={(event) => openClipMenu(event, clip)}
+                      onShowProperties={() => {
+                        setInspectorOpen(true);
+                        // The panel edits what the preview shows, and the preview
+                        // shows the playhead. With the head parked somewhere else,
+                        // dragging Opacity on this clip changes nothing on screen —
+                        // so a double-click also brings the head inside the clip
+                        // when it is not already there. Left where it is otherwise:
+                        // a head already on the clip is on a frame someone chose.
+                        // The same gesture that asks for the properties asks to see
+                        // them take effect.
+                        const at = playheadNow();
+                        if (T.lt(at, clip.start) || !T.lt(at, clipEnd(clip))) {
+                          setPlayhead(clip.start);
+                        }
+                      }}
                       onHoverStart={(event) => scheduleHover(event, clip)}
                       onHoverEnd={cancelHover}
                     />
@@ -2857,6 +2985,8 @@ export function Timeline(): React.JSX.Element {
               to sit below the clips they are meant to be read against.
             */}
             <div className="timeline-guides" style={{ left: HEADER_WIDTH }}>
+              {inX !== null && <div className="mark-line in" style={{ left: inX }} />}
+              {outX !== null && <div className="mark-line out" style={{ left: outX }} />}
               <div className="playhead-line" ref={playheadLineRef} />
               {snapMark !== null && (
                 <div
@@ -3323,6 +3453,7 @@ function ClipView({
   onSelect,
   onDragStart,
   onContextMenu,
+  onShowProperties,
   onHoverStart,
   onHoverEnd,
 }: {
@@ -3341,14 +3472,15 @@ function ClipView({
   onSelect: (modifier: SelectModifier) => void;
   onDragStart: (event: React.PointerEvent, kind: DragKind, modifier: SelectModifier) => void;
   onContextMenu: (event: React.MouseEvent) => void;
+  onShowProperties: () => void;
   onHoverStart: (event: React.PointerEvent) => void;
   onHoverEnd: () => void;
 }): React.JSX.Element {
   const left = T.toSeconds(clip.start) * pxPerSecond;
   const width = Math.max(2, T.toSeconds(clip.duration) * pxPerSecond);
   const kindClass = clipKindClass(clip);
-  // A fill clip shows the colour it produces, so the timeline reads at a glance.
-  const fillStyle = clip.kind === 'solid' ? { background: clip.fill } : undefined;
+  // A label if it has one, else a fill clip's own colour, else the kind's rule.
+  const fillStyle = clipBackground(clip);
 
   /*
    * No name on the clip.
@@ -3361,6 +3493,23 @@ function ClipView({
    * has gone missing has to say so without being pointed at first.
    */
   const showBadges = width >= 22;
+
+  /*
+   * Except for the clips that generate their own picture.
+   *
+   * The reasoning above rests on there being a filmstrip underneath saying what the
+   * clip is. A title and a colour have none, so removing the label left them as bare
+   * rectangles of paint — and since a colour clip is painted whatever fill it holds,
+   * a brownish one came out the same colour as the title style, pixel for pixel.
+   *
+   * So these two draw their own content, which is the same bargain the media clips
+   * strike: a title shows its text, and a colour shows its colour with a mark to say
+   * that is what it is. Nothing is covered, because there was nothing underneath.
+   */
+  const generated = clip.kind === 'title' || clip.kind === 'solid';
+  // Room for the mark clear of both trim handles; the text needs a good deal more.
+  const showMark = generated && width >= 26;
+  const showTitleText = clip.kind === 'title' && width >= 64;
 
   return (
     <div
@@ -3375,6 +3524,10 @@ function ClipView({
       onPointerMove={onHoverStart}
       onPointerLeave={onHoverEnd}
       onContextMenu={onContextMenu}
+      // The second click of the pair has already selected the clip, so this only has
+      // to bring the panel back. Never a toggle: a double-click on a clip asks to see
+      // it, and answering by hiding the panel is the opposite of what was asked.
+      onDoubleClick={onShowProperties}
       onPointerDown={(event) => {
         // Right-click is the context menu's business; selecting here would collapse
         // a multi-selection before the menu could act on it.
@@ -3406,6 +3559,16 @@ function ClipView({
             </span>
           )}
         </div>
+      )}
+      {showMark && (
+        <span className="clip-generated">
+          <span className="mark">
+            {clip.kind === 'title' ? <IconText size={9} /> : <IconSwatch size={9} />}
+          </span>
+          {showTitleText && clip.kind === 'title' && (
+            <span className="text">{clip.text}</span>
+          )}
+        </span>
       )}
       {progress !== null && (
         /*

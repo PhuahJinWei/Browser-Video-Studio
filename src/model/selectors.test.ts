@@ -15,6 +15,7 @@ import {
   isAudioClip,
   isMediaClip,
   isVisualClip,
+  markedRange,
   ModelError,
   renderListAt,
   sequenceDuration,
@@ -327,6 +328,27 @@ describe('audioSegments', () => {
     const segment = audioSegments(faded, f.seqId, T.range(sec(0), sec(4)))[0]!;
     expect(segment.clip.gainDb.kind).toBe('keyframed');
     expect(segment.clip.pan).toEqual(staticParam(0));
+  });
+});
+
+describe('markedRange', () => {
+  const marked = (view: Record<string, unknown>) =>
+    markedRange(run(f, { type: 'setView', sequenceId: f.seqId, view }), f.seqId);
+
+  it('is the span between the two marks', () => {
+    const range = marked({ inPoint: sec(2), outPoint: sec(7) });
+    expect(range && [T.toSeconds(range.start), T.toSeconds(range.end)]).toEqual([2, 7]);
+  });
+
+  it('is nothing until both marks are set', () => {
+    expect(marked({ inPoint: sec(2) })).toBeNull();
+    expect(marked({ outPoint: sec(7) })).toBeNull();
+    expect(markedRange(f.project, f.seqId)).toBeNull();
+  });
+
+  it('refuses a range that is inverted or empty rather than reporting a backwards one', () => {
+    expect(marked({ inPoint: sec(7), outPoint: sec(2) })).toBeNull();
+    expect(marked({ inPoint: sec(4), outPoint: sec(4) })).toBeNull();
   });
 });
 
