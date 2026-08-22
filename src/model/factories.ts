@@ -95,6 +95,25 @@ export interface CreateTrackOptions {
 /** One model-level default for every timeline track kind. */
 export const DEFAULT_TRACK_HEIGHT = 100;
 
+/**
+ * How tall a lane about to be added should be.
+ *
+ * Track height is stored per track, so that lanes can differ — but it is set in bulk,
+ * by a slider that reads as a view control. Someone who has shortened every lane to
+ * see more of them at once has said how tall they want lanes to be, and a new one
+ * arriving at the factory default lands as an odd one out to be dragged back down.
+ *
+ * Matched to the lane it joins rather than to an average of all of them: with mixed
+ * heights there is no prevailing size to find, and the neighbour is the one the eye
+ * compares it against. Falls back to the default only when its kind has no lanes yet,
+ * which is the one case with nothing to match.
+ */
+export function heightForNewTrack(heights: readonly number[], index: number): number {
+  if (heights.length === 0) return DEFAULT_TRACK_HEIGHT;
+  const neighbour = Math.max(0, Math.min(index, heights.length - 1));
+  return heights[neighbour] ?? DEFAULT_TRACK_HEIGHT;
+}
+
 export function createTrack(opts: CreateTrackOptions): Track {
   return {
     id: opts.id,

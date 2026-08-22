@@ -6,6 +6,7 @@ import { getClip, getTrack, ModelError } from './selectors';
 import * as T from './time';
 import type { AudioClip, ClipId, Project, TitleClip, VideoClip } from './types';
 import { assertValidProject, validateProject } from './validate';
+import { DEFAULT_TRACK_HEIGHT } from './factories';
 
 let f: Fixture;
 beforeEach(() => {
@@ -69,6 +70,39 @@ describe('tracks', () => {
     const seq = p.sequences[f.seqId]!;
     expect(getTrack(p, seq.videoTrackIds[1]!).name).toBe('Mid');
     expect(seq.videoTrackIds[0]).toBe(f.v1);
+  });
+
+  /*
+   * Height is set in bulk by a slider that reads as a view control, so a lane added
+   * after that arrives among lanes whose height the person has already chosen.
+   */
+  it('gives a new track the height of the lanes it joins', () => {
+    const shortened = run(
+      f,
+      { type: 'setTrackProps', trackId: f.v1, props: { height: 55 } },
+      { type: 'setTrackProps', trackId: f.v2, props: { height: 55 } },
+      { type: 'addTrack', sequenceId: f.seqId, kind: 'video', name: 'V3' },
+    );
+    const seq = shortened.sequences[f.seqId]!;
+    expect(getTrack(shortened, seq.videoTrackIds[2]!).height).toBe(55);
+  });
+
+  it('measures each kind against its own lanes', () => {
+    const mixed = run(
+      f,
+      { type: 'setTrackProps', trackId: f.v1, props: { height: 55 } },
+      { type: 'setTrackProps', trackId: f.v2, props: { height: 55 } },
+      { type: 'setTrackProps', trackId: f.a1, props: { height: 140 } },
+      { type: 'addTrack', sequenceId: f.seqId, kind: 'audio', name: 'A2' },
+    );
+    const seq = mixed.sequences[f.seqId]!;
+    expect(getTrack(mixed, seq.audioTrackIds[1]!).height).toBe(140);
+  });
+
+  it('still uses the default for a sequence whose lanes were never resized', () => {
+    const p = run(f, { type: 'addTrack', sequenceId: f.seqId, kind: 'video', name: 'V3' });
+    const seq = p.sequences[f.seqId]!;
+    expect(getTrack(p, seq.videoTrackIds[2]!).height).toBe(DEFAULT_TRACK_HEIGHT);
   });
 
   it('removes a track together with its clips', () => {

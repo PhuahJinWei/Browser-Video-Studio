@@ -60,6 +60,7 @@ import {
 } from './format';
 import { Fader, quantizeRangeValue } from './Fader';
 import { useStudio } from './store';
+import { groupStartsOpen, primaryGroup, subjectLabel } from './inspectorGroups';
 import { hint, tip } from './tooltip';
 
 const BLEND_MODES: readonly BlendMode[] = [
@@ -106,7 +107,17 @@ export function Inspector(): React.JSX.Element {
         */}
         {!transition && !track && !unit && (
           <>
-            {selected.length > 1 && <p className="hint">{selected.length} clips selected.</p>}
+            {/*
+              One subject line, not two contradicting each other. Selecting three
+              unrelated clips used to print "3 clips selected." directly above
+              "Sequence · nothing selected", which are not both true — and the second
+              is the one that explained the controls underneath.
+            */}
+            <p className="unit-badge">
+              {selected.length > 1
+                ? `${selected.length} clips selected · no controls in common`
+                : 'Sequence · nothing selected'}
+            </p>
             <SequenceInspector />
           </>
         )}
@@ -185,8 +196,8 @@ function SequenceInspector(): React.JSX.Element {
 
   return (
     <>
-      <p className="unit-badge">Sequence · nothing selected</p>
-
+      {/* The subject line lives with the caller, which is the one that knows whether
+          this is being shown for an empty selection or beneath a set of clips. */}
       <div className="field">
         <label>Resolution</label>
         <div className="value-row">
@@ -867,6 +878,21 @@ function UnitInspector({ unit }: { unit: SelectedUnit }): React.JSX.Element {
   const project = history.present.project;
 
   const clip = unit.primary;
+  /*
+   * The clip that was actually clicked, which `selectionUnit` puts first when it
+   * expands a selection to its whole unit. `unit.primary` is the visual half by
+   * definition, so using that here opened the picture controls for someone who had
+   * pointed at a waveform.
+   */
+  const focused = unit.clips[0] ?? clip;
+  /*
+   * Which group opens itself. One, not all: the panel is 280px wide and everything
+   * expanded put the whole editable half below the fold.
+   */
+  const primary = primaryGroup(focused.kind, {
+    visual: Boolean(unit.visual),
+    audio: Boolean(unit.audio),
+  });
   // Effects from every member, so a linked pair shows its video and audio
   // effects in one list rather than hiding half of them.
   const effects = unit.clips.flatMap((ownerClip) =>
@@ -878,6 +904,23 @@ function UnitInspector({ unit }: { unit: SelectedUnit }): React.JSX.Element {
 
   return (
     <>
+      {/*
+        What this panel is editing, before anything it can be edited with.
+
+        The Name field underneath is a control, not a heading: it says what the clip
+        is called and nothing about what it is, so a linked pair selected by its sound
+        showed a Video section with no explanation anywhere on screen. Every other
+        subject the inspector can take — a track, a transition, the sequence — already
+        announced itself; a clip was the one that did not.
+      */}
+      <p className="unit-badge">
+        {subjectLabel(
+          focused.kind,
+          unit.clips.length,
+          unit.isUnit ? (unit.clips.some((c) => c.groupId) ? 'grouped' : 'linked') : null,
+        )}
+      </p>
+
       <div className="field">
         <label>Name</label>
         <input
@@ -899,42 +942,10 @@ function UnitInspector({ unit }: { unit: SelectedUnit }): React.JSX.Element {
       </div>
 
       {unit.isUnit && (
-        <p className="unit-badge">
-          {unit.clips.some((c) => c.groupId) ? 'Grouped' : 'Linked'} · {unit.clips.length}{' '}
-          clips edited together
+        <p className="hint">
+          Edited together — a change here reaches all {unit.clips.length}.
         </p>
       )}
-
-      {/*
-        One value to a row, each with its own name.
-
-        These were a single line — `0:16.10 → 0:32.03 · 0:15.93` — which asked the
-        reader to work out from an arrow and a middle dot which number was what. The
-        third is the worst of it: a *duration* formatted identically to the two clock
-        times beside it, so it reads as a third position on the timeline. Naming them
-        costs a few rows in a panel that scrolls anyway.
-      */}
-      <div className="field">
-        <label>Timing</label>
-        <dl className="readout">
-          <dt>Starts</dt>
-          <dd>{T.formatDuration(clip.start, { decimals: 2 })}</dd>
-          <dt>Ends</dt>
-          <dd>{T.formatDuration(T.add(clip.start, clip.duration), { decimals: 2 })}</dd>
-          <dt>Duration</dt>
-          <dd>{T.formatDuration(clip.duration, { decimals: 2 })}</dd>
-          {isMediaClip(clip) && (
-            <>
-              {/* Where in the original file this clip starts — a different clock to
-                  the three above, which are all positions in the sequence. */}
-              <dt>Source in</dt>
-              <dd>{T.formatDuration(clip.sourceIn, { decimals: 2 })}</dd>
-              <dt>Speed</dt>
-              <dd>{clip.speed}&times;</dd>
-            </>
-          )}
-        </dl>
-      </div>
 
       <div className="field">
         <div className="value-row">
@@ -993,7 +1004,7 @@ function UnitInspector({ unit }: { unit: SelectedUnit }): React.JSX.Element {
       )}
 
       {unit.visual?.kind === 'title' && (
-        <details className="inspector-group" open>
+        <details className="inspector-group" open={groupStartsOpen('title', primary)}>
           <summary>Title</summary>
           <div className="inspector-group-body">
             <TitleControls clip={unit.visual} onCommit={endGesture} />
@@ -1002,7 +1013,7 @@ function UnitInspector({ unit }: { unit: SelectedUnit }): React.JSX.Element {
       )}
 
       {unit.visual?.kind === 'solid' && (
-        <details className="inspector-group" open>
+        <details className="inspector-group" open={groupStartsOpen('colour', primary)}>
           <summary>Colour</summary>
           <div className="inspector-group-body">
             <SolidControls clip={unit.visual} />
@@ -1011,7 +1022,7 @@ function UnitInspector({ unit }: { unit: SelectedUnit }): React.JSX.Element {
       )}
 
       {unit.visual && (
-        <details className="inspector-group" open>
+        <details className="inspector-group" open={groupStartsOpen('video', primary)}>
           <summary>Video</summary>
           <div className="inspector-group-body">
             <VisualControls
@@ -1022,7 +1033,7 @@ function UnitInspector({ unit }: { unit: SelectedUnit }): React.JSX.Element {
         </details>
       )}
       {unit.audio && (
-        <details className="inspector-group" open>
+        <details className="inspector-group" open={groupStartsOpen('audio', primary)}>
           <summary>Audio</summary>
           <div className="inspector-group-body">
           <AudioControls
@@ -1074,6 +1085,42 @@ function UnitInspector({ unit }: { unit: SelectedUnit }): React.JSX.Element {
           </select>
         </div>
       </details>
+
+      {/*
+        Last, because it is the only thing here that cannot be changed from here.
+
+        One value to a row, each with its own name. These were a single line —
+        `0:16.10 → 0:32.03 · 0:15.93` — which asked the reader to work out from an
+        arrow and a middle dot which number was what. The third is the worst of it: a
+        *duration* formatted identically to the two clock times beside it, so it reads
+        as a third position on the timeline.
+
+        It used to sit third from the top, where five rows of read-only numbers pushed
+        every slider in the panel below the fold — and the timeline already shows
+        where a clip starts and how long it runs, in the place a person is looking
+        when they wonder.
+      */}
+      <div className="field inspector-readout">
+        <label>Timing</label>
+        <dl className="readout">
+          <dt>Starts</dt>
+          <dd>{T.formatDuration(clip.start, { decimals: 2 })}</dd>
+          <dt>Ends</dt>
+          <dd>{T.formatDuration(T.add(clip.start, clip.duration), { decimals: 2 })}</dd>
+          <dt>Duration</dt>
+          <dd>{T.formatDuration(clip.duration, { decimals: 2 })}</dd>
+          {isMediaClip(clip) && (
+            <>
+              {/* Where in the original file this clip starts — a different clock to
+                  the three above, which are all positions in the sequence. */}
+              <dt>Source in</dt>
+              <dd>{T.formatDuration(clip.sourceIn, { decimals: 2 })}</dd>
+              <dt>Speed</dt>
+              <dd>{clip.speed}&times;</dd>
+            </>
+          )}
+        </dl>
+      </div>
     </>
   );
 }

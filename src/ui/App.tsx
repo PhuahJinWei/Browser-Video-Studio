@@ -13,10 +13,11 @@ import {
   percentToGainDb,
 } from './format';
 import { MIDDLE_MIN, useLayout } from './layout';
-import { playback } from './playback';
+import { playback, usePlayback } from './playback';
 import { PanelDivider } from './PanelDivider';
 import { staticParam } from '../model/params';
 import { DEFAULT_TRACK_HEIGHT } from '../model/factories';
+import type { TrackId } from '../model/types';
 import * as T from '../model/time';
 import { ContextMenuProvider } from './ContextMenu';
 import { DialogProvider } from './Dialog';
@@ -48,7 +49,8 @@ import { MediaBin } from './MediaBin';
 import { MenuBar } from './MenuBar';
 import { Preview } from './Preview';
 import { Timeline } from './Timeline';
-import { flushAutosave, useStudio } from './store';
+import { flushAutosave, orderedTrackIds, useStudio } from './store';
+import { canSplitAt, splitHint } from './splitAvailability';
 import { TooltipLayer } from './TooltipLayer';
 import { hint, tip } from './tooltip';
 import {
@@ -146,7 +148,7 @@ function Studio(): React.JSX.Element {
   const editSourceToTimeline = useStudio((s) => s.editSourceToTimeline);
   const addGeneratorAtPlayhead = useStudio((s) => s.addGeneratorAtPlayhead);
   const setDraggingGenerator = useStudio((s) => s.setDraggingGenerator);
-  const canAddTransition = useStudio((s) => s.canAddTransitionNearPlayhead);
+  const canAddTransitionNear = useStudio((s) => s.canAddTransitionNearPlayhead);
   const saveState = useStudio((s) => s.saveState);
   const theme = useLayout((s) => s.theme);
   const toggleTheme = useLayout((s) => s.toggleTheme);
@@ -155,6 +157,35 @@ function Studio(): React.JSX.Element {
   const sequence = project.sequences[sequenceId]!;
   const masterDb =
     sequence.masterGainDb.kind === 'static' ? sequence.masterGainDb.value : 0;
+
+  /*
+   * What Split would act on: the tracks holding the selection, or every track when
+   * nothing is selected. The same rule `splitAtPlayhead` follows, so the button and
+   * the command cannot disagree about whether there is anything to cut.
+   */
+  const hasClips = Object.keys(project.clips).length > 0;
+  const selectedTrackIds = [
+    ...new Set(selection.map((id) => project.clips[id]?.trackId).filter(Boolean)),
+  ] as TrackId[];
+  const splitTrackIds =
+    selectedTrackIds.length > 0 ? selectedTrackIds : orderedTrackIds(project, sequenceId);
+  /*
+   * Selected from the playback channel rather than read once during render, so the
+   * button dims and lights as the playhead crosses a clip edge. A boolean, never the
+   * position: React compares it and re-renders only when it actually flips, which is
+   * what keeps a sixty-times-a-second channel from re-rendering the whole toolbar.
+   */
+  const canSplit = usePlayback((state) => canSplitAt(project, splitTrackIds, state.position));
+  /*
+   * Not selected from the playback channel, unlike Split above.
+   *
+   * `nearestCut` has no distance limit, so this answers "is there a bare cut on these
+   * tracks at all" — the playhead only decides which of them is nearest, never whether
+   * one exists. Watching the position would rescan every track sixty times a second
+   * for a value that cannot change because of it. Clips and selection are what move
+   * it, and both already re-render this.
+   */
+  const canAddTransition = canAddTransitionNear();
 
   // Save anything still inside the autosave debounce before the page goes away.
   useEffect(() => {
@@ -518,14 +549,29 @@ function Studio(): React.JSX.Element {
           <span className="header-divider" />
 
           <span className="toolgroup">
-            <button className="action" {...tip('Split at the playhead (S)')} onClick={splitAtPlayhead}>
+            {/*
+              Disabled with a reason, the way Transition already is. Both of these
+              used to look pressable on an empty timeline and then do nothing, which
+              reads as the application being broken rather than as the playhead being
+              in the wrong place.
+            */}
+            <button
+              className="action"
+              disabled={!canSplit}
+              {...tip(splitHint(project, splitTrackIds, canSplit, hasClips))}
+              onClick={splitAtPlayhead}
+            >
               <IconSplit size={18} />
               <span>Split</span>
             </button>
             <button
               className="action tint-danger"
               disabled={selection.length === 0}
-              {...tip('Delete the selection (Del)')}
+              {...tip(
+                selection.length === 0
+                  ? 'Select a clip on the timeline to delete it'
+                  : `Delete ${selection.length === 1 ? 'the selected clip' : `${selection.length} selected clips`} (Del)`,
+              )}
               onClick={() => run({ type: 'removeClips', clipIds: selection, mode: 'lift' }, 'Delete clips')}
             >
               <IconTrash size={18} />
@@ -571,10 +617,12 @@ function Studio(): React.JSX.Element {
                * command reports "no bare cut near the playhead" when there is not one —
                * which from a button reads as the button being broken.
                */
-              disabled={!canAddTransition()}
-              {...tip(canAddTransition()
+              disabled={!canAddTransition}
+              {...tip(
+                canAddTransition
                   ? 'Add a transition on the cut nearest the playhead (Ctrl+D)'
-                  : 'No bare cut near the playhead to put a transition on')}
+                  : 'No bare cut near the playhead to put a transition on',
+              )}
               onClick={() => addTransitionNearPlayhead()}
             >
               <IconTransition size={18} />

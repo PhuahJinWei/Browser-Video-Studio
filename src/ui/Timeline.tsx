@@ -10,6 +10,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { Command } from '../model/commands';
 import { DEFAULT_TRACK_HEIGHT } from '../model/factories';
 import {
+  audibleTrackIds,
   clipEnd,
   clipFitsTrack,
   clipSourceSpan,
@@ -57,7 +58,7 @@ import { usePlaybackPaint, usePlayheadLeft } from './PlayheadMarker';
 import { useContextMenu, type MenuEntry } from './ContextMenu';
 import { useDialog } from './Dialog';
 import { clipsForDragOrigin } from './dragOrigin';
-import { planGapInsert } from './insertGap';
+import { gapDestination, planGapInsert, type GapDestination, type GapPlan } from './insertGap';
 import { ownsPointerGesture } from './pointerGesture';
 import { shiftedTrack } from './trackShift';
 import {
@@ -123,6 +124,7 @@ import {
   transitionLabel,
   transitionShortLabel,
 } from './transitions';
+import { movedEnoughToDismiss } from './hoverDwell';
 import { hint, tip } from './tooltip';
 
 /**
@@ -134,6 +136,10 @@ const HEADER_WIDTH = 216;
 const TRACK_SECTION_DIVIDER_HEIGHT = 8;
 const MIN_TAIL_SECONDS = 10;
 const SNAP_PIXELS = 8;
+/** Shared empty list, so a lane with no ghost does not allocate one per render. */
+const EMPTY_LANE_GHOSTS: readonly LaneGhost[] = [];
+/** How far a press may wander and still be a click rather than the start of a drag. */
+const CLICK_SLOP_PX = 3;
 
 type DragKind = 'move' | 'trim-in' | 'trim-out';
 
@@ -198,6 +204,20 @@ interface Insertion {
   /** Client Y of the edge to draw the line along. */
   readonly clientY: number;
   readonly label: string;
+}
+
+/** A gap drop worked out in full: what it would build, and where each clip lands. */
+interface GapPreview {
+  readonly plan: GapPlan;
+  /**
+   * The members the document cannot carry yet, and where each is going.
+   *
+   * A clip bound for a track that does not exist has nowhere to be put until the
+   * drop makes it; a clip stepping onto a lane that one of *those* has not vacated
+   * yet has nowhere to go either. Both wait here, and this is the only record of
+   * where they are headed — so the ghosts and the drop both read it.
+   */
+  readonly held: ReadonlyMap<ClipId, { readonly to: GapDestination; readonly start: Time }>;
 }
 
 /** The same idea for media dragged out of the library, which uses native drag events. */
@@ -444,7 +464,7 @@ export function Timeline(): React.JSX.Element {
   const dropPresetOnTrack = useStudio((s) => s.dropPresetOnTrack);
   const presets = usePresets((s) => s.presets);
   const savePreset = usePresets((s) => s.save);
-  const moveClipsToNewTrack = useStudio((s) => s.moveClipsToNewTrack);
+  const moveClipsToNewTracks = useStudio((s) => s.moveClipsToNewTracks);
   const draggingAssetId = useStudio((s) => s.draggingAssetId);
   const menu = useContextMenu();
   // Previews arrive asynchronously; this re-renders the lanes when one lands.
@@ -607,12 +627,17 @@ export function Timeline(): React.JSX.Element {
   const [snapMark, setSnapMark] = useState<Time | null>(null);
   const [insertion, setInsertion] = useState<Insertion | null>(null);
   /**
-   * The live insertion, for the pointer-up handler.
+   * The drop a gap hover would perform, worked out on each pointer move.
    *
-   * `up` closes over the render that registered it, and the last pointer move may
-   * have arrived after that — a ref is what makes the drop see the newest answer.
+   * Held rather than recomputed at the drop for two reasons. The ghosts and the
+   * commands must not disagree — a preview that shows one thing and a drop that does
+   * another is worse than no preview — and the answer depends on where the pointer
+   * was, which `up` does not carry. The ref is the same value for the pointer-up
+   * handler, which closes over the render that registered it while the last move may
+   * have arrived after that.
    */
-  const insertionRef = useRef<Insertion | null>(null);
+  const [gapPreview, setGapPreview] = useState<GapPreview | null>(null);
+  const gapPreviewRef = useRef<GapPreview | null>(null);
   /**
    * A media drop aimed above or below every lane.
    *
@@ -636,8 +661,10 @@ export function Timeline(): React.JSX.Element {
    */
   const [hoverCard, setHoverCard] = useState<HoverCardState | null>(null);
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** A card is on screen, so movement should not restart its clock. */
+  /** A card is on screen, so only a real move — not drift — restarts its clock. */
   const hoverShown = useRef(false);
+  /** Where the pointer was when the card appeared, to measure that move against. */
+  const hoverAnchor = useRef<{ x: number; y: number } | null>(null);
   /**
    * Whether any gesture owns the pointer, read from inside the pending timer.
    *
@@ -652,6 +679,7 @@ export function Timeline(): React.JSX.Element {
     if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
     hoverTimer.current = null;
     hoverShown.current = false;
+    hoverAnchor.current = null;
     setHoverCard(null);
   }, []);
 
@@ -661,12 +689,25 @@ export function Timeline(): React.JSX.Element {
       // appears in the middle of any of them lands on top of the work it describes,
       // and the answer it gives is one nobody asked for.
       if (gestureRef.current) return;
-      // Already answered: leave it be. Restarting the clock on a card that is on
-      // screen would make it flicker as the pointer drifts over the same clip.
-      if (hoverShown.current) return;
+      const { clientX, clientY } = event;
+
+      /*
+       * A card already up goes when the pointer moves, and the clock starts again —
+       * the same rest the card waited for in the first place. It used to stay until
+       * the pointer left the clip entirely, which on a long one meant an answer
+       * pinned over the work for as long as the work took.
+       *
+       * Drift inside the tolerance is not a move: a hand resting on a mouse reports a
+       * pixel or two, and dismissing on that would make the card blink.
+       */
+      if (hoverShown.current) {
+        if (!movedEnoughToDismiss(hoverAnchor.current, { x: clientX, y: clientY })) return;
+        hoverShown.current = false;
+        hoverAnchor.current = null;
+        setHoverCard(null);
+      }
 
       if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
-      const { clientX, clientY } = event;
       hoverTimer.current = setTimeout(() => {
         const latest = useStudio.getState();
         // Gone, or a gesture started while we were waiting.
@@ -674,6 +715,7 @@ export function Timeline(): React.JSX.Element {
         if (!current || gestureRef.current) return;
         const detail = clipDetails(latest.project(), current, frameRateRef.current);
         hoverShown.current = true;
+        hoverAnchor.current = { x: clientX, y: clientY };
         setHoverCard({ subjectId: clip.id, clientX, clientY, ...detail, subtitle: detail.subtitle });
       }, TIMELINE_HOVER_DELAY_MS);
     },
@@ -700,7 +742,8 @@ export function Timeline(): React.JSX.Element {
     setHint(null);
     setSnapMark(null);
     setInsertion(null);
-    insertionRef.current = null;
+    setGapPreview(null);
+    gapPreviewRef.current = null;
   }, []);
 
   /**
@@ -1203,13 +1246,7 @@ export function Timeline(): React.JSX.Element {
    * that would fire on the ordinary vertical drift of a horizontal drag.
    */
   /** What a drop in a gap would make, shared by the ghosts and by the drop itself. */
-  const gapPlan = useMemo(
-    () =>
-      drag && insertion
-        ? planGapInsert(project, sequence, drag.clipId, drag.groupIds, insertion)
-        : null,
-    [drag, insertion, project, sequence],
-  );
+  const gapPlan = gapPreview?.plan ?? null;
 
   /**
    * The dragged clips, drawn where they would land rather than left behind on their
@@ -1219,34 +1256,79 @@ export function Timeline(): React.JSX.Element {
    */
   const insertGhosts = useMemo(() => {
     const sides: { above: InsertGhost[]; below: InsertGhost[] } = { above: [], below: [] };
-    if (!gapPlan) return sides;
+    if (!gapPlan || !gapPreview) return sides;
 
     // A ghost is a placeholder for a drop that has not happened, so it carries the
     // clip's own colour rather than its picture: the picture is drawn by the lane
     // the clip is actually on, and a ghost is by definition not on one yet.
-    const ghostFor = (clip: Clip): InsertGhost => ({
+    // Where the clip is *going*, not where the document still has it: a clip bound
+    // for a track that does not exist yet is left on its old lane until the drop, so
+    // its own start is the one place its destination is not written down.
+    const ghostFor = (clip: Clip, offset: number, height: number): InsertGhost => ({
       id: clip.id,
-      left: T.toSeconds(clip.start) * pxPerSecond,
+      left: T.toSeconds(gapPreview.held.get(clip.id)?.start ?? clip.start) * pxPerSecond,
       width: Math.max(2, T.toSeconds(clip.duration) * pxPerSecond),
       kind: clipKindClass(clip),
-      height: Math.max(TRACK_HEIGHT_MIN, getTrack(project, clip.trackId).height),
+      height,
+      offset,
       appearance: clipBackground(clip) ?? {},
     });
 
-    sides[gapPlan.primaryTrack.side].push(ghostFor(gapPlan.primary));
-    if (gapPlan.partnerTrack) {
-      for (const partner of gapPlan.partners) sides[gapPlan.partnerTrack.side].push(ghostFor(partner));
-    }
+    // One row per planned track, stacked outward from the lanes: the first new
+    // video track sits against the top of the stack and the next above it, the
+    // audio ones the same way downward. A row is as tall as the tallest track its
+    // clips came from, so a two-row selection lifted past the top still looks like
+    // the two rows it was.
+    const offsets = { video: 0, audio: 0 };
+    gapPlan.newTracks.forEach((track, n) => {
+      const clips = gapPlan.moves
+        .filter((m) => 'newTrack' in m.to && m.to.newTrack === n)
+        .map((m) => m.clip);
+      const height = Math.max(TRACK_HEIGHT_MIN, ...clips.map((c) => getTrack(project, c.trackId).height));
+      for (const clip of clips) sides[track.side].push(ghostFor(clip, offsets[track.kind], height));
+      offsets[track.kind] += height;
+    });
     return sides;
-  }, [gapPlan, project, pxPerSecond, previews]);
+  }, [gapPlan, gapPreview, project, pxPerSecond, previews]);
+
+  /**
+   * The same idea for the members landing on a track that already exists.
+   *
+   * They are held back too — the lane they are stepping onto has not been vacated
+   * by the clip above them yet — so without this they simply vanished from their old
+   * lane and nothing appeared anywhere until the drop. Drawn in the lane they are
+   * going to, at the time they will take, they say what the tail ghosts say for the
+   * clips bound for tracks that do not exist yet: this is where this is going.
+   */
+  const laneGhosts = useMemo(() => {
+    const byTrack = new Map<TrackId, LaneGhost[]>();
+    if (!gapPreview) return byTrack;
+    for (const [clipId, going] of gapPreview.held) {
+      if (!('track' in going.to)) continue;
+      const clip = project.clips[clipId];
+      if (!clip) continue;
+      const list = byTrack.get(going.to.track);
+      const ghost: LaneGhost = {
+        id: clipId,
+        left: T.toSeconds(going.start) * pxPerSecond,
+        width: Math.max(2, T.toSeconds(clip.duration) * pxPerSecond),
+        kind: clipKindClass(clip),
+        appearance: clipBackground(clip) ?? {},
+      };
+      if (list) list.push(ghost);
+      else byTrack.set(going.to.track, [ghost]);
+    }
+    return byTrack;
+  }, [gapPreview, project, pxPerSecond]);
 
   /** Clips whose lane copy the ghosts stand in for, so neither is drawn twice. */
   const relocatingIds = useMemo(
     () =>
-      new Set<ClipId>(
-        gapPlan ? [gapPlan.primary.id, ...(gapPlan.partnerTrack ? gapPlan.partners.map((c) => c.id) : [])] : [],
-      ),
-    [gapPlan],
+      // Every held-back member, not only the ones bound for a new track: each of
+      // them has a ghost standing in for it somewhere, so none should also be drawn
+      // on the lane it is in the act of leaving.
+      new Set<ClipId>(gapPreview ? gapPreview.held.keys() : []),
+    [gapPreview],
   );
 
   /**
@@ -1383,7 +1465,6 @@ export function Timeline(): React.JSX.Element {
         // where it is going, and the track itself is not made until the pointer is
         // released, so a drag across the gap cannot leave a trail of empty tracks.
         const wantsNewTrack = insertionAt(event.clientY, clip.kind);
-        insertionRef.current = wantsNewTrack;
         setInsertion(wantsNewTrack);
 
         // The lane under the pointer is the destination, so a clip can change track.
@@ -1392,6 +1473,13 @@ export function Timeline(): React.JSX.Element {
           hovered && clipFitsTrack(clip.kind, getTrack(project, hovered).kind) && !getTrack(project, hovered).locked
             ? hovered
             : drag.originTrackId;
+        // Into a gap, the members that land on tracks which already exist take their
+        // step now, like any cross-track drag; the ones bound for a track that does
+        // not exist yet keep their lane and are drawn as ghosts in the gap instead.
+        const gap = wantsNewTrack
+          ? planGapInsert(project, sequence, clip.id, drag.origins, wantsNewTrack)
+          : null;
+        const primaryTo = gap ? gapDestination(gap, clip.id) : null;
 
         // Quantised before snapping, not after: an edge caught by `snap` is another
         // clip's own start, which is already where it wants to be, and rounding that
@@ -1399,9 +1487,25 @@ export function Timeline(): React.JSX.Element {
         const wantedRaw = onFrameGrid(T.max(T.TIME_ZERO, T.add(drag.originStart, delta)));
         const snapped = snap(wantedRaw, excluded);
         const wanted = snapped.at;
-        // Butt up against whatever is already on the destination track rather than
-        // overwriting it.
-        const target = clampToFreeSpace(project, [destination], wanted, clip.duration, excluded);
+        /*
+         * Butt up against whatever is already on the destination track rather than
+         * overwriting it — but only when there is a destination to butt against.
+         *
+         * A clip on its way to a track that does not exist yet is landing somewhere
+         * empty, so nothing can be in its way. It was being clamped against its *old*
+         * lane's neighbours, because that is where the document still has it: holding
+         * the gap and sliding sideways stopped dead at whatever happened to sit next
+         * to where the clip started, which is a neighbour it is in the act of leaving.
+         */
+        const clampTracks =
+          primaryTo === null
+            ? [destination]
+            : 'track' in primaryTo
+              ? [primaryTo.track]
+              : [];
+        const target = clampTracks.length
+          ? clampToFreeSpace(project, clampTracks, wanted, clip.duration, excluded)
+          : wanted;
 
         // The readout reports the position actually taken — after snapping and after
         // being clamped off a neighbour — not where the pointer happens to be.
@@ -1418,26 +1522,88 @@ export function Timeline(): React.JSX.Element {
         // would measure each move against the last one, so a drag up and back down
         // would shift it twice and then find nothing left to undo.
         const originTracks = new Map(drag.origins.map((origin) => [origin.clipId, origin.trackId]));
-        const moves = drag.groupIds
+        // Offsets within the selection come from the origins too, for the same
+        // reason and one more: a member held back on its old lane while the pointer
+        // is over a gap has a live start that no longer says where it belongs.
+        const originStarts = new Map(drag.origins.map((origin) => [origin.clipId, origin.start]));
+        const startFor = (c: Clip): Time =>
+          T.max(
+            T.TIME_ZERO,
+            T.add(target, T.sub(originStarts.get(c.id) ?? c.start, drag.originStart)),
+          );
+        // The rest of the unit takes the same step through its own stack, so a
+        // linked pair stays a pair when the picture changes lane and a multi-track
+        // selection keeps its shape — into a gap as much as across the lanes.
+        const laneFor = (c: Clip): TrackId => {
+          if (gap) {
+            const to = gapDestination(gap, c.id);
+            return to && 'track' in to ? to.track : (originTracks.get(c.id) ?? c.trackId);
+          }
+          return c.id === clip.id
+            ? destination
+            : shiftedTrack(project, sequence, drag.originTrackId, destination, originTracks.get(c.id) ?? c.trackId);
+        };
+        const members = drag.groupIds
           .map((id) => project.clips[id])
-          .filter((c): c is Clip => c !== undefined)
-          .map((c) => ({
-            clipId: c.id,
-            // The rest of the unit takes the same step through its own stack, so a
-            // linked pair stays a pair when the picture changes lane and a
-            // multi-track selection keeps its shape.
-            toTrackId:
-              c.id === clip.id
-                ? destination
-                : shiftedTrack(
-                    project,
-                    sequence,
-                    drag.originTrackId,
-                    destination,
-                    originTracks.get(c.id) ?? c.trackId,
-                  ),
-            toStart: T.max(T.TIME_ZERO, T.add(target, T.sub(c.start, clip.start))),
-          }));
+          .filter((c): c is Clip => c !== undefined);
+        /*
+         * Only what a track can actually hold is written to the document.
+         *
+         * A member bound for a track that has yet to be made has nowhere to go yet,
+         * so it stays exactly where it is and its ghost carries the intent. Moving it
+         * anyway meant asking the document to hold it on its old lane at its new
+         * time, which is a position that may well be occupied — and the overlap that
+         * would raise is not a real one, since by the time the drop lands the clip is
+         * not on that lane at all.
+         */
+        const held = new Map<ClipId, { to: GapDestination; start: Time }>();
+        const stepping: { clip: Clip; toTrackId: TrackId; toStart: Time }[] = [];
+        for (const c of members) {
+          const to = gap ? gapDestination(gap, c.id) : null;
+          if (to !== null && 'newTrack' in to) held.set(c.id, { to, start: startFor(c) });
+          else stepping.push({ clip: c, toTrackId: laneFor(c), toStart: startFor(c) });
+        }
+
+        /*
+         * A step onto a lane that a held-back clip has not left yet waits with it.
+         *
+         * The clip above is parked where it started until the drop, so its old lane
+         * is still occupied — and the member stepping up into it is usually aiming
+         * at exactly the spot it is parked on, since a selection dragged as a unit
+         * keeps its shape. Writing that move would ask the document to hold two
+         * clips in one place and the whole batch would be refused, which took the
+         * stepping clip out of the gesture entirely: the selection came apart at the
+         * drop. It waits instead, and lands with the rest.
+         *
+         * Iterated, because holding one clip back can leave a third one blocked by
+         * it in turn. There are only as many rounds as there are members.
+         */
+        for (let settled = false; !settled; ) {
+          settled = true;
+          for (let i = stepping.length - 1; i >= 0; i--) {
+            const step = stepping[i]!;
+            const stepEnd = T.add(step.toStart, step.clip.duration);
+            const waiting = [...held.keys()].some((id) => {
+              const parked = project.clips[id];
+              return (
+                parked !== undefined &&
+                parked.trackId === step.toTrackId &&
+                T.lt(step.toStart, clipEnd(parked)) &&
+                T.lt(parked.start, stepEnd)
+              );
+            });
+            if (!waiting) continue;
+            held.set(step.clip.id, { to: { track: step.toTrackId }, start: step.toStart });
+            stepping.splice(i, 1);
+            settled = false;
+          }
+        }
+
+        const moves = stepping.map((step) => ({
+          clipId: step.clip.id,
+          toTrackId: step.toTrackId,
+          toStart: step.toStart,
+        }));
 
         // A group member may not fit even though the dragged clip does; in that case
         // hold the last good position instead of throwing an error at every pixel.
@@ -1451,7 +1617,15 @@ export function Timeline(): React.JSX.Element {
         });
         if (blocked) return;
 
-        runMany([{ type: 'moveClips', moves }], 'Move clip', `drag:${drag.clipId}`);
+        // Set together with the document write and after the same guard, so the
+        // ghosts and the lanes always show one consistent frame of the gesture.
+        const preview = gap ? { plan: gap, held } : null;
+        gapPreviewRef.current = preview;
+        setGapPreview(preview);
+
+        if (moves.length > 0) {
+          runMany([{ type: 'moveClips', moves }], 'Move clip', `drag:${drag.clipId}`);
+        }
         return;
       }
 
@@ -1501,38 +1675,24 @@ export function Timeline(): React.JSX.Element {
 
     const up = (): void => {
       stopEdgeScroll();
-      const pending = insertionRef.current;
-      if (pending) {
-        // Read the document back rather than using this render's copy: the drag has
-        // been moving clips through it on every pointer event.
-        const state = useStudio.getState();
-        const latest = state.project();
-        const plan = planGapInsert(latest, sequence, drag.clipId, drag.groupIds, pending);
-
-        if (plan) {
-          const partnerIds = new Set(plan.partnerTrack ? plan.partners.map((c) => c.id) : []);
-          const moves = drag.groupIds
-            .map((id) => latest.clips[id])
-            .filter((c): c is Clip => c !== undefined)
-            .map((c) => ({
-              clipId: c.id,
-              // null lands on the track about to be made, and a linked partner on
-              // the second one. Anything else in the unit — a group of same-kind
-              // clips — stays on its own, as it does for a cross-track drag.
-              toTrackId: c.id === plan.primary.id || partnerIds.has(c.id) ? null : c.trackId,
-              toStart: c.start,
-            }));
-          // Same coalesce key as the drag, so the new tracks and the move they came
-          // from collapse into the one undo step the whole gesture deserves.
-          moveClipsToNewTrack(
-            plan.primaryTrack.kind,
-            plan.primaryTrack.index,
-            moves,
-            `drag:${drag.clipId}`,
-            plan.partnerTrack
-              ? { kind: plan.partnerTrack.kind, index: plan.partnerTrack.index, clipIds: [...partnerIds] }
-              : undefined,
-          );
+      const preview = gapPreviewRef.current;
+      if (preview) {
+        /*
+         * Only the members that were held back need moving; the rest walked onto
+         * their tracks while the pointer was still down. Their starts come from the
+         * preview rather than from the document, which is the whole point of holding
+         * them: what the ghosts have been showing is what the drop performs.
+         *
+         * Same coalesce key as the drag, so the new tracks and the moves that led
+         * here collapse into the one undo step the gesture deserves.
+         */
+        const moves = [...preview.held].map(([clipId, going]) => ({
+          clipId,
+          to: going.to,
+          toStart: going.start,
+        }));
+        if (moves.length > 0) {
+          moveClipsToNewTracks(preview.plan.newTracks, moves, `drag:${drag.clipId}`);
         }
       }
 
@@ -1565,7 +1725,7 @@ export function Timeline(): React.JSX.Element {
     trackAtClientY,
     insertionAt,
     clampToContent,
-    moveClipsToNewTrack,
+    moveClipsToNewTracks,
     sequence,
     clearGestureHints,
     showHint,
@@ -2599,6 +2759,18 @@ export function Timeline(): React.JSX.Element {
    */
   const contentX = Math.round(T.toSeconds(duration()) * pxPerSecond);
 
+  /*
+   * Which audio tracks actually reach the mix.
+   *
+   * Solo cannot be read off a track on its own: a track is silenced by *another*
+   * track being soloed, so the answer depends on the whole sequence. This is the
+   * same selector the mixer uses, rather than a second opinion about it.
+   */
+  const audible = useMemo(
+    () => audibleTrackIds(project, sequenceId),
+    [project, sequenceId],
+  );
+
   // Rounded, because the line is drawn from this and a fractional left edge makes a
   // 2px rule antialias across three columns and read as a soft grey smear.
   /*
@@ -2675,7 +2847,7 @@ export function Timeline(): React.JSX.Element {
                 left: ghost.left,
                 width: ghost.width,
                 height: ghost.height,
-                ...(side === 'top' ? { bottom: 0 } : { top: 0 }),
+                ...(side === 'top' ? { bottom: ghost.offset } : { top: ghost.offset }),
                 ...ghost.appearance,
               }}
             />
@@ -2900,9 +3072,19 @@ export function Timeline(): React.JSX.Element {
                 />
                 <div
                   data-track-id={trackId}
+                  /*
+                   * `off` means "nothing on this track reaches the result", however
+                   * it got that way: a hidden video track is not composited, and an
+                   * audio track is out of the mix whether it was muted directly or
+                   * silenced by someone else's solo. All three were invisible here —
+                   * the clips sat in the lane at full strength, so the only evidence
+                   * the button had done anything was the button itself.
+                   */
                   className={`track-lane${track.locked ? ' locked' : ''}${
-                    dropGhosts?.trackIds.includes(trackId) ? ' drop-active' : ''
-                  }`}
+                    (track.kind === 'audio' ? !audible.has(trackId) : track.hidden)
+                      ? ' off'
+                      : ''
+                  }${dropGhosts?.trackIds.includes(trackId) ? ' drop-active' : ''}`}
                   style={{ width: contentWidth }}
                   onDragOver={(event) => {
                     const types = event.dataTransfer.types;
@@ -3001,6 +3183,13 @@ export function Timeline(): React.JSX.Element {
                           />
                         );
                       })}
+                  {(laneGhosts.get(trackId) ?? EMPTY_LANE_GHOSTS).map((ghost) => (
+                    <div
+                      key={ghost.id}
+                      className={`insert-ghost in-lane ${ghost.kind}`}
+                      style={{ left: ghost.left, width: ghost.width, ...ghost.appearance }}
+                    />
+                  ))}
                   {dropGhosts?.trackIds.includes(trackId) && (
                     <div
                       className="drop-ghost"
@@ -3832,6 +4021,8 @@ function ClipView({
   const kindClass = clipKindClass(clip);
   // A label if it has one, else a fill clip's own colour, else the kind's rule.
   const fillStyle = clipBackground(clip);
+  /** Where a press on an already-selected clip landed, until it proves to be a click. */
+  const pendingCollapse = useRef<{ x: number; y: number } | null>(null);
 
   /*
    * No name on the clip.
@@ -3884,8 +4075,33 @@ function ClipView({
         // a multi-selection before the menu could act on it.
         if (!isPrimaryButton(event)) return;
         const modifier = selectModifier(event);
-        onSelect(modifier);
+        /*
+         * A plain press on a clip that is already selected does not touch the
+         * selection yet. Selecting here would collapse a multi-selection to this
+         * one clip before the drag had read it — so Ctrl+A then drag moved only the
+         * clip under the pointer. The press is ambiguous until the pointer moves or
+         * lifts: a drag takes the whole selection with it, and only a *click* —
+         * down and up in place — narrows the selection to this clip, on release.
+         * Every modifier key still acts immediately, as does a press on a clip
+         * outside the selection, which is unambiguous.
+         */
+        if (modifier === 'replace' && selected) {
+          pendingCollapse.current = { x: event.clientX, y: event.clientY };
+        } else {
+          pendingCollapse.current = null;
+          onSelect(modifier);
+        }
         onDragStart(event, 'move', modifier);
+      }}
+      onPointerUp={(event) => {
+        const down = pendingCollapse.current;
+        pendingCollapse.current = null;
+        if (!down) return;
+        if (Math.hypot(event.clientX - down.x, event.clientY - down.y) > CLICK_SLOP_PX) return;
+        onSelect('replace');
+      }}
+      onPointerCancel={() => {
+        pendingCollapse.current = null;
       }}
     >
       <div
@@ -4377,12 +4593,23 @@ function minorDivisions(step: number): number {
  * through native drag events, which do not move the pointer, so those are wired up
  * here instead.
  */
+/** A held-back member, drawn in the lane it is going to rather than the one it is on. */
+interface LaneGhost {
+  readonly id: ClipId;
+  readonly left: number;
+  readonly width: number;
+  readonly kind: string;
+  readonly appearance: React.CSSProperties;
+}
+
 interface InsertGhost {
   readonly id: ClipId;
   readonly left: number;
   readonly width: number;
   readonly kind: string;
   readonly height: number;
+  /** Distance from the lanes' edge to this ghost's row, for a plan with several new tracks. */
+  readonly offset: number;
   readonly appearance: React.CSSProperties;
 }
 

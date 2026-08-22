@@ -48,6 +48,7 @@ import {
   resolutionActive,
   type ExportPresetKey,
 } from './exportPresets';
+import { useModalShell } from './modalShell';
 import { Fader } from './Fader';
 import { IconDisclosure } from './Icons';
 import { defaultExportSettings, formatBytes, useStudio } from './store';
@@ -194,7 +195,7 @@ export function ExportDialog({ onClose }: { onClose: () => void }): React.JSX.El
    * bitrate slider — drops the highlight to Custom on its own, so the selected button
    * cannot go on claiming something the settings no longer say.
    */
-  const activePreset = presetFor(
+  const derivedPreset = presetFor(
     settings,
     quality,
     sequence.size,
@@ -202,13 +203,30 @@ export function ExportDialog({ onClose }: { onClose: () => void }): React.JSX.El
     presetContainer,
   );
 
+  /*
+   * Except when Custom was asked for outright.
+   *
+   * Pressing Custom changes no setting — it opens the panel and hands over — so the
+   * derivation went on reporting whichever preset the untouched settings still matched,
+   * and the button that had just been pressed stayed dark. A control that does not
+   * light when pressed reads as broken, and the person presses it again.
+   *
+   * "I will take it from here" is a real answer to "what is it for", and this is the
+   * state that remembers it until another preset is chosen.
+   */
+  const [choseCustom, setChoseCustom] = useState(false);
+  const activePreset: ExportPresetKey = choseCustom ? 'custom' : derivedPreset;
+
   const applyPreset = (key: ExportPresetKey): void => {
     if (key === 'custom') {
+      setChoseCustom(true);
       setShowSettings(true);
       return;
     }
     const preset = exportPreset(key);
     if (!preset) return;
+    // Naming a destination is the opposite of taking it over by hand.
+    setChoseCustom(false);
     setQuality(preset.quality);
     setSettings((s) => ({
       ...presetSettings(preset, sequence.size, sequence.frameRate, presetContainer),
@@ -265,9 +283,17 @@ export function ExportDialog({ onClose }: { onClose: () => void }): React.JSX.El
   const estimate = estimateExportBytes(settings, T.toSeconds(duration));
   const presetNote = exportPreset(activePreset)?.note;
 
+  /*
+   * Escape and the focus trap. Refused while an encode is running, exactly as the
+   * backdrop is: stopping halfway has to go through Cancel export, which ends the
+   * work rather than abandoning it behind a closed dialog.
+   */
+  const shell = useModalShell<HTMLDivElement>({ onClose: busy ? null : onClose });
+
   return (
     <div className="modal-backdrop" onClick={busy ? undefined : onClose}>
       <div
+        ref={shell}
         className="modal export-dialog"
         role="dialog"
         aria-modal="true"

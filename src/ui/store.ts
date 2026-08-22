@@ -373,32 +373,21 @@ export interface StudioState {
   goToSequenceMark: (edge: 'in' | 'out') => void;
 
   /**
-   * Move clips onto a track that does not exist yet — dropping into the gap above,
-   * below or between the lanes.
+   * Move clips onto tracks that do not exist yet — dropping into the gap above or
+   * below the lanes.
    *
-   * A move whose `toTrackId` is null lands on the new track. The whole thing is one
-   * batch, so undo cannot leave a stray empty track behind after putting the clip
-   * back where it came from.
+   * `newTracks` are made first, in order, and a move may name one of them by index
+   * instead of an existing track. The whole thing is one batch, so undo cannot leave
+   * a stray empty track behind after putting the clips back where they came from.
    */
-  moveClipsToNewTrack: (
-    kind: TrackKind,
-    index: number,
+  moveClipsToNewTracks: (
+    newTracks: readonly { readonly kind: TrackKind; readonly index: number }[],
     moves: readonly {
       readonly clipId: ClipId;
-      readonly toTrackId: TrackId | null;
+      readonly to: { readonly track: TrackId } | { readonly newTrack: number };
       readonly toStart: Time;
     }[],
     coalesceKey?: string,
-    /**
-     * A second track made in the same batch for the linked half of an A/V pair,
-     * so the picture and its sound land together instead of the sound being left
-     * behind on whichever lane it happened to be on.
-     */
-    partner?: {
-      readonly kind: TrackKind;
-      readonly index: number;
-      readonly clipIds: readonly ClipId[];
-    },
   ) => void;
   /**
    * Drop a generator — a title, a colour — onto a track at `start`.
@@ -484,7 +473,12 @@ export interface StudioState {
    */
   removeEmptyTracks: () => void;
   addTransitionNearPlayhead: (transitionType?: string, trackId?: TrackId) => boolean;
-  /** Whether a transition has a bare cut to land on, for anything offering the action. */
+  /**
+   * Whether a transition has a bare cut to land on, for anything offering the action.
+   *
+   * Independent of where the playhead is, despite the name: `nearestCut` is unbounded,
+   * so the playhead picks which cut is used and never whether one is available.
+   */
   canAddTransitionNearPlayhead: () => boolean;
   /**
    * Put a transition on these cuts, shortening the clips when they have no
@@ -1693,47 +1687,39 @@ export const useStudio = create<StudioState>((set, get) => ({
     set({ status: `Added "${asset.name}"${placementNotes(placement)}` });
   },
 
-  moveClipsToNewTrack: (kind, index, moves, coalesceKey, partner) => {
+  moveClipsToNewTracks: (newTracks, moves, coalesceKey) => {
     const sequenceId = get().sequenceId;
-    const trackId = ids.track();
-    const partnerTrackId = partner ? ids.track() : null;
-    const partnerClips = new Set(partner?.clipIds ?? []);
+    const trackIds = newTracks.map(() => ids.track());
 
-    // One batch: addTrack then the move. Two batches would let undo put the clip
-    // back while leaving the track it was dropped into sitting there empty.
+    // One batch: the tracks, then the move. Two batches would let undo put the clips
+    // back while leaving the tracks they were dropped into sitting there empty.
     //
     // Passing the drag's own coalesce key folds this into the same undo step as the
     // pointer moves that led here, so the whole gesture comes apart in one go.
     //
-    // The two indices do not disturb each other: a sequence keeps its video and
-    // audio track lists separately, so neither insert shifts the other's position.
+    // Each kind keeps its own list, so a video index and an audio index never
+    // disturb each other; within a kind the planner hands the tracks over in
+    // ascending order, so inserting them in that order lands each at the index it
+    // was planned for.
     get().runMany(
       [
-        { type: 'addTrack', sequenceId, kind, index, trackId },
-        ...(partner && partnerTrackId
-          ? [
-              {
-                type: 'addTrack' as const,
-                sequenceId,
-                kind: partner.kind,
-                index: partner.index,
-                trackId: partnerTrackId,
-              },
-            ]
-          : []),
+        ...newTracks.map((track, i) => ({
+          type: 'addTrack' as const,
+          sequenceId,
+          kind: track.kind,
+          index: track.index,
+          trackId: trackIds[i]!,
+        })),
         {
-          type: 'moveClips',
+          type: 'moveClips' as const,
           moves: moves.map((move) => ({
             clipId: move.clipId,
-            toTrackId:
-              partnerTrackId && partnerClips.has(move.clipId)
-                ? partnerTrackId
-                : (move.toTrackId ?? trackId),
+            toTrackId: 'track' in move.to ? move.to.track : trackIds[move.to.newTrack]!,
             toStart: move.toStart,
           })),
         },
       ],
-      partner ? 'Move to new tracks' : `Move to a new ${kind} track`,
+      newTracks.length === 1 ? `Move to a new ${newTracks[0]!.kind} track` : 'Move to new tracks',
       coalesceKey,
     );
   },

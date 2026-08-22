@@ -118,18 +118,3 @@ export function placeTooltip(
 
   return { left, top, side };
 }
-
-/**
- * Whether a pointer at this position is still over the control the tooltip belongs to.
- *
- * The layer hit-tests on pointer movement rather than relying on `pointerover`,
- * because a disabled button fires no pointer events at all — and a disabled button is
- * exactly where the explanation matters most, since "why can I not press this" is a
- * sharper question than "what does this do". This is the short-circuit that keeps
- * that hit test off the hot path while the pointer rests.
- */
-export function withinRect(rect: TipRect, x: number, y: number): boolean {
-  return (
-    x >= rect.left && x <= rect.left + rect.width && y >= rect.top && y <= rect.top + rect.height
-  );
-}

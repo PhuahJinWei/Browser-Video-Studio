@@ -13,6 +13,8 @@ import type { ProjectSummary } from '../storage/projectStore';
 import { IconDownload, IconFile, IconFolder, IconText, IconTrash } from './Icons';
 import { useStudio } from './store';
 import { useDialog } from './Dialog';
+import { useModalShell } from './modalShell';
+import { hint } from './tooltip';
 
 /**
  * "3 minutes ago" up to a week, then the date.
@@ -87,6 +89,19 @@ export function OpenDialog({ onClose }: { onClose: () => void }): React.JSX.Elem
   useEffect(() => {
     if (renaming) renameRef.current?.select();
   }, [renaming]);
+
+  /*
+   * Escape and the focus trap.
+   *
+   * Escape closes the innermost thing that is open, not the outermost: while a row is
+   * being renamed it abandons the rename and leaves the list up, which is what the
+   * field's own handler used to do before this shell started seeing the key first.
+   * Refused entirely while a project is loading or being written.
+   */
+  const shell = useModalShell<HTMLDivElement>({
+    onClose: busy ? null : renaming ? () => setRenaming(null) : onClose,
+    initialFocus: listRef,
+  });
 
   const open = async (id: ProjectId): Promise<void> => {
     if (busy) return;
@@ -183,8 +198,15 @@ export function OpenDialog({ onClose }: { onClose: () => void }): React.JSX.Elem
 
   return (
     <div className="modal-backdrop" onClick={busy ? undefined : onClose}>
-      <div className="modal open-dialog" onClick={(event) => event.stopPropagation()}>
-        <h3>Open project</h3>
+      <div
+        ref={shell}
+        className="modal open-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="open-dialog-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <h3 id="open-dialog-title">Open project</h3>
         <p className="dialog-note">
           Projects are kept in this browser on this device, and go when its site data
           does. Save one to a file to keep a copy of your own or move it elsewhere.
@@ -240,7 +262,8 @@ export function OpenDialog({ onClose }: { onClose: () => void }): React.JSX.Elem
                 <span className="project-actions">
                   <button
                     className="icon"
-                    title="Rename"
+                    {...hint('Rename')}
+                    aria-label={`Rename “${project.name}”`}
                     disabled={busy}
                     onClick={(event) => {
                       event.stopPropagation();
@@ -251,7 +274,8 @@ export function OpenDialog({ onClose }: { onClose: () => void }): React.JSX.Elem
                   </button>
                   <button
                     className="icon"
-                    title="Save to a file, media included"
+                    {...hint('Save to a file, media included')}
+                    aria-label={`Save “${project.name}” to a file`}
                     disabled={busy}
                     onClick={(event) => {
                       event.stopPropagation();
@@ -262,7 +286,8 @@ export function OpenDialog({ onClose }: { onClose: () => void }): React.JSX.Elem
                   </button>
                   <button
                     className="icon tint-danger"
-                    title={isCurrent ? 'Delete this project and open the next one' : 'Delete'}
+                    {...hint(isCurrent ? 'Delete this project and open the next one' : 'Delete')}
+                    aria-label={`Delete “${project.name}”`}
                     disabled={busy}
                     onClick={(event) => {
                       event.stopPropagation();
@@ -273,7 +298,8 @@ export function OpenDialog({ onClose }: { onClose: () => void }): React.JSX.Elem
                   </button>
                   <button
                     disabled={busy || isCurrent}
-                    title={isCurrent ? 'This project is already open' : `Open "${project.name}"`}
+                    {...hint(isCurrent ? 'This project is already open' : `Open “${project.name}”`)}
+                    aria-label={isCurrent ? `“${project.name}” is already open` : `Open “${project.name}”`}
                     onClick={(event) => {
                       event.stopPropagation();
                       void open(project.id);

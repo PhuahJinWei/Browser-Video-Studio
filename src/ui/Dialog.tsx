@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { IconAlert } from './Icons';
+import { useModalShell } from './modalShell';
 
 interface BaseDialogOptions {
   readonly title: string;
@@ -58,16 +59,61 @@ export function DialogProvider({ children }: { children: React.ReactNode }): Rea
     });
   }, []);
 
-  useEffect(() => {
-    if (!active) return;
-    // Focus lands inside the dialog either way: the field when there is one to fill
-    // in, the confirming button otherwise. Without this it stays on whatever opened
-    // the dialog, behind the backdrop, where a keystroke reaches the wrong thing.
-    if (active.kind === 'prompt') inputRef.current?.select();
-    else confirmRef.current?.focus();
+  return (
+    <DialogContext.Provider value={api}>
+      {children}
+      {/*
+        Keyed on nothing but its own presence: the shell inside runs when this mounts,
+        which is what makes focus enter the dialog rather than the effect firing once
+        for a provider that is mounted for the life of the application.
+      */}
+      {active && (
+        <StudioDialog
+          active={active}
+          value={value}
+          setValue={setValue}
+          finish={finish}
+          inputRef={inputRef}
+          confirmRef={confirmRef}
+        />
+      )}
+    </DialogContext.Provider>
+  );
+}
 
+function StudioDialog({
+  active,
+  value,
+  setValue,
+  finish,
+  inputRef,
+  confirmRef,
+}: {
+  active: ActiveDialog;
+  value: string;
+  setValue: (value: string) => void;
+  finish: (result: boolean | string | null) => void;
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  confirmRef: React.RefObject<HTMLButtonElement | null>;
+}): React.JSX.Element {
+  /*
+   * Escape, the focus trap and focus on entry come from the shared shell — the same
+   * one the export and project dialogs use. This dialog is where that behaviour was
+   * first written, and keeping a second copy of it here is how the three drifted
+   * apart in the first place.
+   *
+   * Cancelling is what Escape means, so it answers as the Cancel button does: false
+   * for a confirm, null for a prompt, and for a notice there is nothing to answer.
+   */
+  const dismiss = (): void => finish(active.kind === 'confirm' ? false : null);
+  const ref = useModalShell<HTMLFormElement>({
+    onClose: active.kind === 'notice' ? () => finish(true) : dismiss,
+    initialFocus: active.kind === 'prompt' ? inputRef : confirmRef,
+  });
+
+  // Enter confirms, except in a prompt where the form's own submit already does.
+  useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') finish(active.kind === 'confirm' ? false : null);
       if (event.key === 'Enter' && active.kind !== 'prompt') finish(true);
     };
     window.addEventListener('keydown', onKey);
@@ -75,9 +121,6 @@ export function DialogProvider({ children }: { children: React.ReactNode }): Rea
   }, [active, finish]);
 
   return (
-    <DialogContext.Provider value={api}>
-      {children}
-      {active && (
         <div
           className="modal-backdrop studio-dialog-backdrop"
           role="presentation"
@@ -86,6 +129,7 @@ export function DialogProvider({ children }: { children: React.ReactNode }): Rea
           }}
         >
           <form
+            ref={ref}
             className="modal studio-dialog"
             data-tone={active.danger ? 'danger' : 'default'}
             role="dialog"
@@ -144,8 +188,6 @@ export function DialogProvider({ children }: { children: React.ReactNode }): Rea
             </div>
           </form>
         </div>
-      )}
-    </DialogContext.Provider>
   );
 }
 

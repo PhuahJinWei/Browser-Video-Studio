@@ -3,7 +3,17 @@
  * maintaining the track invariants (sorted, non-overlapping, kind-compatible).
  */
 
-import { createAudioClip, createEffect, createMarker, createSolidClip, createTitleClip, createTrack, createVideoClip } from '../factories';
+import {
+  createAudioClip,
+  createEffect,
+  createMarker,
+  createSolidClip,
+  createTitleClip,
+  createTrack,
+  createVideoClip,
+  DEFAULT_TRACK_HEIGHT,
+  heightForNewTrack,
+} from '../factories';
 import type { IdSource } from '../ids';
 import {
   clipEnd,
@@ -192,9 +202,20 @@ function handleAddTrack(d: Draft, cmd: Extract<Command, { type: 'addTrack' }>, i
 
   const list = cmd.kind === 'video' ? seq.videoTrackIds : seq.audioTrackIds;
   const name = cmd.name ?? `${cmd.kind === 'video' ? 'V' : 'A'}${list.length + 1}`;
-  d.tracks[id] = createTrack({ id, kind: cmd.kind, name });
-
   const index = cmd.index ?? list.length;
+  /*
+   * Height comes from the lanes it is joining, not from the factory default.
+   *
+   * Decided here rather than at the call sites: there are eight of them — two toolbars,
+   * two menus, and the partner lane a dropped file makes for its other stream — and a
+   * rule every caller has to remember is one most of them will not.
+   */
+  const height = heightForNewTrack(
+    list.map((trackId) => d.tracks[trackId]?.height ?? DEFAULT_TRACK_HEIGHT),
+    index,
+  );
+  d.tracks[id] = createTrack({ id, kind: cmd.kind, name, height });
+
   const next = [...list];
   next.splice(Math.max(0, Math.min(index, list.length)), 0, id);
 

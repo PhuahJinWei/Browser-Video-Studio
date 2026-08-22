@@ -80,6 +80,8 @@
 
   --lane-stripe: rgba(0, 0, 0, 0.05);
   --lane-locked: rgba(0, 0, 0, 0.04);
+  /* The diagonal rule across a track that is out of the result. */
+  --lane-off-hatch: rgba(0, 0, 0, 0.14);
 
   /* -- content: identical in both themes ---------------------------------- */
   --video: #3d6fd4;
@@ -170,6 +172,7 @@
 
   --lane-stripe: rgba(255, 255, 255, 0.02);
   --lane-locked: rgba(255, 255, 255, 0.02);
+  --lane-off-hatch: rgba(255, 255, 255, 0.09);
 }
 
 * {
@@ -799,6 +802,20 @@ button.action.tint-danger:hover:not(:disabled) svg {
 }
 .inspector-group-body {
   padding: 9px;
+}
+
+/*
+ * The read-only footer of the clip inspector.
+ *
+ * Set apart by a rule rather than a summary, because it is not a group: there is
+ * nothing inside it to open or to change. It sits under the controls for the same
+ * reason it is quiet — the timeline above already shows where a clip starts and how
+ * long it runs, and this is only the exact figures for when that is not enough.
+ */
+.inspector-readout {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
 }
 .inspector-group-body > :first-child {
   margin-top: 0;
@@ -1717,17 +1734,68 @@ body.resizing-track-sections {
   position: relative;
   flex: none;
   clip-path: inset(0 0 0 var(--timeline-scroll-x, 0px));
-  background: repeating-linear-gradient(
+  /* Named, so the states below can layer over the grid instead of replacing it —
+     `background-image` is one property, and a second gradient would drop this one. */
+  --lane-grid: repeating-linear-gradient(
     90deg,
     transparent,
     transparent 39px,
     var(--lane-stripe) 39px,
     var(--lane-stripe) 40px
   );
+  background: var(--lane-grid);
 }
 .track-lane.locked {
   background-color: var(--lane-locked);
 }
+/*
+ * A track taken out of the result — hidden video, muted audio, or audio silenced
+ * by another track's solo.
+ *
+ * Three signals rather than one, because opacity alone did not carry: a clip at
+ * 45% over a striped lane still looked like a clip, and the difference only showed
+ * if a live track happened to sit next to it for comparison. So the colour drains
+ * as well — a greyed filmstrip reads as "off" with nothing to compare against —
+ * and the lane itself is hatched, which says the *track* is off rather than
+ * leaving it to be inferred from the state of whatever clips happen to be on it.
+ * An empty stretch of a muted track now says so too.
+ */
+/*
+ * The hatch goes *over* the row, not behind it.
+ *
+ * As a lane background it was hidden by the very thing it described: a track full of
+ * clips is a track with no visible background, so the only hatched part was the
+ * empty stretch after the last clip. Drawn as an overlay it crosses the filmstrips
+ * as well, which is the point — one continuous diagonal across the whole track,
+ * clips and gaps alike, the way an editor expects a switched-off track to look.
+ *
+ * The lane's `clip-path` trims it at the header column, and it takes no z-index, so
+ * it paints above the clips and below anything that has asked to be on top —
+ * a drop ghost mid-drag still reads clearly through it.
+ */
+.track-lane.off::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent 0 5px,
+    var(--lane-off-hatch) 5px 6px
+  );
+}
+/* Fully grey, not nearly: a filmstrip keeps its shape and loses its colour, which is
+   what separates "not in the picture" from "dimly lit shot". */
+.track-lane.off .clip {
+  opacity: 0.3;
+  filter: grayscale(1);
+}
+/* Still ranked below a clip that is itself switched off, so the two states do not
+   collapse into each other on a hidden track. */
+.track-lane.off .clip.disabled {
+  opacity: 0.15;
+}
+
 .track-lane.drop-active {
   /* Outline only. Flooding the lane read as "it will drop across the whole
      track"; the ghost below is what shows where it actually lands. */
@@ -4009,6 +4077,19 @@ body.resizing-y {
   pointer-events: none;
   opacity: 0.9;
   background-color: var(--clip-bed);
+}
+/*
+ * The same ghost, standing in a real lane.
+ *
+ * Inset like a clip rather than filling the row, and above the lane's own painting
+ * so it is not lost in the filmstrip of whatever is already there. It is the same
+ * mark as the one in the tail on purpose: one gesture, one way of saying where a
+ * clip is going, whether or not the track it is going to exists yet.
+ */
+.insert-ghost.in-lane {
+  top: 3px;
+  bottom: 3px;
+  z-index: 3;
 }
 .insert-ghost.video {
   background: linear-gradient(var(--video), var(--video-2));

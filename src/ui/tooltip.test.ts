@@ -3,14 +3,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import {
-  placeTooltip,
-  TOOLTIP_GAP,
-  TOOLTIP_MARGIN,
-  withinRect,
-  type TipRect,
-  type TipSize,
-} from './tooltip';
+import { placeTooltip, TOOLTIP_GAP, TOOLTIP_MARGIN, type TipRect, type TipSize } from './tooltip';
 
 const viewport: TipSize = { width: 1440, height: 900 };
 const tip: TipSize = { width: 160, height: 26 };
@@ -85,18 +78,5 @@ describe('where it sits across', () => {
       expect(at.left).toBeGreaterThanOrEqual(0);
       expect(at.top).toBeGreaterThanOrEqual(0);
     }
-  });
-});
-
-describe('staying with the control', () => {
-  it('counts the edges as still inside', () => {
-    expect(withinRect(middle, 700, 400)).toBe(true);
-    expect(withinRect(middle, 724, 424)).toBe(true);
-  });
-
-  it('knows when the pointer has left', () => {
-    expect(withinRect(middle, 699, 400)).toBe(false);
-    expect(withinRect(middle, 725, 400)).toBe(false);
-    expect(withinRect(middle, 700, 425)).toBe(false);
   });
 });
