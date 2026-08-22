@@ -10,6 +10,8 @@
 import {
   AudioLines,
   Camera,
+  Check,
+  ChevronRight,
   Copy,
   Download,
   Ellipsis,
@@ -158,6 +160,8 @@ export const IconMoon = lucide(Moon);
 export const IconSearch = lucide(Search);
 export const IconAlert = lucide(TriangleAlert);
 export const IconMore = lucide(Ellipsis);
+export const IconDisclosure = lucide(ChevronRight);
+export const IconCheck = lucide(Check);
 
 // Timeline/editor concepts — deliberately custom.
 

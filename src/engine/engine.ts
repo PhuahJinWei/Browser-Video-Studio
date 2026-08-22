@@ -9,13 +9,28 @@
 
 import { renderListAt } from '../model/selectors';
 import * as T from '../model/time';
-import type { AssetId, AssetKind, Project, SequenceId, Size, Time } from '../model/types';
+import type { AssetId, AssetKind, ClipId, Project, SequenceId, Size, Time } from '../model/types';
 import { AudioPlayer } from './audio';
 import { Compositor, type DrawLayer } from './compositor';
 import { foldEffects, NEUTRAL_EFFECTS } from './effects';
 import { MediaLibrary } from './media';
 import { renderSolid } from './solids';
+import type { Rect } from './layerGeometry';
 import { renderTitle } from './titles';
+
+/** How big a clip's picture turned out to be, and which part of it is the subject. */
+export interface LayerBounds {
+  readonly imageSize: Size;
+  /**
+   * The part worth pointing at, in image pixels, when that is not the whole image.
+   *
+   * Set for titles, whose picture is the size of the frame with the words somewhere
+   * inside it. Absent means the image is its own subject.
+   */
+  readonly contentRect?: Rect;
+}
+
+export type LayerBoundsMap = ReadonlyMap<ClipId, LayerBounds>;
 
 export interface EngineTelemetry {
   /** Frames actually presented in the last second. */
@@ -37,6 +52,7 @@ const CLOCK_INTERVAL_MS = 25;
 
 export class Engine {
   private compositor: Compositor | null = null;
+  private layerBounds: LayerBoundsMap = new Map();
   private attachedCanvas: HTMLCanvasElement | null = null;
   private attaching: Promise<void> | null = null;
   private player: AudioPlayer | null = null;
@@ -174,14 +190,21 @@ export class Engine {
      * decoders can walk with it instead of seeking from a keyframe every time.
      */
     sequential = false,
-  ): Promise<{ layers: DrawLayer[]; owned: VideoFrame[] }> {
+  ): Promise<{ layers: DrawLayer[]; owned: VideoFrame[]; bounds: Map<ClipId, LayerBounds> }> {
     const project = this.getProject();
     const sequence = project.sequences[this.sequenceId];
-    if (!sequence) return { layers: [], owned: [] };
+    if (!sequence) return { layers: [], owned: [], bounds: new Map() };
 
     const renderLayers = renderListAt(project, this.sequenceId, at);
     const layers: DrawLayer[] = [];
     const owned: VideoFrame[] = [];
+    /*
+     * Recorded as the layers are built, because this is the only place that knows
+     * how big a clip's picture turned out to be — a decoded frame's real dimensions,
+     * a still's, a title's rasterised frame. Working it out a second time somewhere
+     * else is how a selection box comes to sit somewhere the picture is not.
+     */
+    const bounds = new Map<ClipId, LayerBounds>();
 
     for (const layer of renderLayers) {
       const relative = T.sub(at, layer.clip.start);
@@ -192,7 +215,8 @@ export class Engine {
       );
 
       if (layer.clip.kind === 'title') {
-        const { image, size } = renderTitle(layer.clip, sequence.size);
+        const { image, size, textRect } = renderTitle(layer.clip, sequence.size);
+        bounds.set(layer.clip.id, { imageSize: size, contentRect: textRect });
         layers.push({
           image,
           imageSize: size,
@@ -208,6 +232,7 @@ export class Engine {
 
       if (layer.clip.kind === 'solid') {
         const { image, size } = renderSolid(layer.clip.fill, sequence.size);
+        bounds.set(layer.clip.id, { imageSize: size });
         layers.push({
           image,
           imageSize: size,
@@ -225,6 +250,7 @@ export class Engine {
       if (layer.clip.kind === 'image') {
         const still = this.media.getStill(layer.clip.assetId);
         if (!still) continue;
+        bounds.set(layer.clip.id, { imageSize: { width: still.width, height: still.height } });
         layers.push({
           image: still,
           imageSize: { width: still.width, height: still.height },
@@ -249,6 +275,9 @@ export class Engine {
       sample.close();
       owned.push(frame);
 
+      bounds.set(layer.clip.id, {
+        imageSize: { width: frame.displayWidth, height: frame.displayHeight },
+      });
       layers.push({
         image: frame,
         imageSize: { width: frame.displayWidth, height: frame.displayHeight },
@@ -261,7 +290,7 @@ export class Engine {
       });
     }
 
-    return { layers, owned };
+    return { layers, owned, bounds };
   }
 
   /** Decode, composite and present the frame at `at`. */
@@ -270,7 +299,7 @@ export class Engine {
     if (!compositor) return;
 
     const started = performance.now();
-    const { layers, owned } = await this.collectLayers(at, this.telemetry.playing);
+    const { layers, owned, bounds } = await this.collectLayers(at, this.telemetry.playing);
     const decoded = performance.now();
 
     try {
@@ -284,6 +313,7 @@ export class Engine {
     this.telemetry.compositeMs = finished - decoded;
     this.telemetry.lastFrameMs = finished - started;
     this.telemetry.layerCount = layers.length;
+    this.layerBounds = bounds;
     this.lastRenderedAt = at;
 
     this.frameTimestamps.push(finished);
@@ -568,6 +598,30 @@ export class Engine {
     // Land on the exact position the transport stopped at.
     this.requestRender(this.playbackPosition);
     this.emitTelemetry();
+  }
+
+  /**
+   * How big each clip's picture was in the frame most recently rendered.
+   *
+   * Only the parts a caller cannot work out for itself: the transform is document
+   * state and is better read live, so a box drawn round a layer follows a drag
+   * immediately rather than a rendered frame behind it.
+   */
+  lastLayerBounds(): LayerBoundsMap {
+    return this.layerBounds;
+  }
+
+  /**
+   * Show or hide the transparency grid on the program monitor.
+   *
+   * Kept on the compositor rather than in the render path, because it changes only
+   * how the finished composite is presented — the frame itself, and everything the
+   * exporter reads, is identical either way. Re-presenting is therefore enough; a
+   * full re-render would decode frames again to no purpose.
+   */
+  setTransparencyGrid(on: boolean): void {
+    this.compositor?.setTransparencyGrid(on);
+    this.compositor?.present();
   }
 
   /** Change only what the local monitor hears, never the document or export mix. */

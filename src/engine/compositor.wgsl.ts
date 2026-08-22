@@ -212,10 +212,35 @@ fn fs(in : VertexOut) -> @location(0) vec4f {
 }
 `;
 
-/** Final blit of the composite texture onto the presentation surface. */
+/**
+ * Final blit of the composite texture onto the presentation surface.
+ *
+ * The composite target holds premultiplied alpha, and this is where that alpha is
+ * resolved. Two things depend on getting it right:
+ *
+ * The result is always opaque. An empty frame used to arrive at the canvas with
+ * alpha 0 and let the panel behind it show through, so "nothing here" was painted in
+ * whatever colour the surrounding UI happened to be — while the exporter, encoding
+ * to a format with no alpha channel, wrote black. The monitor was quietly lying
+ * about the file. Compositing onto black here makes the two agree exactly, and gives
+ * an empty frame a visible edge against the letterbox.
+ *
+ * The grid is the deliberate exception, and it is only ever on screen: the exporter
+ * reads the composite texture directly rather than this pass, so there is no path by
+ * which a checkerboard can reach a file.
+ */
 export const BLIT_SHADER = /* wgsl */ `
+struct BlitUniforms {
+  /** 0 = flatten onto black, 1 = show the transparency grid. */
+  grid   : f32,
+  /** Checker square, in composite pixels. */
+  square : f32,
+  pad    : vec2f,
+};
+
 @group(0) @binding(0) var samp : sampler;
 @group(0) @binding(1) var src  : texture_2d<f32>;
+@group(0) @binding(2) var<uniform> u : BlitUniforms;
 
 struct VertexOut {
   @builtin(position) position : vec4f,
@@ -232,8 +257,19 @@ fn vs(@builtin(vertex_index) index : u32) -> VertexOut {
   return out;
 }
 
+/** The familiar two-tone check, in the canvas's own pixels. */
+fn checker(pixel : vec2f) -> vec3f {
+  let cell = floor(pixel / max(u.square, 1.0));
+  let odd  = (cell.x + cell.y) - 2.0 * floor((cell.x + cell.y) * 0.5);
+  return select(vec3f(0.72), vec3f(0.55), odd > 0.5);
+}
+
 @fragment
 fn fs(in : VertexOut) -> @location(0) vec4f {
-  return textureSample(src, samp, in.uv);
+  // Premultiplied, as the composite target holds it.
+  let c = textureSample(src, samp, in.uv);
+  let backdrop = select(vec3f(0.0), checker(in.position.xy), u.grid > 0.5);
+  // Source-over onto an opaque backdrop, so the result is opaque too.
+  return vec4f(c.rgb + backdrop * (1.0 - c.a), 1.0);
 }
 `;

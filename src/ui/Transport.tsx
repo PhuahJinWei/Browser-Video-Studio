@@ -29,6 +29,7 @@ import { playback, usePlayback } from './playback';
 import { usePlaybackPaint } from './PlayheadMarker';
 import { Scrubber } from './Scrubber';
 import { useStudio } from './store';
+import { hint, tip } from './tooltip';
 
 /**
  * What the source monitor still has to hand over.
@@ -215,7 +216,7 @@ export function Transport({ source = null }: { source?: SourceTransport | null }
         step={T.isPositive(total) ? T.ratio(frame, total) : 0.01}
         ariaLabel="Preview position"
         ariaValueText={`of ${T.toTimecode(total, frameRate)}`}
-        title="Click to seek"
+        {...hint('Click to seek')}
         {...(sourceRange ? { range: sourceRange } : {})}
       />
 
@@ -226,36 +227,36 @@ export function Transport({ source = null }: { source?: SourceTransport | null }
         </span>
 
         <div className="transport-playback" role="group" aria-label="Playback controls">
-          <button className="icon" title="Go to start (Home)" onClick={() => seek(T.TIME_ZERO)}>
+          <button className="icon" {...tip('Go to start (Home)')} onClick={() => seek(T.TIME_ZERO)}>
             <IconSkipStart />
           </button>
           {!source && (
-            <button className="icon" title="Previous edit point" onClick={goPrevEdit}>
+            <button className="icon" {...tip('Previous edit point')} onClick={goPrevEdit}>
               <IconPrevEdit />
             </button>
           )}
-          <button className="icon" title="Previous frame (←)" onClick={() => step(-1)}>
+          <button className="icon" {...tip('Previous frame (←)')} onClick={() => step(-1)}>
             <IconStepBack />
           </button>
 
           <button
             className="icon"
             disabled={source ? !source.playable : false}
-            title={transportPlaying ? 'Pause (Space)' : 'Play (Space)'}
+            {...tip(transportPlaying ? 'Pause (Space)' : 'Play (Space)')}
             onClick={() => (source ? source.togglePlay() : void toggleProgramPlay())}
           >
             {transportPlaying ? <IconPause size={16} /> : <IconPlay size={16} />}
           </button>
 
-          <button className="icon" title="Next frame (→)" onClick={() => step(1)}>
+          <button className="icon" {...tip('Next frame (→)')} onClick={() => step(1)}>
             <IconStepForward />
           </button>
           {!source && (
-            <button className="icon" title="Next edit point" onClick={goNextEdit}>
+            <button className="icon" {...tip('Next edit point')} onClick={goNextEdit}>
               <IconNextEdit />
             </button>
           )}
-          <button className="icon" title="Go to end (End)" onClick={() => seek(total)}>
+          <button className="icon" {...tip('Go to end (End)')} onClick={() => seek(total)}>
             <IconSkipEnd />
           </button>
         </div>
@@ -263,11 +264,11 @@ export function Transport({ source = null }: { source?: SourceTransport | null }
         <div className="transport-utilities" role="group" aria-label="Preview utilities">
           <span
             className="preview-volume"
-            title={`Preview volume ${monitorMuted ? 'muted' : `${Math.round(monitorVolume * 100)}%`}`}
+            {...hint(`Preview volume ${monitorMuted ? 'muted' : `${Math.round(monitorVolume * 100)}%`}`)}
           >
             <button
               className={`icon${monitorMuted ? ' on' : ''}`}
-              title={monitorMuted ? 'Unmute preview' : 'Mute preview'}
+              {...tip(monitorMuted ? 'Unmute preview' : 'Mute preview')}
               onClick={() => setMonitorMuted(!monitorMuted)}
             >
               {monitorMuted ? <IconMuted /> : <IconVolume />}
@@ -294,14 +295,14 @@ export function Transport({ source = null }: { source?: SourceTransport | null }
           <button
             className="icon"
             disabled={source ? !source.hasPicture : false}
-            title="Capture this frame to the Library (Shift+S)"
+            {...tip('Capture this frame to the Library (Shift+S)')}
             onClick={() => void captureFrame()}
           >
             <IconCamera />
           </button>
           <button
             className="icon"
-            title={expanded ? 'Exit fullscreen (Esc)' : 'Fullscreen preview'}
+            {...tip(expanded ? 'Exit fullscreen (Esc)' : 'Fullscreen preview')}
             onClick={toggleFullscreen}
           >
             {expanded ? <IconExitFullscreen /> : <IconFullscreen />}

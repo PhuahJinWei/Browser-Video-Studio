@@ -36,6 +36,7 @@ import type {
   Param,
   Project,
   SequenceId,
+  Marker,
   Time,
   Track,
   TrackId,
@@ -45,7 +46,9 @@ import type {
 } from '../model/types';
 import { clipMenuTargets } from './clipMenuTargets';
 import { CLIP_LABELS, clipBackground } from './clipLabels';
+import { measuredFitHeight, setTrackHeightCommands } from './trackHeightActions';
 import { GENERATOR_DRAG_TYPE, generatorById } from './generators';
+import { PRESET_DRAG_TYPE, presetDuration, presetFromClip, usePresets } from './presets';
 import { timelineContentWidth } from './timelineWidth';
 import { LanePreview, type LaneClip } from './LanePreview';
 import { createFrameLoop, edgeScrollDelta, pageScrollTo, type FrameLoop } from './edgeScroll';
@@ -120,6 +123,7 @@ import {
   transitionLabel,
   transitionShortLabel,
 } from './transitions';
+import { hint, tip } from './tooltip';
 
 /**
  * Width of the sticky track-header column.
@@ -436,6 +440,10 @@ export function Timeline(): React.JSX.Element {
   const dropAssetOnNewTrack = useStudio((s) => s.dropAssetOnNewTrack);
   const dropGeneratorOnTrack = useStudio((s) => s.dropGeneratorOnTrack);
   const draggingGeneratorId = useStudio((s) => s.draggingGeneratorId);
+  const draggingPresetId = useStudio((s) => s.draggingPresetId);
+  const dropPresetOnTrack = useStudio((s) => s.dropPresetOnTrack);
+  const presets = usePresets((s) => s.presets);
+  const savePreset = usePresets((s) => s.save);
   const moveClipsToNewTrack = useStudio((s) => s.moveClipsToNewTrack);
   const draggingAssetId = useStudio((s) => s.draggingAssetId);
   const menu = useContextMenu();
@@ -457,6 +465,44 @@ export function Timeline(): React.JSX.Element {
   const playheadNow = (): Time => playback.get().position;
   const trackIds = useMemo(() => orderedTrackIds(project, sequenceId), [project, sequenceId]);
   const emptyTrackCount = emptyTracksToRemove(project, sequenceId).length;
+
+  /*
+   * The height commands the toolbar's slider offers, reachable from the seams that
+   * set heights by hand. Same functions, so the two cannot drift.
+   */
+  const fitTracksVertically = useCallback((): void => {
+    const fitted = measuredFitHeight(project, sequenceId);
+    if (fitted === null) return;
+    const commands = setTrackHeightCommands(project, sequenceId, fitted);
+    if (commands.length > 0) runMany(commands, 'Fit tracks vertically', 'height:all');
+    endGesture();
+  }, [project, sequenceId, runMany, endGesture]);
+
+  const resetTrackHeights = useCallback(
+    (kind: TrackKind): void => {
+      const commands = setTrackHeightCommands(project, sequenceId, DEFAULT_TRACK_HEIGHT, kind);
+      if (commands.length > 0) {
+        runMany(commands, `Reset ${kind} track heights`, 'height:all');
+      }
+      endGesture();
+    },
+    [project, sequenceId, runMany, endGesture],
+  );
+
+  /*
+   * The sequence's markers, in the order they were dropped.
+   *
+   * They have been addable since the ruler menu got its entry, and until now they
+   * went nowhere anyone could see: the command wrote one into the document and
+   * nothing drew it, so the only evidence a marker existed was the file.
+   */
+  const markers = useMemo(
+    () =>
+      sequence.markerIds
+        .map((id) => project.markers[id])
+        .filter((marker): marker is Marker => marker !== undefined),
+    [sequence.markerIds, project.markers],
+  );
 
   /**
    * Usable width of the pane, tracked so the ruler can fill it.
@@ -1063,6 +1109,16 @@ export function Timeline(): React.JSX.Element {
     [project, assetDropStart],
   );
 
+  /** And for a saved preset, which lands the same way with its own stored length. */
+  const presetDropStart = useCallback(
+    (presetId: string, trackId: TrackId, clientX: number): Time | null => {
+      const preset = presets.find((entry) => entry.id === presetId);
+      if (!preset || getTrack(project, trackId).kind !== 'video') return null;
+      return assetDropStart(clientX, [trackId], presetDuration(preset));
+    },
+    [presets, project, assetDropStart],
+  );
+
   /**
    * Where a dropped asset would land, as a pixel rect, keyed by track.
    *
@@ -1078,19 +1134,29 @@ export function Timeline(): React.JSX.Element {
     const hovered = project.tracks[dropTrackId];
     if (!hovered) return null;
 
-    // A generator is the simpler half: one lane, a fixed length, no partner stream.
-    const generator = draggingGeneratorId ? generatorById(draggingGeneratorId) : null;
-    if (generator) {
+    /*
+     * A generator or a preset is the simpler half: one lane, a length of its own, no
+     * partner stream. They ghost identically, so they are resolved to the same pair
+     * of facts — what to call it, and how long it is — and share the rest.
+     */
+    const dragged = draggingGeneratorId
+      ? generatorById(draggingGeneratorId)
+      : draggingPresetId
+        ? presets.find((entry) => entry.id === draggingPresetId)
+        : null;
+    if (dragged) {
       if (hovered.kind !== 'video') return null;
+      const length = 'duration' in dragged ? dragged.duration : presetDuration(dragged);
+      const label = 'label' in dragged ? dragged.label : dragged.name;
       const start =
         dropClientX === null
           ? playheadNow()
-          : assetDropStart(dropClientX, [dropTrackId], generator.duration);
+          : assetDropStart(dropClientX, [dropTrackId], length);
       return {
         trackIds: [dropTrackId],
         left: T.toSeconds(start) * pxPerSecond,
-        width: Math.max(2, T.toSeconds(generator.duration) * pxPerSecond),
-        label: generator.label,
+        width: Math.max(2, T.toSeconds(length) * pxPerSecond),
+        label,
         newTrackNote: null as string | null,
       };
     }
@@ -1126,7 +1192,7 @@ export function Timeline(): React.JSX.Element {
         ? `+ new ${hovered.kind === 'video' ? 'audio' : 'video'} track`
         : null,
     };
-  }, [dropTrackId, dropClientX, draggingAssetId, draggingGeneratorId, project, sequenceId, pxPerSecond, assetDropStart, playheadNow]);
+  }, [dropTrackId, dropClientX, draggingAssetId, draggingGeneratorId, draggingPresetId, presets, project, sequenceId, pxPerSecond, assetDropStart, playheadNow]);
 
   /**
    * Where a new track would go for a clip of this kind, or null to drop normally.
@@ -1975,6 +2041,29 @@ export function Timeline(): React.JSX.Element {
             },
             'separator',
           ] as MenuEntry[])),
+      // Only for the clips that have a look of their own to keep. A media clip's
+      // appearance is its source, which is already in the library.
+      ...((clip.kind === 'title' || clip.kind === 'solid'
+        ? [
+            {
+              label: 'Save as preset…',
+              icon: <IconPlus />,
+              onSelect: () => void (async () => {
+                const name = await dialog.prompt({
+                  title: 'Save as preset',
+                  inputLabel: 'Preset name',
+                  initialValue: clip.kind === 'title' ? clip.text.slice(0, 40) || 'Title' : 'Colour',
+                  confirmLabel: 'Save',
+                });
+                const trimmed = name?.trim();
+                if (!trimmed) return;
+                savePreset(presetFromClip(clip, trimmed, crypto.randomUUID()));
+                setStatus(`Saved "${trimmed}" to the library.`);
+              })(),
+            },
+            'separator',
+          ]
+        : []) as MenuEntry[]),
       {
         kind: 'swatches' as const,
         label: 'Label',
@@ -2184,34 +2273,64 @@ export function Timeline(): React.JSX.Element {
     ]);
   };
 
-  const openRulerMenu = (event: React.MouseEvent): void => {
-    const at = timeAtClientX(event.clientX);
+  /**
+   * The ruler's menu, which is also the play head's.
+   *
+   * The flag is not a child of the ruler — it lives in the clipped guides strip
+   * alongside it — so the ruler's own handler never saw a right-click on it, and a
+   * nineteen-pixel hole in the middle of the ruler let the browser's native menu
+   * through at exactly the spot people aim for. Rather than a second menu with its
+   * own list of entries to keep in step, the flag opens this one and says where.
+   *
+   * Everything here is addressed to a time, so knowing whether that time is the play
+   * head's is all it takes to phrase the entries properly: `here` means nothing when
+   * the thing you right-clicked *is* the play head.
+   */
+  const openRulerMenu = (event: React.MouseEvent, onPlayheadFlag = false): void => {
+    const head = playheadNow();
+    const at = onPlayheadFlag ? head : timeAtClientX(event.clientX);
+    /*
+     * Same frame, so the two splits would make the same cut.
+     *
+     * Compared by frame rather than by distance because that is the difference that
+     * exists: a click one frame away really would cut somewhere else, however close
+     * it looks, and a rule measured in pixels would change its mind with the zoom.
+     */
+    const onPlayhead =
+      onPlayheadFlag || T.roundFrames(at, frameRate) === T.roundFrames(head, frameRate);
+    const where = onPlayhead ? '' : ' here';
+
     menu.open(event, [
       {
         label: 'Split all tracks at playhead',
         icon: <IconSplit />,
         hint: 'S',
-        onSelect: () => splitAt(playheadNow(), trackIds),
+        onSelect: () => splitAt(head, trackIds),
       },
+      // The same entry twice, worded differently, is worse than one entry.
+      ...(onPlayhead
+        ? []
+        : [
+            {
+              label: 'Split all tracks here',
+              icon: <IconSplit />,
+              onSelect: () => {
+                setPlayhead(at);
+                splitAt(at, trackIds);
+              },
+            },
+          ]),
+      'separator' as const,
       {
-        label: 'Split all tracks here',
-        icon: <IconSplit />,
-        onSelect: () => {
-          setPlayhead(at);
-          splitAt(at, trackIds);
-        },
-      },
-      'separator',
-      {
-        label: 'Add marker here',
+        label: onPlayhead ? 'Add marker at playhead' : 'Add marker here',
         icon: <IconMarker />,
         onSelect: () => run({ type: 'addMarker', sequenceId, at }, 'Add marker'),
       },
-      'separator',
+      'separator' as const,
       // Marked where the menu was opened, not at the play head: the point of asking
       // here is that this is the frame being pointed at.
-      { label: 'Mark In here', hint: 'I', onSelect: () => setSequenceMark('in', at) },
-      { label: 'Mark Out here', hint: 'O', onSelect: () => setSequenceMark('out', at) },
+      { label: `Mark In${where}`, hint: 'I', onSelect: () => setSequenceMark('in', at) },
+      { label: `Mark Out${where}`, hint: 'O', onSelect: () => setSequenceMark('out', at) },
       {
         label: 'Clear In and Out',
         hint: 'Ctrl+Shift+X',
@@ -2269,6 +2388,59 @@ export function Timeline(): React.JSX.Element {
   const onRulerPointerMove = (event: React.PointerEvent): void => {
     if (ownsPointerGesture(scrubPointer.current, event.pointerId)) scrubFromEvent(event);
   };
+  /*
+   * Dragging an In or Out handle.
+   *
+   * The same shape as the ruler scrub — capture, edge-scroll with the gesture, snap,
+   * report — because it is the same kind of gesture, and the pieces it needs were
+   * all built for that one. What differs is only the rule at the far end: this
+   * adjusts an existing range rather than asserting a new mark, so the opposite
+   * handle is clamped against rather than cleared. See `markRange`.
+   */
+  const markDrag = useRef<{ pointerId: number; edge: 'in' | 'out' } | null>(null);
+
+  const dragMarkTo = useCallback(
+    (clientX: number, clientY: number): void => {
+      const active = markDrag.current;
+      if (!active) return;
+      // Snapped to clip edges and the play head, never to the marks themselves —
+      // `snap` does not offer them, which is exactly right here: a handle that
+      // snapped to its own position could never be moved at all.
+      const snapped = snap(timeAtClientX(clientX), NO_CLIPS);
+      setSnapMark(snapped.hit);
+      setSequenceMark(active.edge, snapped.at, 'adjust');
+      showHint({ clientX, clientY }, T.toTimecode(snapped.at, frameRate), null, snapped.hit !== null);
+    },
+    [snap, timeAtClientX, setSequenceMark, showHint, frameRate],
+  );
+
+  const startMarkDrag = (event: React.PointerEvent, edge: 'in' | 'out'): void => {
+    if (!isPrimaryButton(event)) return;
+    // The handles sit over the ruler, which would otherwise start a scrub underneath.
+    event.stopPropagation();
+    event.preventDefault();
+    markDrag.current = { pointerId: event.pointerId, edge };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragMarkTo(event.clientX, event.clientY);
+  };
+
+  const moveMarkDrag = (event: React.PointerEvent): void => {
+    if (!ownsPointerGesture(markDrag.current?.pointerId ?? null, event.pointerId)) return;
+    edgeScrollAt(event.clientX, event.clientY, dragMarkTo);
+    dragMarkTo(event.clientX, event.clientY);
+  };
+
+  const finishMarkDrag = (event: React.PointerEvent): void => {
+    if (!ownsPointerGesture(markDrag.current?.pointerId ?? null, event.pointerId)) return;
+    stopEdgeScroll();
+    markDrag.current = null;
+    setSnapMark(null);
+    clearGestureHints();
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
   const finishRulerScrub = (event: React.PointerEvent): void => {
     if (!ownsPointerGesture(scrubPointer.current, event.pointerId)) return;
     stopEdgeScroll();
@@ -2415,6 +2587,17 @@ export function Timeline(): React.JSX.Element {
     at ? Math.round(T.toSeconds(at) * pxPerSecond) : null;
   const inX = markX(sequence.view.inPoint);
   const outX = markX(sequence.view.outPoint);
+  /*
+   * Where the sequence's material stops, in the same pixels.
+   *
+   * A marked range outlasts the clips it was drawn around — that is deliberate, it
+   * is a range of *time*, not a selection of content, and a range marked over empty
+   * timeline is a normal thing to have while deciding what goes in it. But a band
+   * hanging over nothing looks like state left behind by a bug, so the part with no
+   * material under it is washed out rather than shaded solid: still a range, still
+   * exactly where it was put, visibly empty.
+   */
+  const contentX = Math.round(T.toSeconds(duration()) * pxPerSecond);
 
   // Rounded, because the line is drawn from this and a fractional left edge makes a
   // 2px rule antialias across three columns and read as a soft grey smear.
@@ -2528,14 +2711,14 @@ export function Timeline(): React.JSX.Element {
           <div className="timeline-corner" style={{ width: HEADER_WIDTH }}>
             <button
               className="icon"
-              title="Add a video track"
+              {...tip('Add a video track')}
               onClick={() => run({ type: 'addTrack', sequenceId, kind: 'video' }, 'Add video track')}
             >
               <IconPlus /> <IconVideo size={11} />
             </button>
             <button
               className="icon"
-              title="Add an audio track"
+              {...tip('Add an audio track')}
               onClick={() => run({ type: 'addTrack', sequenceId, kind: 'audio' }, 'Add audio track')}
             >
               <IconPlus /> <IconAudio size={11} />
@@ -2560,7 +2743,19 @@ export function Timeline(): React.JSX.Element {
               are in the clipped strip below for exactly that reason.
             */}
             {inX !== null && outX !== null && outX > inX && (
-              <div className="mark-band" style={{ left: inX, width: outX - inX }} />
+              <div
+                className="mark-band"
+                style={
+                  {
+                    left: inX,
+                    width: outX - inX,
+                    // Clamped into the band's own width so the hard stop cannot land
+                    // outside it: a range wholly past the end is entirely washed out,
+                    // one wholly inside keeps the full shade.
+                    '--mark-content': `${Math.min(Math.max(contentX - inX, 0), outX - inX)}px`,
+                  } as React.CSSProperties
+                }
+              />
             )}
             {ticks.map((tick) => (
               <div
@@ -2586,8 +2781,54 @@ export function Timeline(): React.JSX.Element {
             */}
             <div className="ruler-guides" style={{ left: HEADER_WIDTH }}>
               {/* Before the play head, so the head is never hidden behind a mark. */}
-              {inX !== null && <div className="mark-flag in" style={{ left: inX }} />}
-              {outX !== null && <div className="mark-flag out" style={{ left: outX }} />}
+              {markers.map((marker) => (
+                <MarkerFlag
+                  key={marker.id}
+                  marker={marker}
+                  left={Math.round(T.toSeconds(marker.at) * pxPerSecond)}
+                  timecode={T.toTimecode(marker.at, frameRate)}
+                  onGoTo={() => setPlayhead(marker.at)}
+                  onRename={() => void (async () => {
+                    const name = await dialog.prompt({
+                      title: 'Rename marker',
+                      inputLabel: 'Marker name',
+                      initialValue: marker.name,
+                      confirmLabel: 'Rename',
+                    });
+                    if (name === null) return;
+                    run(
+                      { type: 'setMarkerProps', markerId: marker.id, props: { name: name.trim() } },
+                      'Rename marker',
+                    );
+                  })()}
+                  onSetColour={(color) =>
+                    run(
+                      { type: 'setMarkerProps', markerId: marker.id, props: { color } },
+                      'Set marker colour',
+                    )
+                  }
+                  onDelete={() =>
+                    run({ type: 'removeMarker', markerId: marker.id }, 'Remove marker')
+                  }
+                />
+              ))}
+              {(['in', 'out'] as const).map((edge) => {
+                const x = edge === 'in' ? inX : outX;
+                if (x === null) return null;
+                return (
+                  <div
+                    key={edge}
+                    className={`mark-flag ${edge}`}
+                    style={{ left: x }}
+                    title={`Drag to move the ${edge === 'in' ? 'In' : 'Out'} mark`}
+                    onPointerDown={(event) => startMarkDrag(event, edge)}
+                    onPointerMove={moveMarkDrag}
+                    onPointerUp={finishMarkDrag}
+                    onPointerCancel={finishMarkDrag}
+                    onLostPointerCapture={finishMarkDrag}
+                  />
+                );
+              })}
               <div
                 className="playhead-head"
                 ref={playheadHeadRef}
@@ -2606,6 +2847,7 @@ export function Timeline(): React.JSX.Element {
                 onPointerUp={finishRulerScrub}
                 onPointerCancel={finishRulerScrub}
                 onLostPointerCapture={finishRulerScrub}
+                onContextMenu={(event) => openRulerMenu(event, true)}
               />
             </div>
           </div>
@@ -2666,7 +2908,8 @@ export function Timeline(): React.JSX.Element {
                     const types = event.dataTransfer.types;
                     if (
                       !types.includes(ASSET_DRAG_TYPE) &&
-                      !types.includes(GENERATOR_DRAG_TYPE)
+                      !types.includes(GENERATOR_DRAG_TYPE) &&
+                      !types.includes(PRESET_DRAG_TYPE)
                     ) {
                       return;
                     }
@@ -2682,16 +2925,20 @@ export function Timeline(): React.JSX.Element {
                   onDrop={(event) => {
                     const assetId = event.dataTransfer.getData(ASSET_DRAG_TYPE);
                     const generatorId = event.dataTransfer.getData(GENERATOR_DRAG_TYPE);
+                    const presetId = event.dataTransfer.getData(PRESET_DRAG_TYPE);
                     // Read before the state is cleared: this is the position the
                     // ghost has been promising all the way in.
                     const at = assetId
                       ? dropStartFor(assetId as AssetId, trackId, event.clientX)
-                      : generatorDropStart(generatorId, trackId, event.clientX);
+                      : presetId
+                        ? presetDropStart(presetId, trackId, event.clientX)
+                        : generatorDropStart(generatorId, trackId, event.clientX);
                     setDropTrackId(null);
                     setDropClientX(null);
-                    if (!assetId && !generatorId) return;
+                    if (!assetId && !generatorId && !presetId) return;
                     event.preventDefault();
                     if (assetId) dropAssetOnTrack(assetId as never, trackId, at ?? undefined);
+                    else if (presetId) dropPresetOnTrack(presetId, trackId, at ?? undefined);
                     else dropGeneratorOnTrack(generatorId as never, trackId, at ?? undefined);
                   }}
                   onDragEnd={() => {
@@ -2944,6 +3191,8 @@ export function Timeline(): React.JSX.Element {
                 </div>
                 <TrackResizeHandle
                   track={track}
+                  onFitVertically={fitTracksVertically}
+                  onResetAllOfKind={() => resetTrackHeights(track.kind)}
                   tracksOfKind={trackIds
                     .map((id) => getTrack(project, id))
                     .filter((candidate) => candidate.kind === track.kind)}
@@ -2963,6 +3212,7 @@ export function Timeline(): React.JSX.Element {
                   <TrackSectionDivider
                     ratio={timelineVideoRatio}
                     onChange={setTimelineVideoRatio}
+                    onFitVertically={fitTracksVertically}
                   />
                 )}
               </div>
@@ -3022,11 +3272,14 @@ export function Timeline(): React.JSX.Element {
 function TrackSectionDivider({
   ratio,
   onChange,
+  onFitVertically,
 }: {
   ratio: number;
   onChange: (ratio: number) => void;
+  onFitVertically: () => void;
 }): React.JSX.Element {
   const [dragging, setDragging] = useState(false);
+  const menu = useContextMenu();
 
   useEffect(
     () => () => document.body.classList.remove('resizing-track-sections'),
@@ -3057,7 +3310,18 @@ function TrackSectionDivider({
       aria-valuemin={Math.round(TIMELINE_VIDEO_RATIO_MIN * 100)}
       aria-valuemax={Math.round(TIMELINE_VIDEO_RATIO_MAX * 100)}
       aria-valuenow={Math.round(ratio * 100)}
-      title="Resize video and audio panes — double-click to balance"
+      {...hint('Resize video and audio panes — double-click to balance')}
+      onContextMenu={(event) => {
+        // The two things the double-click and the toolbar already do, said out
+        // loud: a shortcut nobody is told about is a shortcut nobody uses.
+        menu.open(event, [
+          { label: 'Balance panes', onSelect: () => onChange(0.5) },
+          { label: 'Give video more room', onSelect: () => onChange(TIMELINE_VIDEO_RATIO_MAX) },
+          { label: 'Give audio more room', onSelect: () => onChange(TIMELINE_VIDEO_RATIO_MIN) },
+          'separator',
+          { label: 'Fit tracks vertically', onSelect: onFitVertically },
+        ]);
+      }}
       onPointerDown={(event) => {
         if (!isPrimaryButton(event)) return;
         event.preventDefault();
@@ -3101,6 +3365,63 @@ function TrackSectionDivider({
   );
 }
 
+/**
+ * One marker in the ruler.
+ *
+ * A pennant rather than a line: markers cluster, and a line among the ticks reads as
+ * another tick. Clicking one takes the play head to it, which is the thing a marker
+ * is for — the menu carries the rest.
+ */
+function MarkerFlag({
+  marker,
+  left,
+  timecode,
+  onGoTo,
+  onRename,
+  onSetColour,
+  onDelete,
+}: {
+  marker: Marker;
+  left: number;
+  timecode: string;
+  onGoTo: () => void;
+  onRename: () => void;
+  onSetColour: (color: string) => void;
+  onDelete: () => void;
+}): React.JSX.Element {
+  const menu = useContextMenu();
+  const named = marker.name.trim();
+
+  return (
+    <button
+      className="marker-flag"
+      style={{ left, background: marker.color }}
+      title={named ? `${named} — ${timecode}` : timecode}
+      aria-label={named ? `Marker ${named} at ${timecode}` : `Marker at ${timecode}`}
+      onClick={onGoTo}
+      onDoubleClick={onRename}
+      onContextMenu={(event) => {
+        menu.open(event, [
+          { label: 'Go to marker', icon: <IconNextEdit />, onSelect: onGoTo },
+          { label: 'Rename…', icon: <IconText />, onSelect: onRename },
+          {
+            kind: 'swatches' as const,
+            label: 'Colour',
+            // The same palette clip labels use, so one set of colours means one
+            // thing across the timeline.
+            options: CLIP_LABELS.map((entry) => ({ value: entry.color, name: entry.name })),
+            value: marker.color,
+            onPick: (color) => color !== null && onSetColour(color),
+          },
+          'separator',
+          { label: 'Delete marker', icon: <IconTrash />, danger: true, onSelect: onDelete },
+        ]);
+      }}
+    >
+      {named && <span className="marker-flag-name">{named}</span>}
+    </button>
+  );
+}
 /** Direct manipulation for the height property that was previously Inspector-only. */
 function TrackResizeHandle({
   track,
@@ -3109,6 +3430,8 @@ function TrackResizeHandle({
   onCommand,
   onCommandMany,
   onCommit,
+  onFitVertically,
+  onResetAllOfKind,
 }: {
   track: Track;
   tracksOfKind: readonly Track[];
@@ -3116,7 +3439,10 @@ function TrackResizeHandle({
   onCommand: (command: Command, label: string, coalesceKey?: string) => void;
   onCommandMany: (commands: readonly Command[], label: string, coalesceKey?: string) => void;
   onCommit: () => void;
+  onFitVertically: () => void;
+  onResetAllOfKind: () => void;
 }): React.JSX.Element {
+  const menu = useContextMenu();
   const drag = useRef<{
     pointerId: number;
     clientY: number;
@@ -3175,7 +3501,32 @@ function TrackResizeHandle({
       aria-valuemin={TRACK_HEIGHT_MIN}
       aria-valuemax={TRACK_HEIGHT_MAX}
       aria-valuenow={track.height}
-      title={`Resize ${track.name} — Shift-drag all ${track.kind} tracks · double-click to reset`}
+      {...hint(`Resize ${track.name} — Shift-drag all ${track.kind} tracks · double-click to reset`)}
+      onContextMenu={(event) => {
+        onSelect();
+        // The scopes the drag already has — this track, or every track of its kind
+        // under Shift — offered as commands, plus the fit the toolbar keeps.
+        menu.open(event, [
+          {
+            label: `Reset ${track.name} height`,
+            disabled: track.height === DEFAULT_TRACK_HEIGHT,
+            onSelect: () => {
+              onCommand(
+                { type: 'setTrackProps', trackId: track.id, props: { height: DEFAULT_TRACK_HEIGHT } },
+                'Reset track height',
+              );
+              onCommit();
+            },
+          },
+          {
+            label: `Reset all ${track.kind} track heights`,
+            disabled: tracksOfKind.every((candidate) => candidate.height === DEFAULT_TRACK_HEIGHT),
+            onSelect: onResetAllOfKind,
+          },
+          'separator',
+          { label: 'Fit tracks vertically', onSelect: onFitVertically },
+        ]);
+      }}
       onPointerDown={(event) => {
         if (!isPrimaryButton(event)) return;
         event.preventDefault();
@@ -3337,14 +3688,14 @@ function TrackHeader({
     <>
       <button
         className={`icon${track.muted ? ' on' : ''}`}
-        title={track.muted ? 'Unmute' : 'Mute'}
+        {...tip(track.muted ? 'Unmute' : 'Mute')}
         onClick={() => toggle({ muted: !track.muted }, 'Mute track')}
       >
         {track.muted ? <IconMuted /> : <IconVolume />}
       </button>
       <button
         className={`icon${track.solo ? ' on' : ''}`}
-        title={track.solo ? 'Unsolo' : 'Solo'}
+        {...tip(track.solo ? 'Unsolo' : 'Solo')}
         onClick={() => toggle({ solo: !track.solo }, 'Solo track')}
       >
         <IconSolo />
@@ -3354,7 +3705,7 @@ function TrackHeader({
   ) : (
     <button
       className={`icon${track.hidden ? ' on' : ''}`}
-      title={track.hidden ? 'Show track' : 'Hide track'}
+      {...tip(track.hidden ? 'Show track' : 'Hide track')}
       onClick={() => toggle({ hidden: !track.hidden }, 'Hide track')}
     >
       {track.hidden ? <IconEyeOff /> : <IconEye />}
@@ -3398,7 +3749,7 @@ function TrackHeader({
         ) : (
           <span
             className="label"
-            title={`${track.name} — double-click to rename`}
+            {...hint(`${track.name} — double-click to rename`)}
             onDoubleClick={startRename}
           >
             {track.name}
@@ -3407,14 +3758,14 @@ function TrackHeader({
         {!expanded && operationalControls}
         <button
           className={`icon${track.locked ? ' on' : ''}`}
-          title={track.locked ? 'Unlock track' : 'Lock track'}
+          {...tip(track.locked ? 'Unlock track' : 'Lock track')}
           onClick={() => toggle({ locked: !track.locked }, 'Lock track')}
         >
           {track.locked ? <IconLock /> : <IconUnlocked />}
         </button>
         <button
           className="icon track-menu-button"
-          title="Track actions"
+          {...tip('Track actions')}
           aria-label={`${track.name} actions`}
           onClick={(event) => {
             onSelect();
@@ -3751,7 +4102,7 @@ function TrackVolume({ track }: { track: Track }): React.JSX.Element {
       neutralSnapSteps={5}
       thumb={10}
       format={formatPercent}
-      title={`Track volume ${formatGain(db)} — double-click for 100%`}
+      {...hint(`Track volume ${formatGain(db)} — double-click for 100%`)}
       ariaLabel={`${track.name} volume`}
       onChange={(percent) =>
         run(

@@ -13,6 +13,7 @@
 
 import type { BlendMode, Crop, LayerWipe, Size, Transform2D } from '../model/types';
 import { BLIT_SHADER, BLUR_SHADER, COMPOSITE_SHADER } from './compositor.wgsl';
+import { layerPlacement } from './layerGeometry';
 import { NEUTRAL_EFFECTS, type LayerEffectState } from './effects';
 
 export class CompositorError extends Error {
@@ -64,6 +65,10 @@ const COMPOSITE_FORMAT: GPUTextureFormat = 'rgba8unorm';
 /** 16 floats + 2 u32-sized slots, padded to a 256-byte dynamic-offset boundary. */
 const LAYER_UNIFORM_SIZE = 256;
 const BLUR_UNIFORM_SIZE = 256;
+/** grid, square, and two words of padding to the 16-byte minimum. */
+const BLIT_UNIFORM_SIZE = 16;
+/** How many checks span the frame's width, whatever that width is. */
+const GRID_SQUARES_ACROSS = 24;
 
 interface PingPong {
   a: GPUTexture;
@@ -111,7 +116,13 @@ export class Compositor {
       entries: [
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
       ],
+    });
+    this.blitUniforms = device.createBuffer({
+      label: 'blit-uniforms',
+      size: BLIT_UNIFORM_SIZE,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
     this.compositePipeline = device.createRenderPipeline({
@@ -150,6 +161,16 @@ export class Compositor {
   private readonly compositeLayout: GPUBindGroupLayout;
   private readonly blurLayout: GPUBindGroupLayout;
   private readonly blitLayout: GPUBindGroupLayout;
+  private readonly blitUniforms: GPUBuffer;
+  /**
+   * Draw the transparency grid behind the picture instead of black.
+   *
+   * A diagnostic, and off unless asked for: the grid says "these pixels are absent",
+   * which is a claim about an image rather than about a film. Every format this can
+   * export to is opaque, so on the program monitor the honest default is the black
+   * that will actually be written.
+   */
+  private transparencyGrid = false;
   private readonly compositePipeline: GPURenderPipeline;
   private readonly blurPipeline: GPURenderPipeline;
   private readonly blitPipeline: GPURenderPipeline;
@@ -441,18 +462,14 @@ export class Compositor {
     const f = new Float32Array(data);
     const u = new Uint32Array(data);
 
-    const { transform } = layer;
-    const width = imageSize.width * transform.scaleX;
-    const height = imageSize.height * transform.scaleY;
-    const radians = (transform.rotation * Math.PI) / 180;
-    const cos = Math.cos(radians);
-    const sin = Math.sin(radians);
-
-    // Layer is anchored inside the sequence, offset from the centre by (x, y).
-    const centreX = this.size.width / 2 + transform.x;
-    const centreY = this.size.height / 2 + transform.y;
-    const anchorX = transform.anchorX * width;
-    const anchorY = transform.anchorY * height;
+    // Shared with `layerCorners`, which projects the other way: the interface draws
+    // a box round a layer from the same eight numbers the shader places it with, so
+    // the outline and the pixels cannot disagree.
+    const { width, height, centreX, centreY, anchorX, anchorY, cos, sin } = layerPlacement(
+      layer.transform,
+      this.size,
+      imageSize,
+    );
 
     // Inverse of: rotate(p - anchor) + centre. Scale back to image pixels at the end.
     const sx = width === 0 ? 0 : imageSize.width / width;
@@ -513,9 +530,28 @@ export class Compositor {
     this.device.queue.writeBuffer(this.blurUniforms!, slot * BLUR_UNIFORM_SIZE, data);
   }
 
+  /** Turn the on-screen transparency grid on or off. Never affects `readPixels`. */
+  setTransparencyGrid(on: boolean): void {
+    this.transparencyGrid = on;
+  }
+
   /** Show the last composite on the canvas. No-op when created without one. */
   present(): void {
     if (!this.context || this.destroyed) return;
+
+    /*
+     * Squares measured as a fraction of the frame rather than a fixed number of
+     * pixels. The canvas is the sequence's own size and the browser scales it to fit
+     * the panel, so a fixed 16px square would be a comfortable check at 320x180 and
+     * an invisible dither at 4K. A constant division keeps it the same size to the
+     * eye whatever the sequence is.
+     */
+    const square = Math.max(4, Math.round(this.size.width / GRID_SQUARES_ACROSS));
+    const uniforms = new Float32Array(4);
+    uniforms[0] = this.transparencyGrid ? 1 : 0;
+    uniforms[1] = square;
+    this.device.queue.writeBuffer(this.blitUniforms, 0, uniforms);
+
     const encoder = this.device.createCommandEncoder({ label: 'blit' });
     const pass = encoder.beginRenderPass({
       colorAttachments: [
@@ -535,6 +571,7 @@ export class Compositor {
         entries: [
           { binding: 0, resource: this.sampler },
           { binding: 1, resource: this.targets.a.createView() },
+          { binding: 2, resource: { buffer: this.blitUniforms } },
         ],
       }),
     );
@@ -593,6 +630,7 @@ export class Compositor {
     this.targets.b.destroy();
     this.layerUniforms?.destroy();
     this.blurUniforms?.destroy();
+    this.blitUniforms.destroy();
     for (const pooled of this.texturePool.values()) {
       for (const texture of pooled) texture.destroy();
     }

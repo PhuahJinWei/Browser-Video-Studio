@@ -145,6 +145,8 @@ export function MenuBar({
   const inspectorOpen = useLayout((s) => s.inspectorOpen);
   const toggleInspector = useLayout((s) => s.toggleInspector);
   const resetWorkspace = useLayout((s) => s.resetWorkspace);
+  const transparencyGrid = useLayout((s) => s.transparencyGrid);
+  const toggleTransparencyGrid = useLayout((s) => s.toggleTransparencyGrid);
   const importViaPicker = useStudio((s) => s.importViaPicker);
   const toggleTelemetry = useStudio((s) => s.toggleTelemetry);
   const setPlayhead = useStudio((s) => s.setPlayhead);
@@ -353,17 +355,20 @@ export function MenuBar({
           disabled: emptyTrackCount === 0,
           onSelect: removeEmptyTracks,
         },
-        'separator',
-        {
-          label: 'Add marker at playhead',
-          icon: <IconMarker />,
-          onSelect: () => run({ type: 'addMarker', sequenceId, at: playhead() }, 'Add marker'),
-        },
-        'separator',
-        // Alongside the markers, which are the other thing here that annotates the
-        // sequence rather than the tracks in it.
+      ],
+    },
+    /*
+     * Marks annotate the sequence; the menus around them act on its contents. The
+     * marker entry lived under Track only because it had nowhere better to be, and
+     * putting In and Out beside it made that mismatch four entries wider rather than
+     * fixing it — so the pair that belong together get their own menu.
+     */
+    {
+      title: 'Mark',
+      entries: [
         { label: 'Mark In', hint: 'I', onSelect: () => setSequenceMark('in') },
         { label: 'Mark Out', hint: 'O', onSelect: () => setSequenceMark('out') },
+        'separator',
         {
           label: 'Go to In',
           hint: 'Shift+I',
@@ -382,6 +387,12 @@ export function MenuBar({
           disabled: !sequence.view.inPoint && !sequence.view.outPoint,
           onSelect: clearSequenceMarks,
         },
+        'separator',
+        {
+          label: 'Add marker at playhead',
+          icon: <IconMarker />,
+          onSelect: () => run({ type: 'addMarker', sequenceId, at: playhead() }, 'Add marker'),
+        },
       ],
     },
     {
@@ -399,6 +410,13 @@ export function MenuBar({
           icon: <IconGauge />,
           checked: showTelemetry,
           onSelect: toggleTelemetry,
+        },
+        {
+          // Named for what it shows rather than what it hides, and worded so it is
+          // clear this is about the monitor and not about the file.
+          label: 'Transparency grid',
+          checked: transparencyGrid,
+          onSelect: toggleTransparencyGrid,
         },
         {
           label: 'Fullscreen preview',

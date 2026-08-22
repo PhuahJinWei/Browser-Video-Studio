@@ -1,15 +1,24 @@
 /**
  * Export.
  *
- * The settings are arranged as three questions — what file, how good the picture,
- * what about the sound — with the consequence of the answers kept at the top, where
- * it can be read before committing to a long encode.
+ * The dialog asks the one question a person can answer — where is this file going —
+ * and derives the seven it cannot from it. Container, codec, resolution, frame rate,
+ * quality, bitrate and audio rate all follow from a preset, and all of them are
+ * still there underneath, pre-filled, behind a disclosure. Someone who wants to nudge
+ * the bitrate is one click away; someone who does not should never learn that H.265
+ * exists.
  *
- * Quality, not bitrate, is the control the eye should land on. Bits per second is a
- * number whose meaning depends on frame size, frame rate and codec all at once, so
- * the same 8 Mbps is generous at 720p and thin at 4K; a quality level holds still
- * across all three and the bitrate follows from it. The slider is still there for
- * anyone who wants it, and taking hold of it is what switches the derivation off.
+ * Quality, not bitrate, is the control the eye should land on when they do open it.
+ * Bits per second is a number whose meaning depends on frame size, frame rate and
+ * codec all at once, so the same 8 Mbps is generous at 720p and thin at 4K; a quality
+ * level holds still across all three and the bitrate follows from it. The slider is
+ * still there for anyone who wants it, and taking hold of it is what switches the
+ * derivation off.
+ *
+ * The estimate and the progress bar sit in a head that does not scroll, and the
+ * buttons in a foot that does not either. A dialog this tall does not fit a laptop
+ * screen, and the two things a person needs while it is open — how big will this be,
+ * and how do I stop it — are exactly the two that must never be below the fold.
  */
 
 import { useEffect, useState } from 'react';
@@ -30,7 +39,17 @@ import {
 import { markedRange, sequenceDuration } from '../model/selectors';
 import * as T from '../model/time';
 import type { FrameRate } from '../model/types';
+import {
+  EXPORT_PRESETS,
+  exportPreset,
+  presetFor,
+  presetSettings,
+  PRESET_CONTAINER,
+  resolutionActive,
+  type ExportPresetKey,
+} from './exportPresets';
 import { Fader } from './Fader';
+import { IconDisclosure } from './Icons';
 import { defaultExportSettings, formatBytes, useStudio } from './store';
 
 const RESOLUTIONS = [
@@ -81,6 +100,8 @@ export function ExportDialog({ onClose }: { onClose: () => void }): React.JSX.El
   /** 'custom' once the slider has been moved: the derivation below then stands aside. */
   const [quality, setQuality] = useState<ExportQuality | 'custom'>('medium');
   const [support, setSupport] = useState<ExportSupport | null>(null);
+  /** Closed until asked for, or until Custom is chosen — which is the same request. */
+  const [showSettings, setShowSettings] = useState(false);
 
   const marked = markedRange(project, sequenceId);
   /*
@@ -158,6 +179,43 @@ export function ExportDialog({ onClose }: { onClose: () => void }): React.JSX.El
     settings.audioBitrate,
   ]);
 
+  /*
+   * The format the presets speak in.
+   *
+   * MP4 unless this browser cannot write one, in which case the presets are expressed
+   * in whatever it can — a machine without an MP4 encoder should still be offered
+   * "Share online", not three buttons that never light up.
+   */
+  const presetContainer: ContainerKey =
+    support && !support[PRESET_CONTAINER] && support.webm ? 'webm' : PRESET_CONTAINER;
+
+  /*
+   * Derived, not remembered. Anything moved underneath — a codec, a resolution, the
+   * bitrate slider — drops the highlight to Custom on its own, so the selected button
+   * cannot go on claiming something the settings no longer say.
+   */
+  const activePreset = presetFor(
+    settings,
+    quality,
+    sequence.size,
+    sequence.frameRate,
+    presetContainer,
+  );
+
+  const applyPreset = (key: ExportPresetKey): void => {
+    if (key === 'custom') {
+      setShowSettings(true);
+      return;
+    }
+    const preset = exportPreset(key);
+    if (!preset) return;
+    setQuality(preset.quality);
+    setSettings((s) => ({
+      ...presetSettings(preset, sequence.size, sequence.frameRate, presetContainer),
+      ...(s.range ? { range: s.range } : {}),
+    }));
+  };
+
   const applyHeight = (height: number | null): void => {
     if (height === null) {
       setSettings((s) => ({ ...s, size: sequence.size }));
@@ -205,6 +263,7 @@ export function ExportDialog({ onClose }: { onClose: () => void }): React.JSX.El
         : null;
 
   const estimate = estimateExportBytes(settings, T.toSeconds(duration));
+  const presetNote = exportPreset(activePreset)?.note;
 
   return (
     <div className="modal-backdrop" onClick={busy ? undefined : onClose}>
@@ -215,266 +274,340 @@ export function ExportDialog({ onClose }: { onClose: () => void }): React.JSX.El
         aria-labelledby="export-dialog-title"
         onClick={(event) => event.stopPropagation()}
       >
-        <h3 id="export-dialog-title">Export</h3>
-
         {/*
-          What the settings add up to, before anything has been committed to. The
-          estimate leads because it is the one consequence that cannot be worked out
-          in one's head from the controls below.
+          The head stays put. The estimate is the one consequence that cannot be
+          worked out in one's head from the controls, and the progress bar is the
+          only live thing on screen once an encode starts; both belong where
+          scrolling cannot take them away.
         */}
-        <div className="export-summary">
-          <div className="export-summary-main">
-            <strong>{empty ? '—' : `~${formatBytes(estimate)}`}</strong>
-            <span>
-              {container.label} · {codec?.label ?? settings.videoCodec} ·{' '}
-              {settings.size.width} × {settings.size.height} ·{' '}
-              {T.fpsToNumber(settings.frameRate).toFixed(2)} fps
-            </span>
+        <div className="export-head">
+          <h3 id="export-dialog-title">Export</h3>
+
+          <div className="export-summary">
+            <div className="export-summary-main">
+              <strong>{empty ? '—' : `~${formatBytes(estimate)}`}</strong>
+              <span>
+                {container.label}
+                {showSettings ? ` · ${codec?.label ?? settings.videoCodec}` : ''} ·{' '}
+                {settings.size.width} × {settings.size.height} ·{' '}
+                {T.fpsToNumber(settings.frameRate).toFixed(2)} fps
+              </span>
+            </div>
+            <p className="export-summary-sub">
+              {empty
+                ? 'The timeline is empty.'
+                : `${range ? 'In–Out ' : ''}${T.formatDuration(duration, { decimals: 1 })} · ${T.ceilFrames(
+                    duration,
+                    settings.frameRate,
+                  )} frames · ${formatBitrate(settings.bitrate)} video${
+                    settings.includeAudio
+                      ? ` · ${Math.round(settings.audioBitrate / 1000)} kbps ${container.audioLabel}`
+                      : ' · no audio'
+                  }`}
+            </p>
           </div>
-          <p className="export-summary-sub">
-            {empty
-              ? 'The timeline is empty.'
-              : `${range ? 'In–Out ' : ''}${T.formatDuration(duration, { decimals: 1 })} · ${T.ceilFrames(
-                  duration,
-                  settings.frameRate,
-                )} frames · ${formatBitrate(settings.bitrate)} video${
-                  settings.includeAudio
-                    ? ` · ${Math.round(settings.audioBitrate / 1000)} kbps ${container.audioLabel}`
-                    : ' · no audio'
-                }`}
-          </p>
+
+          {exportProgress && (
+            <div className="export-progress">
+              <div className="progress">
+                <div style={{ width: `${exportProgress.overall * 100}%` }} />
+              </div>
+              <p className="hint">
+                {exportProgress.stage} · {exportProgress.framesEncoded}/
+                {exportProgress.totalFrames} frames · {exportProgress.fps.toFixed(1)} fps
+              </p>
+            </div>
+          )}
         </div>
 
-        {/*
-          What to encode, before how to encode it. Kept out of the sections below
-          because those are all about the shape of the file; this one is about which
-          part of the film goes into it.
-        */}
-        <div className="field export-range">
-          <label>Range</label>
-          <div className="export-choices">
-            <button
-              type="button"
-              disabled={busy}
-              className={range ? '' : 'primary'}
-              onClick={() => setUseMarks(false)}
-            >
-              Whole sequence
-            </button>
-            <button
-              type="button"
-              disabled={busy || marked === null}
-              className={range ? 'primary' : ''}
-              title={
-                marked
-                  ? 'The span between the In and Out marks'
-                  : 'Set In and Out on the timeline first — the I and O keys'
-              }
-              onClick={() => setUseMarks(true)}
-            >
-              In to Out
-              {marked
-                ? ` (${T.formatDuration(T.sub(marked.end, marked.start), { decimals: 1 })})`
-                : ''}
-            </button>
-          </div>
-        </div>
-
-        <p className="section-label">Output</p>
-
-        <div className="export-row">
+        <div className="export-body">
+          {/*
+            The whole dialog in one question. Everything below the disclosure is an
+            answer to it that has already been filled in.
+          */}
           <div className="field">
-            <label htmlFor="export-format">Format</label>
-            <select
-              id="export-format"
-              value={settings.container}
-              disabled={busy}
-              onChange={(event) => setContainer(event.target.value as ContainerKey)}
-            >
-              {(Object.keys(CONTAINERS) as ContainerKey[]).map((key) => (
-                <option key={key} value={key} disabled={support?.[key] === false}>
-                  {CONTAINERS[key].label}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="field">
-            <label htmlFor="export-codec">Video codec</label>
-            <select
-              id="export-codec"
-              value={settings.videoCodec}
-              disabled={busy}
-              onChange={(event) =>
-                setSettings((s) => ({ ...s, videoCodec: event.target.value as typeof s.videoCodec }))
-              }
-            >
-              {container.video.map((choice) => {
-                const unavailable = support?.videoCodecs[choice.codec] === false;
-                return (
-                  <option key={choice.codec} value={choice.codec} disabled={unavailable}>
-                    {choice.label}
-                    {unavailable ? ' — unavailable' : ''}
-                  </option>
-                );
-              })}
-            </select>
-          </div>
-        </div>
-
-        {/* Normally explains the codec that is selected; becomes the problem when
-            there is one, so no second line competes for the same spot. */}
-        <p className={problem ? 'hint export-problem' : 'hint'}>
-          {support === null
-            ? 'Checking encoders for these settings…'
-            : (problem ?? `${codec?.note ?? ''} · ${container.audioLabel} audio`)}
-        </p>
-
-        <div className="field">
-          <label>Resolution</label>
-          <div className="export-choices">
-            {RESOLUTIONS.map((preset) => {
-              const active =
-                preset.height === null
-                  ? settings.size.height === sequence.size.height &&
-                    settings.size.width === sequence.size.width
-                  : settings.size.height === preset.height;
-              return (
+            <label id="export-preset-label">What is it for?</label>
+            <div className="export-choices" role="group" aria-labelledby="export-preset-label">
+              {EXPORT_PRESETS.map((preset) => (
                 <button
-                  key={preset.label}
+                  key={preset.key}
                   type="button"
                   disabled={busy}
-                  className={active ? 'primary' : ''}
-                  onClick={() => applyHeight(preset.height)}
+                  className={activePreset === preset.key ? 'on' : ''}
+                  aria-pressed={activePreset === preset.key}
+                  onClick={() => applyPreset(preset.key)}
                 >
                   {preset.label}
                 </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="field">
-          <label htmlFor="export-fps">Frame rate</label>
-          <select
-            id="export-fps"
-            value={frameRateKey}
-            disabled={busy}
-            onChange={(event) => {
-              const key = event.target.value;
-              const rate =
-                key === 'match'
-                  ? sequence.frameRate
-                  : (FRAME_RATES.find((option) => option.key === key)?.rate ?? sequence.frameRate);
-              setSettings((s) => ({ ...s, frameRate: rate }));
-            }}
-          >
-            <option value="match">
-              Match sequence ({T.fpsToNumber(sequence.frameRate).toFixed(2)} fps)
-            </option>
-            {FRAME_RATES.map((option) => (
-              <option key={option.key} value={option.key}>
-                {option.label} fps
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <p className="section-label">Video</p>
-
-        <div className="field">
-          <label>Quality</label>
-          <div className="export-choices">
-            {EXPORT_QUALITIES.map((level) => (
+              ))}
               <button
-                key={level.key}
                 type="button"
                 disabled={busy}
-                className={quality === level.key ? 'primary' : ''}
-                onClick={() => setQuality(level.key)}
-                title={`${formatBitrate(
-                  suggestBitrate(settings.size, settings.frameRate, settings.videoCodec, level.key),
-                )} for this size, rate and codec`}
+                className={activePreset === 'custom' ? 'on' : ''}
+                aria-pressed={activePreset === 'custom'}
+                title="Choose the format, size and quality yourself"
+                onClick={() => applyPreset('custom')}
               >
-                {level.label}
+                Custom
               </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="field">
-          <label htmlFor="export-bitrate">
-            Bitrate{quality === 'custom' ? ' (custom)' : ''}
-          </label>
-          <div className="value-row">
-            {/*
-              Marked at the rate suggested for this size, rate and codec — the one
-              value here that is a genuine recommendation rather than a preference.
-            */}
-            <Fader
-              id="export-bitrate"
-              min={bitrateMin}
-              max={bitrateMax}
-              step={100_000}
-              value={Math.min(bitrateMax, Math.max(bitrateMin, settings.bitrate))}
-              disabled={busy}
-              neutral={neutralBitrate}
-              neutralSnapSteps={1}
-              ariaLabel="Export bitrate"
-              title={`Suggested here: ${formatBitrate(neutralBitrate)}`}
-              format={formatBitrate}
-              onChange={(bitrate) => {
-                setQuality('custom');
-                setSettings((s) => ({ ...s, bitrate }));
-              }}
-              // Back to the level's own suggestion, not to some other level's.
-              onReset={() => setQuality(quality === 'custom' ? 'medium' : quality)}
-            />
-            <output>{formatBitrate(settings.bitrate)}</output>
-          </div>
-        </div>
-
-        <p className="section-label">Audio</p>
-
-        <div className="export-audio-row">
-          <label className="export-check">
-            <input
-              type="checkbox"
-              checked={settings.includeAudio}
-              disabled={busy}
-              onChange={(event) =>
-                setSettings((s) => ({ ...s, includeAudio: event.target.checked }))
-              }
-            />
-            Include audio
-          </label>
-          <select
-            aria-label="Audio bitrate"
-            value={settings.audioBitrate}
-            disabled={busy || !settings.includeAudio}
-            onChange={(event) =>
-              setSettings((s) => ({ ...s, audioBitrate: Number(event.target.value) }))
-            }
-          >
-            {AUDIO_BITRATES.map((rate) => (
-              <option key={rate} value={rate}>
-                {container.audioLabel} · {Math.round(rate / 1000)} kbps
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {exportProgress && (
-          <>
-            <div className="progress">
-              <div style={{ width: `${exportProgress.overall * 100}%` }} />
             </div>
-            <p className="hint">
-              {exportProgress.stage} · {exportProgress.framesEncoded}/{exportProgress.totalFrames}{' '}
-              frames · {exportProgress.fps.toFixed(1)} fps
-            </p>
-          </>
-        )}
+          </div>
+
+          {/* What the preset means, or what is wrong — never both competing. */}
+          <p className={problem ? 'hint export-problem' : 'hint export-note'}>
+            {problem ??
+              presetNote ??
+              `${container.label} · ${codec?.note ?? ''} · ${container.audioLabel} audio`}
+          </p>
+
+          {/*
+            What to encode, rather than how. Kept out of the disclosure because it is
+            a question about the film, not about the file, and it is one a beginner
+            both understands and may well want.
+          */}
+          <div className="field">
+            <label id="export-range-label">Range</label>
+            <div className="export-choices" role="group" aria-labelledby="export-range-label">
+              <button
+                type="button"
+                disabled={busy}
+                className={range ? '' : 'on'}
+                aria-pressed={!range}
+                onClick={() => setUseMarks(false)}
+              >
+                Whole sequence
+              </button>
+              <button
+                type="button"
+                disabled={busy || marked === null}
+                className={range ? 'on' : ''}
+                aria-pressed={range !== null}
+                title={
+                  marked
+                    ? 'The span between the In and Out marks'
+                    : 'Set In and Out on the timeline first — the I and O keys'
+                }
+                onClick={() => setUseMarks(true)}
+              >
+                In to Out
+                {marked
+                  ? ` (${T.formatDuration(T.sub(marked.end, marked.start), { decimals: 1 })})`
+                  : ''}
+              </button>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            className="export-disclosure"
+            aria-expanded={showSettings}
+            aria-controls="export-settings"
+            onClick={() => setShowSettings((open) => !open)}
+          >
+            <span className={showSettings ? 'export-caret open' : 'export-caret'} aria-hidden="true">
+              <IconDisclosure size={13} />
+            </span>
+            {showSettings ? 'Hide settings' : 'Settings'}
+          </button>
+
+          {showSettings && (
+            <div id="export-settings" className="export-settings">
+              <p className="section-label">Output</p>
+
+              <div className="export-row">
+                <div className="field">
+                  <label htmlFor="export-format">Format</label>
+                  <select
+                    id="export-format"
+                    value={settings.container}
+                    disabled={busy}
+                    onChange={(event) => setContainer(event.target.value as ContainerKey)}
+                  >
+                    {(Object.keys(CONTAINERS) as ContainerKey[]).map((key) => (
+                      <option key={key} value={key} disabled={support?.[key] === false}>
+                        {CONTAINERS[key].label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="field">
+                  <label htmlFor="export-codec">Video codec</label>
+                  <select
+                    id="export-codec"
+                    value={settings.videoCodec}
+                    disabled={busy}
+                    onChange={(event) =>
+                      setSettings((s) => ({
+                        ...s,
+                        videoCodec: event.target.value as typeof s.videoCodec,
+                      }))
+                    }
+                  >
+                    {container.video.map((choice) => {
+                      const unavailable = support?.videoCodecs[choice.codec] === false;
+                      return (
+                        <option key={choice.codec} value={choice.codec} disabled={unavailable}>
+                          {choice.label}
+                          {unavailable ? ' — unavailable' : ''}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+              </div>
+
+              <p className="hint">
+                {support === null
+                  ? 'Checking encoders for these settings…'
+                  : `${codec?.note ?? ''} · ${container.audioLabel} audio`}
+              </p>
+
+              <div className="field">
+                <label id="export-resolution-label">Resolution</label>
+                <div
+                  className="export-choices"
+                  role="group"
+                  aria-labelledby="export-resolution-label"
+                >
+                  {RESOLUTIONS.map((preset) => {
+                    const active = resolutionActive(preset.height, settings.size, sequence.size);
+                    return (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        disabled={busy}
+                        className={active ? 'on' : ''}
+                        aria-pressed={active}
+                        onClick={() => applyHeight(preset.height)}
+                      >
+                        {preset.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="field">
+                <label htmlFor="export-fps">Frame rate</label>
+                <select
+                  id="export-fps"
+                  value={frameRateKey}
+                  disabled={busy}
+                  onChange={(event) => {
+                    const key = event.target.value;
+                    const rate =
+                      key === 'match'
+                        ? sequence.frameRate
+                        : (FRAME_RATES.find((option) => option.key === key)?.rate ??
+                          sequence.frameRate);
+                    setSettings((s) => ({ ...s, frameRate: rate }));
+                  }}
+                >
+                  <option value="match">
+                    Match sequence ({T.fpsToNumber(sequence.frameRate).toFixed(2)} fps)
+                  </option>
+                  {FRAME_RATES.map((option) => (
+                    <option key={option.key} value={option.key}>
+                      {option.label} fps
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <p className="section-label">Video</p>
+
+              <div className="field">
+                <label id="export-quality-label">Quality</label>
+                <div className="export-choices" role="group" aria-labelledby="export-quality-label">
+                  {EXPORT_QUALITIES.map((level) => (
+                    <button
+                      key={level.key}
+                      type="button"
+                      disabled={busy}
+                      className={quality === level.key ? 'on' : ''}
+                      aria-pressed={quality === level.key}
+                      onClick={() => setQuality(level.key)}
+                      title={`${formatBitrate(
+                        suggestBitrate(
+                          settings.size,
+                          settings.frameRate,
+                          settings.videoCodec,
+                          level.key,
+                        ),
+                      )} for this size, rate and codec`}
+                    >
+                      {level.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="field">
+                <label htmlFor="export-bitrate">
+                  Bitrate{quality === 'custom' ? ' (custom)' : ''}
+                </label>
+                <div className="value-row">
+                  {/*
+                    Marked at the rate suggested for this size, rate and codec — the
+                    one value here that is a genuine recommendation rather than a
+                    preference.
+                  */}
+                  <Fader
+                    id="export-bitrate"
+                    min={bitrateMin}
+                    max={bitrateMax}
+                    step={100_000}
+                    value={Math.min(bitrateMax, Math.max(bitrateMin, settings.bitrate))}
+                    disabled={busy}
+                    neutral={neutralBitrate}
+                    neutralSnapSteps={1}
+                    ariaLabel="Export bitrate"
+                    title={`Suggested here: ${formatBitrate(neutralBitrate)}`}
+                    format={formatBitrate}
+                    onChange={(bitrate) => {
+                      setQuality('custom');
+                      setSettings((s) => ({ ...s, bitrate }));
+                    }}
+                    // Back to the level's own suggestion, not to some other level's.
+                    onReset={() => setQuality(quality === 'custom' ? 'medium' : quality)}
+                  />
+                  <output>{formatBitrate(settings.bitrate)}</output>
+                </div>
+              </div>
+
+              <p className="section-label">Audio</p>
+
+              <div className="export-audio-row">
+                <label className="export-check">
+                  <input
+                    type="checkbox"
+                    checked={settings.includeAudio}
+                    disabled={busy}
+                    onChange={(event) =>
+                      setSettings((s) => ({ ...s, includeAudio: event.target.checked }))
+                    }
+                  />
+                  Include audio
+                </label>
+                <select
+                  aria-label="Audio bitrate"
+                  value={settings.audioBitrate}
+                  disabled={busy || !settings.includeAudio}
+                  onChange={(event) =>
+                    setSettings((s) => ({ ...s, audioBitrate: Number(event.target.value) }))
+                  }
+                >
+                  {AUDIO_BITRATES.map((rate) => (
+                    <option key={rate} value={rate}>
+                      {container.audioLabel} · {Math.round(rate / 1000)} kbps
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          )}
+        </div>
 
         <div className="actions">
           <button type="button" onClick={busy ? cancelExport : onClose}>

@@ -49,13 +49,15 @@ import { MenuBar } from './MenuBar';
 import { Preview } from './Preview';
 import { Timeline } from './Timeline';
 import { flushAutosave, useStudio } from './store';
+import { TooltipLayer } from './TooltipLayer';
+import { hint, tip } from './tooltip';
 import {
   clampTrackHeight,
   TRACK_HEIGHT_MAX,
   TRACK_HEIGHT_MIN,
   TRACK_HEIGHT_STEP,
-  trackHeightToFit,
 } from './trackHeight';
+import { measuredFitHeight, setTrackHeightCommands } from './trackHeightActions';
 import type { SaveState } from '../storage/projectStore';
 
 export function App(): React.JSX.Element {
@@ -71,6 +73,8 @@ export function App(): React.JSX.Element {
     <DialogProvider>
       <ContextMenuProvider>
         <Studio />
+        {/* One layer for every `data-tip` in the application, dialogs included. */}
+        <TooltipLayer />
       </ContextMenuProvider>
     </DialogProvider>
   );
@@ -401,7 +405,7 @@ function Studio(): React.JSX.Element {
           */}
           <span
             className="master-volume"
-            title={`Master volume ${formatGain(masterDb)} — double-click for 100%`}
+            {...hint(`Master volume ${formatGain(masterDb)} — double-click for 100%`)}
           >
             <IconVolume size={14} />
             <Fader
@@ -441,21 +445,21 @@ function Studio(): React.JSX.Element {
         <button
             className="icon"
             onClick={toggleTheme}
-            title={theme === 'dark' ? 'Switch to the light theme' : 'Switch to the dark theme'}
+            {...tip(theme === 'dark' ? 'Switch to the light theme' : 'Switch to the dark theme')}
           >
             {theme === 'dark' ? <IconSun /> : <IconMoon />}
           </button>
           <button
             className={`icon${inspectorOpen ? ' on' : ''}`}
             onClick={toggleInspector}
-            title="Toggle the inspector (Ctrl+4)"
+            {...tip('Toggle the inspector (Ctrl+4)')}
           >
             <IconInspector />
           </button>
           <button
             className={`icon${showTelemetry ? ' on' : ''}`}
             onClick={toggleTelemetry}
-            title="Toggle the pipeline panel"
+            {...tip('Toggle the pipeline panel')}
           >
             <IconGauge />
           </button>
@@ -475,14 +479,14 @@ function Studio(): React.JSX.Element {
             <button
               className="action"
               onClick={() => setShowOpen(true)}
-              title="Open a saved project (Ctrl+O)"
+              {...tip('Open a saved project (Ctrl+O)')}
             >
               <IconFolder size={18} />
               <span>Open</span>
             </button>
             <button
               className="action"
-              title="Import media into the library (Ctrl+I)"
+              {...tip('Import media into the library (Ctrl+I)')}
               onClick={() => void importViaPicker()}
             >
               <IconPlus size={18} />
@@ -491,7 +495,7 @@ function Studio(): React.JSX.Element {
             <button
               className="action"
               onClick={() => setShowExport(true)}
-              title="Export the sequence (Ctrl+E)"
+              {...tip('Export the sequence (Ctrl+E)')}
             >
               <IconExport size={18} />
               <span>Export</span>
@@ -501,11 +505,11 @@ function Studio(): React.JSX.Element {
           <span className="header-divider" />
 
           <span className="toolgroup">
-            <button className="action" disabled={!canUndoEdit()} onClick={undoEdit} title="Undo (Ctrl+Z)">
+            <button className="action" disabled={!canUndoEdit()} onClick={undoEdit} {...tip('Undo (Ctrl+Z)')}>
               <IconUndo size={18} />
               <span>Undo</span>
             </button>
-            <button className="action" disabled={!canRedoEdit()} onClick={redoEdit} title="Redo (Ctrl+Shift+Z)">
+            <button className="action" disabled={!canRedoEdit()} onClick={redoEdit} {...tip('Redo (Ctrl+Shift+Z)')}>
               <IconRedo size={18} />
               <span>Redo</span>
             </button>
@@ -514,14 +518,14 @@ function Studio(): React.JSX.Element {
           <span className="header-divider" />
 
           <span className="toolgroup">
-            <button className="action" title="Split at the playhead (S)" onClick={splitAtPlayhead}>
+            <button className="action" {...tip('Split at the playhead (S)')} onClick={splitAtPlayhead}>
               <IconSplit size={18} />
               <span>Split</span>
             </button>
             <button
               className="action tint-danger"
               disabled={selection.length === 0}
-              title="Delete the selection (Del)"
+              {...tip('Delete the selection (Del)')}
               onClick={() => run({ type: 'removeClips', clipIds: selection, mode: 'lift' }, 'Delete clips')}
             >
               <IconTrash size={18} />
@@ -546,7 +550,7 @@ function Studio(): React.JSX.Element {
                 key={generator.id}
                 className="action"
                 draggable
-                title={`Add a ${generator.label.toLowerCase()} at the playhead — or drag it onto a track`}
+                {...tip(`Add a ${generator.label.toLowerCase()} at the playhead — or drag it onto a track`)}
                 onClick={() => addGeneratorAtPlayhead(generator.id)}
                 onDragStart={(event) => {
                   event.dataTransfer.setData(GENERATOR_DRAG_TYPE, generator.id);
@@ -568,11 +572,9 @@ function Studio(): React.JSX.Element {
                * which from a button reads as the button being broken.
                */
               disabled={!canAddTransition()}
-              title={
-                canAddTransition()
+              {...tip(canAddTransition()
                   ? 'Add a transition on the cut nearest the playhead (Ctrl+D)'
-                  : 'No bare cut near the playhead to put a transition on'
-              }
+                  : 'No bare cut near the playhead to put a transition on')}
               onClick={() => addTransitionNearPlayhead()}
             >
               <IconTransition size={18} />
@@ -585,7 +587,7 @@ function Studio(): React.JSX.Element {
           <span className="toolgroup">
             <button
               className="action"
-              title="Capture the current frame to the Library (Shift+S)"
+              {...tip('Capture the current frame to the Library (Shift+S)')}
               onClick={() => void captureFrame()}
             >
               <IconCamera size={18} />
@@ -692,11 +694,9 @@ function SaveIndicator({ state }: { state: SaveState }): React.JSX.Element | nul
   return (
     <span
       className={`save-state ${state}`}
-      title={
-        state === 'error'
+      {...hint(state === 'error'
           ? 'The last autosave failed — your work is only in this tab.'
-          : 'Autosaved to this browser. Export to keep a copy elsewhere.'
-      }
+          : 'Autosaved to this browser. Export to keep a copy elsewhere.')}
     >
       {label}
     </span>
@@ -729,33 +729,21 @@ function TrackHeightSlider(): React.JSX.Element | null {
   const high = Math.max(...heights);
 
   const setAll = (next: number, label = 'Resize all tracks'): void => {
-    const clamped = clampTrackHeight(next);
-    const commands = tracks
-      .filter((track) => track.height !== clamped)
-      .map((track) => ({
-        type: 'setTrackProps' as const,
-        trackId: track.id,
-        props: { height: clamped },
-      }));
+    const commands = setTrackHeightCommands(project, sequenceId, next);
     if (commands.length > 0) runMany(commands, label, 'height:all');
   };
 
   const fitVertically = (): void => {
-    const videoPane = document.querySelector<HTMLElement>('.timeline-pane.video');
-    const audioPane = document.querySelector<HTMLElement>('.timeline-pane.audio');
-    const fitted = trackHeightToFit([
-      { height: videoPane?.clientHeight ?? 0, trackCount: sequence.videoTrackIds.length },
-      { height: audioPane?.clientHeight ?? 0, trackCount: sequence.audioTrackIds.length },
-    ]);
+    const fitted = measuredFitHeight(project, sequenceId);
     if (fitted !== null) setAll(fitted, 'Fit tracks vertically');
   };
 
   const readout = low === high ? `${high}px` : `${low}–${high}px`;
   return (
-    <span className="zoom-slider track-height-slider" title={`Track height — ${readout}`}>
+    <span className="zoom-slider track-height-slider" {...hint(`Track height — ${readout}`)}>
       <button
         className="icon"
-        title="Decrease all track heights"
+        {...tip('Decrease all track heights')}
         onClick={() => {
           setAll(height - TRACK_HEIGHT_STEP);
           endGesture();
@@ -782,7 +770,7 @@ function TrackHeightSlider(): React.JSX.Element | null {
       <output className="zoom-readout track-height-readout">{readout}</output>
       <button
         className="icon"
-        title="Increase all track heights"
+        {...tip('Increase all track heights')}
         onClick={() => {
           setAll(height + TRACK_HEIGHT_STEP);
           endGesture();
@@ -792,7 +780,7 @@ function TrackHeightSlider(): React.JSX.Element | null {
       </button>
       <button
         className="icon"
-        title="Fit all tracks vertically"
+        {...tip('Fit all tracks vertically')}
         onClick={() => {
           fitVertically();
           endGesture();
@@ -831,8 +819,8 @@ function ZoomSlider({ zoom }: { zoom: number }): React.JSX.Element {
   };
 
   return (
-    <span className="zoom-slider" title={`Timeline zoom — ${Math.round(zoom)} px/s`}>
-      <button className="icon" title="Zoom out" onClick={() => setZoom(zoom / 1.4)}>
+    <span className="zoom-slider" {...hint(`Timeline zoom — ${Math.round(zoom)} px/s`)}>
+      <button className="icon" {...tip('Zoom out')} onClick={() => setZoom(zoom / 1.4)}>
         <IconZoomOut />
       </button>
       <Fader
@@ -848,10 +836,10 @@ function ZoomSlider({ zoom }: { zoom: number }): React.JSX.Element {
         onReset={zoomToFit}
       />
       <output className="zoom-readout">{Math.round(zoom)} px/s</output>
-      <button className="icon" title="Zoom in" onClick={() => setZoom(zoom * 1.4)}>
+      <button className="icon" {...tip('Zoom in')} onClick={() => setZoom(zoom * 1.4)}>
         <IconZoomIn />
       </button>
-      <button className="icon" title="Zoom to fit the sequence" onClick={zoomToFit}>
+      <button className="icon" {...tip('Zoom to fit the sequence')} onClick={zoomToFit}>
         <IconFit />
       </button>
     </span>

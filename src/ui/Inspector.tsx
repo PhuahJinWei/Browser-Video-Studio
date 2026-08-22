@@ -60,6 +60,7 @@ import {
 } from './format';
 import { Fader, quantizeRangeValue } from './Fader';
 import { useStudio } from './store';
+import { hint, tip } from './tooltip';
 
 const BLEND_MODES: readonly BlendMode[] = [
   'normal',
@@ -272,7 +273,7 @@ function SequenceInspector(): React.JSX.Element {
             id="sequence-reference-video"
             value={reference.id}
             onChange={(event) => setChosenReferenceId(event.target.value as AssetId)}
-            title="Choose the video whose format the sequence should match"
+            {...tip('Choose the video whose format the sequence should match')}
           >
             {videoAssets.map((asset) => {
               const source = asset.video!;
@@ -295,11 +296,9 @@ function SequenceInspector(): React.JSX.Element {
           <button
             className={`sequence-match${matchesReference ? ' matched' : ''}`}
             disabled={matchesReference}
-            title={
-              matchesReference
+            {...tip(matchesReference
                 ? `The sequence already matches "${reference.name}"`
-                : `Set the sequence format from "${reference.name}"`
-            }
+                : `Set the sequence format from "${reference.name}"`)}
             onClick={() => {
               run(
                 {
@@ -1168,46 +1167,23 @@ function TitleControls({ clip, onCommit }: { clip: TitleClip; onCommit: () => vo
           ))}
         </div>
       </div>
-      <div className="field">
-        <label htmlFor={`title-colour-${clip.id}`}>Text colour</label>
-        <div className="value-row colour-value-row">
-          <input
-            id={`title-colour-${clip.id}`}
-            type="color"
-            value={/^#[0-9a-f]{6}$/i.test(clip.style.color) ? clip.style.color : '#ffffff'}
-            onChange={(event) => setStyle({ color: event.target.value }, 'Set title colour', 'colour')}
-            onBlur={onCommit}
-          />
-          <input
-            aria-label="Title text colour value"
-            value={clip.style.color}
-            onChange={(event) => setStyle({ color: event.target.value }, 'Set title colour', 'colour')}
-            onBlur={onCommit}
-          />
-        </div>
-      </div>
-      <div className="field">
-        <label htmlFor={`title-background-${clip.id}`}>Background</label>
-        <div className="value-row">
-          <input
-            id={`title-background-${clip.id}`}
-            value={clip.style.background ?? ''}
-            placeholder="Transparent"
-            onChange={(event) => setStyle(
-              { background: event.target.value.trim() || null },
-              'Set title background',
-              'background',
-            )}
-            onBlur={onCommit}
-          />
-          {clip.style.background && (
-            <button onClick={() => {
-              setStyle({ background: null }, 'Clear title background', 'background');
-              onCommit();
-            }}>Clear</button>
-          )}
-        </div>
-      </div>
+      <ColourField
+        id={`title-colour-${clip.id}`}
+        label="Text colour"
+        value={clip.style.color}
+        fallback="#ffffff"
+        onChange={(color) => setStyle({ color: color ?? '#ffffff' }, 'Set title colour', 'colour')}
+        onCommit={onCommit}
+      />
+      <ColourField
+        id={`title-background-${clip.id}`}
+        label="Background"
+        value={clip.style.background}
+        fallback="#000000"
+        nullable
+        onChange={(background) => setStyle({ background }, 'Set title background', 'background')}
+        onCommit={onCommit}
+      />
     </>
   );
 }
@@ -1246,6 +1222,79 @@ function SolidControls({ clip }: { clip: SolidClip }): React.JSX.Element {
 }
 
 /** Shared by the fill group and the video controls, which both blend. */
+/**
+ * A colour, with a swatch and the text behind it.
+ *
+ * Both rows on a title are the same kind of value, and they had grown two different
+ * controls: the text colour a swatch beside a hex box, the background a bare text
+ * field with "Transparent" for a placeholder. The difference was not a decision —
+ * a native colour input cannot say "none", so the nullable one fell back to typing.
+ *
+ * `nullable` restores that with a checkbox, which is how Premiere, Resolve and Final
+ * Cut all gate an optional colour. The text box stays either way: a native picker
+ * has no alpha, and `#00000088` for a scrim has to be typeable.
+ */
+function ColourField({
+  id,
+  label,
+  value,
+  fallback,
+  nullable = false,
+  onChange,
+  onCommit,
+}: {
+  id: string;
+  label: string;
+  value: string | null;
+  /** What the swatch shows when the value is empty or not a plain hex. */
+  fallback: string;
+  nullable?: boolean;
+  onChange: (value: string | null) => void;
+  onCommit: () => void;
+}): React.JSX.Element {
+  const enabled = value !== null;
+  // `input[type=color]` accepts nothing but `#rrggbb`, so anything else — a name, or
+  // a hex carrying alpha — shows the fallback while the text box keeps the truth.
+  const swatch = value && /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
+
+  return (
+    <div className="field">
+      <label htmlFor={id}>
+        {nullable && (
+          <input
+            type="checkbox"
+            className="field-enable"
+            checked={enabled}
+            aria-label={`${label} on`}
+            onChange={(event) => {
+              onChange(event.target.checked ? fallback : null);
+              onCommit();
+            }}
+          />
+        )}
+        {label}
+      </label>
+      <div className="value-row colour-value-row">
+        <input
+          id={id}
+          type="color"
+          value={swatch}
+          disabled={!enabled}
+          onChange={(event) => onChange(event.target.value)}
+          onBlur={onCommit}
+        />
+        <input
+          aria-label={`${label} value`}
+          value={value ?? ''}
+          placeholder={nullable ? 'None' : fallback}
+          disabled={!enabled}
+          onChange={(event) => onChange(event.target.value.trim() || (nullable ? null : ''))}
+          onBlur={onCommit}
+        />
+      </div>
+    </div>
+  );
+}
 function BlendModeField({ clip }: { clip: VideoClip | SolidClip }): React.JSX.Element {
   const run = useStudio((s) => s.run);
   return (
@@ -1500,7 +1549,7 @@ function EffectCard({
         <span className="spacer" />
         <button
           className={`icon${effect.enabled ? ' on' : ''}`}
-          title="Toggle effect"
+          {...tip('Toggle effect')}
           onClick={() =>
             run(
               { type: 'setEffectEnabled', effectId: effect.id, enabled: !effect.enabled },
@@ -1512,7 +1561,7 @@ function EffectCard({
         </button>
         <button
           className="icon"
-          title="Remove effect"
+          {...tip('Remove effect')}
           onClick={() => run({ type: 'removeEffect', effectId: effect.id }, 'Remove effect')}
         >
           ×
@@ -1777,25 +1826,25 @@ function Slider({
       <div className="field-label-row">
         <label htmlFor={id}>{label}</label>
         {animation && (
-          <span className="keyframe-controls" title={`${animation.count} keyframe(s)`}>
+          <span className="keyframe-controls" {...hint(`${animation.count} keyframe(s)`)}>
             <button
               className="icon"
               disabled={!animation.canGoPrevious}
               aria-label={`Previous ${label} keyframe`}
-              title="Previous keyframe"
+              {...hint('Previous keyframe')}
               onClick={animation.onPrevious}
             >‹</button>
             <button
               className={`icon keyframe-toggle${animation.active ? ' active' : ''}`}
               aria-label={animation.active ? `Remove ${label} keyframe here` : `Add ${label} keyframe here`}
-              title={animation.active ? 'Remove keyframe here' : 'Add keyframe here'}
+              {...hint(animation.active ? 'Remove keyframe here' : 'Add keyframe here')}
               onClick={animation.onToggle}
             >{animation.active ? '◆' : '◇'}</button>
             <button
               className="icon"
               disabled={!animation.canGoNext}
               aria-label={`Next ${label} keyframe`}
-              title="Next keyframe"
+              {...hint('Next keyframe')}
               onClick={animation.onNext}
             >›</button>
           </span>

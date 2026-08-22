@@ -51,6 +51,14 @@ export interface LayoutState {
   /** Local listening level; unlike sequence master gain this never affects export. */
   readonly monitorVolume: number;
   readonly monitorMuted: boolean;
+  /**
+   * Checkerboard behind transparent pixels on the program monitor.
+   *
+   * A viewing aid and nothing more — it never reaches a file. Off by default: every
+   * format this exports to is opaque, so black is what those pixels will really be,
+   * and a grid shown as standard would suggest an alpha channel that no output has.
+   */
+  readonly transparencyGrid: boolean;
 
   setBinWidth: (px: number) => void;
   setInspectorWidth: (px: number) => void;
@@ -62,6 +70,7 @@ export interface LayoutState {
   setTimelinePaneScroll: (kind: 'video' | 'audio', px: number) => void;
   setMonitorVolume: (volume: number) => void;
   setMonitorMuted: (muted: boolean) => void;
+  toggleTransparencyGrid: () => void;
   setTheme: (theme: Theme) => void;
   toggleTheme: () => void;
   resetWorkspace: () => void;
@@ -81,6 +90,7 @@ interface StoredLayout {
   timelineAudioScrollTop?: unknown;
   monitorVolume?: unknown;
   monitorMuted?: unknown;
+  transparencyGrid?: unknown;
 }
 
 const DEFAULTS = {
@@ -99,6 +109,7 @@ const DEFAULTS = {
   timelineAudioScrollTop: 0,
   monitorVolume: 1,
   monitorMuted: false,
+  transparencyGrid: false,
 };
 
 /**
@@ -158,6 +169,10 @@ function load(): typeof DEFAULTS {
           : DEFAULTS.monitorVolume,
       monitorMuted:
         typeof stored.monitorMuted === 'boolean' ? stored.monitorMuted : DEFAULTS.monitorMuted,
+      transparencyGrid:
+        typeof stored.transparencyGrid === 'boolean'
+          ? stored.transparencyGrid
+          : DEFAULTS.transparencyGrid,
     };
   } catch {
     // A corrupt or unavailable store is not worth failing to start over.
@@ -181,6 +196,7 @@ function save(state: LayoutState): void {
         timelineAudioScrollTop: state.timelineAudioScrollTop,
         monitorVolume: state.monitorVolume,
         monitorMuted: state.monitorMuted,
+        transparencyGrid: state.transparencyGrid,
       }),
     );
   } catch {
@@ -256,6 +272,10 @@ export const useLayout = create<LayoutState>((set, get) => {
     },
     setMonitorMuted: (muted) => {
       set({ monitorMuted: muted });
+      persist();
+    },
+    toggleTransparencyGrid: () => {
+      set({ transparencyGrid: !get().transparencyGrid });
       persist();
     },
     setTheme: (theme) => {

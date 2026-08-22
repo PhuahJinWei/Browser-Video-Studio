@@ -58,6 +58,16 @@
    */
   --mark: #b06a00;
   --mark-wash: rgba(176, 106, 0, 0.16);
+  /* The same mark colour, knocked back for the stretch with no material under it. */
+  --mark-wash-empty: rgba(176, 106, 0, 0.05);
+  /*
+   * The transparency checkerboard. Deliberately the same two greys in both themes
+   * and identical to the pair the blit shader uses, because a checker is a
+   * convention rather than a surface: it means "no pixels here" wherever it appears,
+   * and a themed one would read as content.
+   */
+  --checker-light: #b8b8b8;
+  --checker-dark: #8c8c8c;
   /* Folders read as amber everywhere else; the icon follows suit. */
   --folder: #d18b0a;
 
@@ -84,7 +94,29 @@
    * showing through a waveform whose peaks are drawn in white.
    */
   --clip-bed: #11141b;
-  --preview-bg: #07080b;
+  /*
+   * The surround the picture sits in — a monitor's matte, not a UI surface, which is
+   * why it stays dark in the light theme as every editor's viewer does. Deliberately
+   * well clear of black: the frame is black, and the two must not be the same colour
+   * or the edge of the picture cannot be seen at all.
+   */
+  --preview-surround: #2a2d34;
+
+  /*
+   * Text on the monitor surround, which is dark in both themes.
+   *
+   * Not overridden under `[data-theme='dark']` for that reason: the bed a caption
+   * sits on does not change with the theme, so neither may the caption. Anything
+   * here reaching for `--muted` instead gets a colour meant for a white panel —
+   * which is how the empty-state message came to sit at 1.3:1 on the light theme,
+   * present in the DOM and invisible on the screen. All three clear AA on both
+   * `--preview-surround` values.
+   */
+  --on-surround: #e6e8ec;
+  --on-surround-muted: #aeb6c2;
+  --on-surround-dim: #98a2af;
+  --on-surround-line: rgba(255, 255, 255, 0.3);
+  --on-surround-accent: #9fc2ff;
 
   --header-h: 88px;
   --divider-h: 7px;
@@ -128,6 +160,8 @@
   --folder: #e3b341;
   --mark: #f0b429;
   --mark-wash: rgba(240, 180, 41, 0.18);
+  --mark-wash-empty: rgba(240, 180, 41, 0.05);
+  --preview-surround: #1e2127;
 
   --float: rgba(10, 12, 16, 0.94);
   --overlay: rgba(0, 0, 0, 0.6);
@@ -803,10 +837,22 @@ button.action.tint-danger:hover:not(:disabled) svg {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--preview-bg);
+  /*
+   * Lighter than the frame, which is black.
+   *
+   * The two used to be within a few points of each other, so a title dragged past
+   * the edge of the picture appeared to be cut off by nothing at all — there was no
+   * visible boundary for it to be cut off by. The surround has to read as surround
+   * for the frame edge to read as an edge.
+   */
+  background: var(--preview-surround);
   min-height: 0;
   overflow: hidden;
   position: relative;
+  /* Queried by `.monitor-outline`, which needs both axes to size itself to the
+     picture rather than to this box. */
+  container-type: size;
+  container-name: preview-stage;
 }
 /*
  * The frame, fitted to the viewer in both directions.
@@ -828,9 +874,97 @@ button.action.tint-danger:hover:not(:disabled) svg {
 }
 .preview .empty {
   position: absolute;
-  color: var(--muted);
+  color: var(--on-surround-muted);
   text-align: center;
   padding: 24px;
+}
+
+/*
+ * The first three moves, in the middle of the largest empty space in the window.
+ *
+ * Left-aligned inside a centred block: three lines of instruction each centred on
+ * their own axis is a poster, and the eye has to find the start of every line. The
+ * numbers form a column so the list reads as a sequence rather than three notices.
+ */
+.first-steps {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  max-width: 340px;
+  list-style: none;
+  text-align: left;
+}
+.first-step {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  gap: 10px;
+  align-items: start;
+}
+.first-step-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--on-surround-line);
+  border-radius: 50%;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.first-step-copy {
+  display: grid;
+  gap: 2px;
+}
+.first-step-copy strong {
+  color: var(--on-surround-muted);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.3;
+}
+.first-step-copy span {
+  color: var(--on-surround-dim);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+/*
+ * The step to do now is findable without reading all three.
+ *
+ * Separated by colour rather than by opacity: fading a caption that is already a
+ * muted grey drops it under four to one against the surround, and a step nobody can
+ * read is worse than one that was never listed. Every value here still clears AA.
+ *
+ * Done is receded rather than struck through — it is a record of progress, not an
+ * error, and a line through finished work reads as a cancellation.
+ */
+.first-step.now .first-step-mark {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.first-step.now .first-step-copy strong {
+  color: var(--on-surround);
+}
+.first-step.now .first-step-copy span {
+  color: var(--on-surround-muted);
+}
+.first-step.done .first-step-mark {
+  border-color: var(--on-surround-accent);
+  color: var(--on-surround-accent);
+}
+
+/* Announced to a screen reader, absent for everyone else. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 /* -------------------------------------------------------------- transport */
@@ -916,6 +1050,52 @@ button.action.tint-danger:hover:not(:disabled) svg {
 
 /* A bin item opens as source media over the program canvas. The canvas stays
    attached underneath so returning to the edit does not rebuild the GPU pipeline. */
+/*
+ * The outline round whatever can be dragged in the monitor.
+ *
+ * Laid out to exactly the picture — the same contain arithmetic `pictureRect` does,
+ * expressed in container units — so its `viewBox` is the frame and everything inside
+ * can be positioned in frame pixels with no measuring. Overflow is deliberately
+ * visible: a layer pushed off the frame should be followed out into the letterbox,
+ * which is the only place left to show it, and `.preview` clips it at the panel.
+ */
+.monitor-outline {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(100cqw, calc(100cqh * var(--frame-aspect, 1.7778)));
+  height: min(100cqh, calc(100cqw / var(--frame-aspect, 1.7778)));
+  overflow: visible;
+  pointer-events: none;
+  z-index: 3;
+}
+.monitor-outline polygon {
+  fill: none;
+  stroke: var(--accent);
+  /* Constant on screen: the viewBox is in frame pixels, so without this the outline
+     would be hairline on a 4K sequence and heavy on a small one. */
+  stroke-width: 1.5px;
+  paint-order: stroke;
+}
+
+.monitor-readout {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  margin: 0;
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: rgb(10 14 20 / 78%);
+  color: #fff;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: pre;
+  pointer-events: none;
+  z-index: 4;
+}
+
 .source-monitor {
   position: absolute;
   inset: 0;
@@ -925,6 +1105,10 @@ button.action.tint-danger:hover:not(:disabled) svg {
   justify-content: center;
   overflow: hidden;
   background: #000;
+  /* Queried by `.source-still` below, which needs both of the monitor's axes to
+     work out the box a picture of a given shape fits into. */
+  container-type: size;
+  container-name: source-monitor;
 }
 .source-media {
   width: 100%;
@@ -1677,6 +1861,48 @@ body.resizing-track-sections {
   z-index: 2;
 }
 
+/*
+ * Transparency checkerboard, for anything showing an asset that may carry alpha.
+ *
+ * Only ever under a picture of a *file* — a bin card, the source monitor — never
+ * under the program monitor's letterbox, where it would claim the frame is a
+ * different size than it is. The frame's own grid is drawn in the shader instead,
+ * clipped to the frame by construction.
+ */
+.checkered {
+  background-color: var(--checker-light);
+  background-image:
+    linear-gradient(45deg, var(--checker-dark) 25%, transparent 25%, transparent 75%, var(--checker-dark) 75%),
+    linear-gradient(45deg, var(--checker-dark) 25%, transparent 25%, transparent 75%, var(--checker-dark) 75%);
+  background-size: 12px 12px;
+  background-position: 0 0, 6px 6px;
+}
+
+/*
+ * A still sized to its own picture rather than to the viewer.
+ *
+ * `object-fit: contain` letterboxes the image inside a full-size box, which is right
+ * until that box needs a background: the checker would run out into the bars and
+ * claim the picture is larger than it is.
+ *
+ * So the box is given the contain result directly. `aspect-ratio` cannot express it
+ * — measured, Chrome stretches the box rather than preserving the ratio once
+ * `max-height` clamps — but the two container-query units state it exactly: take the
+ * full width unless the height that implies would overflow, and vice versa. Unlike
+ * the `max-width`/`max-height` idiom this scales a small image up as well as down,
+ * which is what the monitor did before and should keep doing.
+ */
+.source-still {
+  width: min(100cqw, calc(100cqh * var(--still-aspect, 1.7778)));
+  height: min(100cqh, calc(100cqw / var(--still-aspect, 1.7778)));
+  flex: none;
+}
+.source-still img {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 /* ------------------------------------------------------------- In / Out marks */
 
 /*
@@ -1689,7 +1915,22 @@ body.resizing-track-sections {
   position: absolute;
   top: 0;
   bottom: 0;
-  background: var(--mark-wash);
+  /*
+   * Two shades, meeting at the end of the material.
+   *
+   * `--mark-content` is the band-relative x where the sequence's content stops; the
+   * span past it keeps the range's colour at a fraction of its strength, so it still
+   * reads as one band with a quiet tail rather than as two separate marks. A hard
+   * stop rather than a soft ramp: the frame the material ends on is an exact one,
+   * and a gradient would put the boundary everywhere and nowhere.
+   *
+   * Defaults to the full width, so a band entirely over content is shaded as before.
+   */
+  background: linear-gradient(
+    to right,
+    var(--mark-wash) 0 var(--mark-content, 100%),
+    var(--mark-wash-empty) var(--mark-content, 100%) 100%
+  );
   border-left: 1px solid var(--mark);
   border-right: 1px solid var(--mark);
   pointer-events: none;
@@ -1702,21 +1943,51 @@ body.resizing-track-sections {
  * Out leftward — so the pair reads as holding the range between them rather than as
  * two unrelated tabs. It also means neither ever covers the frame it marks.
  */
+/*
+ * The brackets are grab handles, and are painted like every other edge handle here —
+ * 7px, `ew-resize`, the same as a clip's trim handle and a transition's.
+ *
+ * They opt back into pointer events: the strip they sit in has them off so the ruler
+ * beneath stays scrubbable, which was right while these were decoration and wrong
+ * the moment they became something to take hold of. A tab that looks exactly like a
+ * handle and does nothing is worse than no tab at all.
+ *
+ * The element is the target and the pseudo-element is the paint, rather than the
+ * other way about. `clip-path` clips hit-testing as well as pixels, so a bracket
+ * shaped by one is only grabbable on the arms of its own polygon — a couple of
+ * pixels, in two disconnected pieces. Shaping the paint instead leaves the element
+ * an honest rectangle: 15px wide against 7px of bracket, so it can be caught without
+ * aiming while the mark still points at the exact frame it belongs to.
+ */
 .mark-flag {
   position: absolute;
   top: 0;
-  width: 7px;
+  width: 15px;
   height: var(--ruler-h);
-  background: var(--mark);
+  /* Four pixels of reach on the far side of the paint. */
+  margin-left: -4px;
   /* Placed in content pixels and carried by the scroll, like the play head's flag. */
   transform: translateX(calc(0px - var(--timeline-scroll-x)));
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: ew-resize;
 }
-.mark-flag.in {
+.mark-flag::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 7px;
+  background: var(--mark);
+}
+.mark-flag.in::before {
   clip-path: polygon(0 0, 100% 0, 100% 30%, 40% 30%, 40% 70%, 100% 70%, 100% 100%, 0 100%);
 }
+/* The Out bracket's paint ends on the mark, so the whole handle shifts left by it. */
 .mark-flag.out {
-  margin-left: -7px;
+  margin-left: -11px;
+}
+.mark-flag.out::before {
   clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%, 0 70%, 60% 70%, 60% 30%, 0 30%);
 }
 
@@ -2974,11 +3245,43 @@ body.focus-mode .preview-panel .preview {
 
 /* ------------------------------------------------------------------ export */
 
+/*
+ * Head, scrolling body, foot — the same shape as the project browser.
+ *
+ * The whole dialog used to be the scroller, which put the two things a person needs
+ * while it is open below the fold on any laptop: the estimate they are deciding on,
+ * and the button that stops an encode already running. Only the settings scroll now.
+ */
 .export-dialog {
   width: 460px;
-  /* A tall dialog on a short window has to be reachable, not merely present. */
+  display: flex;
+  flex-direction: column;
   max-height: calc(100vh - 64px);
+}
+.export-head {
+  flex: 0 0 auto;
+}
+.export-body {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+  /* Room for the focus ring on the last control, which a flush edge would clip. */
+  padding: 2px;
+  margin: 0 -2px;
+}
+.export-dialog .actions {
+  flex: 0 0 auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+/* Held apart from the summary so the bar does not touch its border. */
+.export-progress {
+  margin-top: 8px;
+}
+.export-progress .hint {
+  margin: 4px 0 0;
+  font-variant-numeric: tabular-nums;
 }
 
 /*
@@ -2993,7 +3296,7 @@ body.focus-mode .preview-panel .preview {
   border-radius: 8px;
   background: var(--panel-2);
   padding: 10px 12px;
-  margin-bottom: 4px;
+  margin-bottom: 12px;
 }
 .export-summary-main {
   display: flex;
@@ -3030,6 +3333,11 @@ body.focus-mode .preview-panel .preview {
 /*
  * Preset rows wrap rather than squeeze. Five resolutions at 460px would otherwise
  * each be narrower than their own label.
+ *
+ * Equal widths, not content widths: these are mutually exclusive options of the same
+ * rank, and growing each from its own label made peers differ by a few pixels —
+ * `2160p` at 72 beside `720p` at 65 — which reads as an accident rather than a set.
+ * `min-width: max-content` is what keeps the equal share from cutting a label.
  */
 .export-choices {
   display: flex;
@@ -3037,12 +3345,64 @@ body.focus-mode .preview-panel .preview {
   gap: 6px;
 }
 .export-choices button {
-  flex: 1 0 auto;
+  flex: 1 1 0;
+  min-width: max-content;
+  justify-content: center;
 }
 
-/* Set off from the summary above it, since it answers a different question. */
-.export-range {
+/*
+ * Selected, which is not the same as primary.
+ *
+ * These rows used to use `.primary`, which put four solid accent fills in a dialog
+ * whose one real action — Export — is also `.primary`. The tint says "this is the
+ * one" without competing with the button that actually does something; it is the
+ * same treatment the bin filters and the title alignment buttons already use.
+ */
+.export-choices button.on {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* The way into the full settings, and a caret that turns when it opens. */
+.export-disclosure {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 2px 0 0;
+  padding: 3px 7px 3px 4px;
+  border-color: transparent;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+.export-disclosure:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--hover);
+  border-color: var(--hover-line);
+}
+.export-caret {
+  display: inline-flex;
+  transition: transform 0.12s ease;
+}
+.export-caret.open {
+  transform: rotate(90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .export-caret {
+    transition: none;
+  }
+}
+
+/* The first section rule would otherwise sit immediately under the disclosure. */
+.export-settings > .section-label:first-child {
   margin-top: 10px;
+}
+
+/* What the chosen preset buys, in the place the codec note used to argue for itself. */
+.export-note {
+  margin: 8px 0 12px;
+  line-height: 1.45;
 }
 
 .export-audio-row {
@@ -3070,6 +3430,8 @@ body.focus-mode .preview-panel .preview {
 }
 
 .export-problem {
+  margin: 8px 0 12px;
+  line-height: 1.45;
   color: var(--danger-text);
 }
 .range.track-volume > input[type='range']::-webkit-slider-runnable-track,
@@ -3666,6 +4028,45 @@ body.resizing-y {
   visibility: hidden;
 }
 
+/*
+ * A control's tooltip.
+ *
+ * Above the modal backdrop and the menus, because a dialog's own icon buttons need
+ * explaining too and a tooltip that renders behind the thing it describes is worse
+ * than none. Below the crash screen, which is the one surface that outranks
+ * everything by design.
+ *
+ * `pointer-events: none` matters more here than it looks: the layer hit-tests on
+ * pointer position, so a tooltip that could be hit would sit under the pointer,
+ * report itself as the element there, and immediately dismiss itself.
+ */
+.tooltip {
+  position: fixed;
+  z-index: 60;
+  pointer-events: none;
+  max-width: 280px;
+  padding: 4px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--float);
+  color: var(--text);
+  box-shadow: var(--shadow-lg);
+  font-size: 11.5px;
+  line-height: 1.35;
+  white-space: normal;
+  animation: tooltip-in 0.09s ease both;
+}
+@keyframes tooltip-in {
+  from {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tooltip {
+    animation: none;
+  }
+}
+
 /* The panel shown instead of a blank window when the editor cannot draw itself. */
 .crash-screen {
   position: fixed;
@@ -3842,4 +4243,150 @@ body.resizing-y {
 .menu-swatch.on {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+/* The checkbox that gates an optional colour, sitting in its own label. */
+.field-enable {
+  width: 13px;
+  height: 13px;
+  margin: 0 6px 0 0;
+  vertical-align: -2px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.colour-value-row input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* The monitor says it can be grabbed, but only while there is something to grab. */
+.preview canvas.draggable {
+  cursor: move;
+  touch-action: none;
+}
+
+/* Saved presets, pinned under the media list. Looks, not footage. */
+.bin-presets {
+  flex: none;
+  padding: 8px 10px 10px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+.bin-presets-title {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.bin-preset-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 132px;
+  overflow-y: auto;
+}
+.bin-preset {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 4px 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-2);
+  cursor: grab;
+  user-select: none;
+}
+.bin-preset:hover {
+  border-color: var(--accent);
+}
+.bin-preset:active {
+  cursor: grabbing;
+}
+.bin-preset-swatch {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  border: 1px solid rgb(0 0 0 / 30%);
+  border-radius: 3px;
+}
+.bin-preset-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+.bin-preset-remove {
+  flex: none;
+  display: inline-flex;
+  padding: 2px;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+}
+.bin-preset:hover .bin-preset-remove,
+.bin-preset-remove:focus-visible {
+  opacity: 1;
+}
+.bin-preset-remove:hover {
+  color: var(--danger);
+  background: var(--panel);
+}
+
+/*
+ * A marker in the ruler.
+ *
+ * Hangs from the foot of the ruler so it reads as attached to the time below it,
+ * and sits under the play head in the stacking order — the head is the thing you
+ * are steering, and a marker must never hide it.
+ */
+.marker-flag {
+  position: absolute;
+  z-index: 1;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  height: 11px;
+  min-width: 9px;
+  max-width: 160px;
+  margin-left: -1px;
+  padding: 0;
+  border: none;
+  /* Squared on the left, pointed on the right: the flat edge is the exact time. */
+  border-radius: 0 3px 3px 0;
+  cursor: pointer;
+  pointer-events: auto;
+  overflow: hidden;
+}
+.marker-flag::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: rgb(0 0 0 / 45%);
+}
+.marker-flag:hover {
+  filter: brightness(1.15);
+}
+.marker-flag:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+.marker-flag-name {
+  padding: 0 5px 0 6px;
+  color: rgb(12 16 22 / 92%);
+  font-size: 9px;
+  line-height: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

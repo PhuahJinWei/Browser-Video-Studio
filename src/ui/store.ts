@@ -8,14 +8,12 @@
  */
 
 import { create } from 'zustand';
+import { DEFAULT_EXPORT_PRESET, presetSettings } from './exportPresets';
 import { planTransition, type PlannedCut } from '../model/planTransition';
 import { DEFAULT_TRANSITION_SECONDS } from './transitions';
 import { Engine, type EngineTelemetry } from '../engine/engine';
 import {
-  DEFAULT_AUDIO_BITRATE,
-  defaultVideoCodec,
   exportSequence,
-  suggestBitrate,
   type ExportDestination,
   type ExportProgress,
   type ExportSettings,
@@ -27,7 +25,10 @@ import { PreviewStore } from '../engine/previewStore';
 import { apply, type Command, type NewClipSpec } from '../model/commands';
 import { normaliseFolder } from '../model/commands/handlers';
 import { repairProjectTimes } from '../model/repairTimes';
+import { assertMark, dragMark, type MarkMode } from './markRange';
 import { generatorById, type GeneratorId } from './generators';
+import { scaleToFit } from './monitorActions';
+import { presetClipSpec, presetCommands, presetStyleCommands, usePresets } from './presets';
 import { randomIdSource } from '../model/ids';
 import { createProject } from '../model/factories';
 import {
@@ -282,6 +283,8 @@ export interface StudioState {
   draggingAssetId: AssetId | null;
   /** The generator in flight, so the timeline can ghost it before it lands. */
   draggingGeneratorId: GeneratorId | null;
+  /** Likewise for a saved preset, which drops the same way. */
+  draggingPresetId: string | null;
   status: string;
   error: string | null;
   showTelemetry: boolean;
@@ -364,7 +367,7 @@ export interface StudioState {
    * mark is a mark whichever monitor is in front, and the two behaving differently
    * would be a difference to remember for no reason.
    */
-  setSequenceMark: (edge: 'in' | 'out', at?: Time) => void;
+  setSequenceMark: (edge: 'in' | 'out', at?: Time, mode?: MarkMode) => void;
   clearSequenceMarks: () => void;
   /** Move the play head to a mark, if that mark is set. */
   goToSequenceMark: (edge: 'in' | 'out') => void;
@@ -406,6 +409,14 @@ export interface StudioState {
    */
   dropGeneratorOnTrack: (generatorId: GeneratorId, trackId: TrackId, start?: Time) => void;
 
+  /**
+   * Drop a saved preset onto a track at `start`.
+   *
+   * Like a generator, every drop is its own clip: a preset is a look to copy, not
+   * a source to point at, so editing one later leaves placed clips alone.
+   */
+  dropPresetOnTrack: (presetId: string, trackId: TrackId, start?: Time) => void;
+
   /** Place an asset on a track created for it at `index` — the media-bin half of the same gesture. */
   dropAssetOnNewTrack: (assetId: AssetId, kind: TrackKind, index: number, start?: Time) => void;
 
@@ -443,6 +454,8 @@ export interface StudioState {
    * before the thing exists only put a modal in front of the answer.
    */
   addGeneratorAtPlayhead: (generatorId: GeneratorId) => void;
+  /** The same for a saved preset — the click half of its card. */
+  addPresetAtPlayhead: (presetId: string) => void;
   /**
    * Put a transition on the cut nearest the playhead.
    *
@@ -493,6 +506,7 @@ export interface StudioState {
   dropAssetOnTrack: (assetId: AssetId, trackId: TrackId, start?: Time) => void;
   setDraggingAsset: (assetId: AssetId | null) => void;
   setDraggingGenerator: (generatorId: GeneratorId | null) => void;
+  setDraggingPreset: (presetId: string | null) => void;
   newProject: () => void;
   togglePlay: () => Promise<void>;
   runExport: (settings: ExportSettings) => Promise<void>;
@@ -654,6 +668,7 @@ export const useStudio = create<StudioState>((set, get) => ({
   proxyProgress: new Map(),
   draggingAssetId: null,
   draggingGeneratorId: null,
+  draggingPresetId: null,
   status: 'Import media to begin.',
   error: null,
   saveState: 'idle',
@@ -1274,17 +1289,22 @@ export const useStudio = create<StudioState>((set, get) => ({
     void get().engine?.seek(clamped);
   },
 
-  setSequenceMark: (edge, at) => {
+  setSequenceMark: (edge, at, mode = 'assert') => {
     const state = get();
     const sequence = state.project().sequences[state.sequenceId];
     if (!sequence) return;
     const where = T.clamp(at ?? state.playhead(), T.TIME_ZERO, state.duration());
     const current = { inPoint: sequence.view.inPoint, outPoint: sequence.view.outPoint };
-    let next = edge === 'in' ? { ...current, inPoint: where } : { ...current, outPoint: where };
-    // Keep the range meaningful: moving one edge through the other clears the stale
-    // opposite edge instead of silently creating a negative selection.
-    if (next.inPoint && next.outPoint && !T.lt(next.inPoint, next.outPoint)) {
-      next = edge === 'in' ? { inPoint: where, outPoint: null } : { inPoint: null, outPoint: where };
+    // Asserting and adjusting differ in what they do to the far mark; see `markRange`.
+    const next =
+      mode === 'adjust'
+        ? dragMark(current, edge, where, T.frameDuration(sequence.frameRate))
+        : assertMark(current, edge, where);
+    if (
+      next.inPoint === current.inPoint &&
+      next.outPoint === current.outPoint
+    ) {
+      return;
     }
     // Transient, like the play head and the zoom: where you are looking is not an
     // edit, and undo should take back the last change to the film rather than the
@@ -1495,6 +1515,29 @@ export const useStudio = create<StudioState>((set, get) => ({
     });
   },
 
+  addPresetAtPlayhead: (presetId) => {
+    const state = get();
+    const preset = usePresets.getState().presets.find((entry) => entry.id === presetId);
+    if (!preset) return;
+
+    // No track under a pointer here, so the same rule the generators use decides:
+    // the topmost video track if it is free, and one above it if it is not.
+    const plan = planGenerated(
+      state.project(),
+      state.sequenceId,
+      presetClipSpec(preset, state.playhead()),
+    );
+    state.runMany(
+      [...plan.commands, ...presetStyleCommands(preset, plan.clipId)],
+      `Add "${preset.name}"`,
+    );
+    get().select([plan.clipId]);
+    set({
+      status: plan.createdTrack
+        ? `Added "${preset.name}" on a new track above — the one below was busy at the playhead.`
+        : `Added "${preset.name}".`,
+    });
+  },
   splitAtPlayhead: () => {
     const state = get();
     const project = state.project();
@@ -1753,6 +1796,24 @@ export const useStudio = create<StudioState>((set, get) => ({
     set({ status: `Added a ${generator.label.toLowerCase()}.` });
   },
 
+  dropPresetOnTrack: (presetId, trackId, start) => {
+    const state = get();
+    const project = state.project();
+    const preset = usePresets.getState().presets.find((entry) => entry.id === presetId);
+    const track = project.tracks[trackId];
+    if (!preset || !track) return;
+
+    if (track.kind !== 'video') {
+      set({ error: `"${preset.name}" needs a video track` });
+      return;
+    }
+
+    const clipId = ids.clip();
+    const at = start ?? state.playhead();
+    state.runMany(presetCommands(preset, trackId, at, clipId), `Add "${preset.name}"`);
+    if (get().project().clips[clipId]) get().select([clipId]);
+    set({ status: `Added "${preset.name}".` });
+  },
   captureFrame: async () => {
     const state = get();
     const engine = state.engine;
@@ -1818,6 +1879,7 @@ export const useStudio = create<StudioState>((set, get) => ({
 
   setDraggingAsset: (assetId) => set({ draggingAssetId: assetId }),
   setDraggingGenerator: (generatorId) => set({ draggingGeneratorId: generatorId }),
+  setDraggingPreset: (presetId) => set({ draggingPresetId: presetId }),
 
   newProject: () => {
     const { project, sequenceId } = starterProject();
@@ -2325,19 +2387,18 @@ function placementNotes(placement: PlacementPlan): string {
   return notes.length > 0 ? ` — ${notes.join(', ')}.` : '.';
 }
 
-/** Default export settings derived from the sequence. */
+/**
+ * What the export dialog opens on: the sharing preset, expressed for this sequence.
+ *
+ * Deliberately a preset rather than a hand-written set of defaults, so the dialog
+ * always opens with one of its own buttons lit. Spelling the same values out twice
+ * meant a 4K sequence opened on settings that matched no preset at all, and so on
+ * nothing highlighted — the state that makes a person think they have to go and
+ * choose everything themselves.
+ */
 export function defaultExportSettings(project: Project, sequenceId: SequenceId): ExportSettings {
   const sequence = getSequence(project, sequenceId);
-  const videoCodec = defaultVideoCodec('mp4');
-  return {
-    container: 'mp4',
-    videoCodec,
-    size: sequence.size,
-    frameRate: sequence.frameRate,
-    bitrate: suggestBitrate(sequence.size, sequence.frameRate, videoCodec, 'medium'),
-    includeAudio: true,
-    audioBitrate: DEFAULT_AUDIO_BITRATE,
-  };
+  return presetSettings(DEFAULT_EXPORT_PRESET, sequence.size, sequence.frameRate);
 }
 
 /**
@@ -2547,8 +2608,9 @@ export function formatToAdopt(
  * inspector can change.
  */
 function fitScale(source: Size, frame: Size): number {
-  const scale = Math.min(frame.width / source.width, frame.height / source.height);
-  return scale < 1 ? scale : 1;
+  // Shrink to fit, never enlarge: dropping a small clip should leave it its own
+  // size. The monitor's own "fit to frame" is the unclamped form of this.
+  return Math.min(1, scaleToFit(source, frame));
 }
 
 /**

@@ -20,6 +20,7 @@ import type {
   CrossfadeCurve,
   EffectInstanceId,
   FrameRate,
+  Marker,
   MarkerId,
   Param,
   ParamMap,
@@ -387,6 +388,12 @@ export type Command =
       readonly markerId?: MarkerId;
     }
   | { readonly type: 'removeMarker'; readonly markerId: MarkerId }
+  /** Rename or recolour a marker. Its position is set by `addMarker`. */
+  | {
+      readonly type: 'setMarkerProps';
+      readonly markerId: MarkerId;
+      readonly props: MarkerProps;
+    }
 
   // -- view -----------------------------------------------------------------
   | {
@@ -395,4 +402,10 @@ export type Command =
       readonly view: ViewProps;
     };
 
+/** The parts of a marker that can be edited after it is placed. */
+export type MarkerProps = Partial<{
+  readonly name: string;
+  readonly color: string;
+  readonly kind: Marker['kind'];
+}>;
 export type CommandType = Command['type'];

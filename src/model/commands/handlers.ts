@@ -806,6 +806,14 @@ function handleRemoveMarker(d: Draft, cmd: Extract<Command, { type: 'removeMarke
   }
 }
 
+function handleSetMarkerProps(
+  d: Draft,
+  cmd: Extract<Command, { type: 'setMarkerProps' }>,
+): void {
+  const marker = d.markers[cmd.markerId];
+  if (!marker) throw new ModelError(`No marker with id "${cmd.markerId}"`);
+  d.markers[cmd.markerId] = { ...marker, ...cmd.props };
+}
 function handleSetView(d: Draft, cmd: Extract<Command, { type: 'setView' }>): void {
   const seq = draftSequence(d, cmd.sequenceId);
   d.sequences[seq.id] = { ...seq, view: { ...seq.view, ...cmd.view } };
@@ -1236,6 +1244,8 @@ export function runCommand(d: Draft, command: Command, ids: IdSource): void {
       return handleAddMarker(d, command, ids);
     case 'removeMarker':
       return handleRemoveMarker(d, command);
+    case 'setMarkerProps':
+      return handleSetMarkerProps(d, command);
     case 'setView':
       return handleSetView(d, command);
   }
