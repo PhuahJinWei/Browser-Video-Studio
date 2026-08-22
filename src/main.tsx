@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './ui/App';
+import { ErrorBoundary } from './ui/ErrorBoundary';
 import { useStudio } from './ui/store';
 import './ui/styles.css';
 
@@ -15,6 +16,11 @@ if (import.meta.env.DEV) {
 
 createRoot(container).render(
   <StrictMode>
-    <App />
+    <ErrorBoundary
+      onUndo={() => useStudio.getState().undoEdit()}
+      canUndo={() => useStudio.getState().canUndoEdit()}
+    >
+      <App />
+    </ErrorBoundary>
   </StrictMode>,
 );

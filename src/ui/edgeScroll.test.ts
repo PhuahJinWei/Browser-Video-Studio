@@ -50,6 +50,44 @@ describe('deciding to scroll at an edge', () => {
     expect(edgeScrollDelta(withHeaders)).toBeLessThan(0);
     expect(edgeScrollDelta({ ...withHeaders, pointer: 400 })).toBe(0);
   });
+
+  it('eases across the headers rather than hitting full speed at their inner edge', () => {
+    // A leftward drag crosses the 216px header column constantly, so reaching
+    // maximum speed on touching it made the view bolt. Grazing it should barely
+    // move; the window's own edge is what full speed is for.
+    const headers = { ...view, inset: 216 };
+    const graze = -edgeScrollDelta({ ...headers, pointer: 216 });
+    const halfway = -edgeScrollDelta({ ...headers, pointer: 108 });
+    const atEdge = -edgeScrollDelta({ ...headers, pointer: 0 });
+
+    expect(graze).toBeGreaterThan(0);
+    expect(graze).toBeLessThanOrEqual(3);
+    expect(halfway).toBeGreaterThan(graze);
+    expect(halfway).toBeLessThan(atEdge);
+    expect(atEdge).toBe(EDGE_SCROLL.maxStep);
+  });
+
+  it('offers the leading and trailing edges the same bargain', () => {
+    // Full speed at the window's edge on both sides, having started from nothing a
+    // band's width in — the asymmetry was the inset being spent on the trigger
+    // rather than on the ramp.
+    const headers = { ...view, inset: 216 };
+    expect(-edgeScrollDelta({ ...headers, pointer: 0 })).toBe(EDGE_SCROLL.maxStep);
+    expect(edgeScrollDelta({ ...headers, pointer: 1000 })).toBe(EDGE_SCROLL.maxStep);
+  });
+
+  it('still runs at full speed once dragged off the window entirely', () => {
+    expect(edgeScrollDelta({ ...view, inset: 216, pointer: -400 })).toBe(-EDGE_SCROLL.maxStep);
+  });
+
+  it('leaves a view with nothing in front of it exactly as it was', () => {
+    // The vertical panes pass no inset, and must not be retuned by this.
+    for (const pointer of [0, 8, 16, 24, 31, 40]) {
+      expect(edgeScrollDelta({ ...view, pointer })).toBe(
+        edgeScrollDelta({ ...view, inset: 0, pointer }),
+      );
+    }
+  });
 });
 
 describe('following the play head', () => {

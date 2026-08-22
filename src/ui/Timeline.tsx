@@ -29,6 +29,7 @@ import { staticParam } from '../model/params';
 import * as T from '../model/time';
 import { TRANSITION_TYPES } from '../model/types';
 import type {
+  AssetId,
   Clip,
   ClipId,
   FrameRate,
@@ -43,8 +44,9 @@ import type {
   TransitionId,
 } from '../model/types';
 import { clipMenuTargets } from './clipMenuTargets';
+import { timelineContentWidth } from './timelineWidth';
 import { LanePreview, type LaneClip } from './LanePreview';
-import { edgeScrollDelta, pageScrollTo } from './edgeScroll';
+import { createFrameLoop, edgeScrollDelta, pageScrollTo, type FrameLoop } from './edgeScroll';
 import { playback } from './playback';
 import { usePlaybackPaint, usePlayheadLeft } from './PlayheadMarker';
 import { useContextMenu, type MenuEntry } from './ContextMenu';
@@ -209,6 +211,8 @@ interface AssetInsertion {
  */
 /** Shared so a lane with nothing on it does not hand the painter a fresh array. */
 const EMPTY_LANE: readonly LaneClip[] = [];
+/** Nothing to leave out of a collision test: a dropped asset has no clip yet. */
+const NO_CLIPS: ReadonlySet<ClipId> = new Set();
 
 const AFFORDANCE_WIDTH = 18;
 const AFFORDANCE_HEIGHT = 16;
@@ -341,20 +345,27 @@ interface TransitionDragState {
 export const ASSET_DRAG_TYPE = 'application/x-bvs-asset';
 
 /**
- * Nearest start position at or near `desired` where a clip of `duration` fits on a
- * track without overlapping anything.
+ * Nearest start position at or near `desired` where a clip of `duration` fits on
+ * every one of `trackIds` without overlapping anything.
  *
  * Moving a clip onto another must not resize the other one — resizing is a trim, and
  * trims are an explicit gesture — so a drag butts up against its neighbour and stops.
+ *
+ * More than one track because a clip with picture and sound occupies two lanes at
+ * once: a position free on the video track but not on its paired audio one is not a
+ * position the pair can take, and clamping to each in turn only lands back on the
+ * first one's neighbour.
  */
 function clampToFreeSpace(
   project: Project,
-  trackId: TrackId,
+  trackIds: readonly TrackId[],
   desired: Time,
   duration: Time,
   exclude: ReadonlySet<ClipId>,
 ): Time {
-  const others = trackClips(project, trackId).filter((c) => !exclude.has(c.id));
+  const others = trackIds
+    .flatMap((trackId) => trackClips(project, trackId))
+    .filter((c) => !exclude.has(c.id));
   const wanted = T.max(desired, T.TIME_ZERO);
 
   const collides = (start: Time): boolean => {
@@ -509,10 +520,22 @@ export function Timeline(): React.JSX.Element {
   }, [trackIds, sequenceId, sequence]);
 
   const tailSeconds = Math.max(T.toSeconds(duration()) + MIN_TAIL_SECONDS, MIN_TAIL_SECONDS);
-  // Whichever is longer: the material, or enough to reach the right-hand edge.
-  const contentWidth = Math.max(
-    Math.ceil(tailSeconds * pxPerSecond),
-    Math.ceil(paneWidth - HEADER_WIDTH),
+  /*
+   * Long enough for the material, for the window, and for wherever the view is
+   * scrolled to — see `timelineContentWidth` for why that last one is what stops an
+   * edit from dragging the viewport around behind the user.
+   *
+   * Reading the live scroll during render is safe here rather than in spite of the
+   * rules: the only renders that can shorten the timeline are the document's own,
+   * and on those the scroll offset is still the pre-edit one, which is exactly the
+   * position that needs protecting. Nothing needs to re-render on scroll for this
+   * to hold, which is the point — the horizontal scroll is deliberately a CSS
+   * variable rather than React state.
+   */
+  const contentWidth = timelineContentWidth(
+    tailSeconds * pxPerSecond,
+    paneWidth - HEADER_WIDTH,
+    scrollRef.current?.scrollLeft ?? 0,
   );
   const totalSeconds = contentWidth / pxPerSecond;
 
@@ -521,6 +544,8 @@ export function Timeline(): React.JSX.Element {
   const [transitionDrag, setTransitionDrag] = useState<TransitionDragState | null>(null);
   const [marquee, setMarquee] = useState<MarqueeState | null>(null);
   const [dropTrackId, setDropTrackId] = useState<TrackId | null>(null);
+  /** Where along the track the pointer is, for a drop that lands on it. */
+  const [dropClientX, setDropClientX] = useState<number | null>(null);
   /** Time+offset to restore after a zoom, so the pointer stays over the same frame. */
   const pendingAnchor = useRef<{ seconds: number; offset: number } | null>(null);
 
@@ -652,48 +677,6 @@ export function Timeline(): React.JSX.Element {
     [],
   );
 
-  /**
-   * Where a dropped asset would land, as a pixel rect, keyed by track.
-   *
-   * The pointer picks the track; the track picks the time. Media is appended after
-   * whatever is already on it, so a drop never lands mid-clip or opens a gap — the
-   * horizontal position of the pointer is deliberately ignored.
-   *
-   * Both the hovered track and its paired one get a ghost, because a clip with
-   * video and audio is placed on both — showing only the hovered lane implies the
-   * partner stream is being dropped somewhere unknown.
-   */
-  const dropGhosts = useMemo(() => {
-    if (!dropTrackId || !draggingAssetId) return null;
-    const asset = project.assets[draggingAssetId];
-    const hovered = project.tracks[dropTrackId];
-    if (!asset || !hovered) return null;
-
-    const duration = asset.video?.duration ?? asset.audio?.duration;
-    if (!duration || !T.isPositive(duration)) return null;
-
-    const hoveredCarries = Boolean(hovered.kind === 'video' ? asset.video : asset.audio);
-    if (!hoveredCarries) return null;
-
-    // The asset's other stream needs a track of its own; one may have to be created.
-    const needsPartner = Boolean(hovered.kind === 'video' ? asset.audio : asset.video);
-    const partnerId = needsPartner ? counterpartTrackId(project, sequenceId, dropTrackId) : null;
-
-    const trackIdsWithGhost: TrackId[] = [dropTrackId];
-    if (partnerId) trackIdsWithGhost.push(partnerId);
-
-    const start = appendPointFor(project, sequenceId, dropTrackId, Boolean(partnerId));
-    return {
-      trackIds: trackIdsWithGhost,
-      left: T.toSeconds(start) * pxPerSecond,
-      width: Math.max(2, T.toSeconds(duration) * pxPerSecond),
-      label: asset.name,
-      // Warn that a track will appear, since there is no lane to draw a ghost on.
-      newTrackNote: needsPartner && !partnerId
-        ? `+ new ${hovered.kind === 'video' ? 'audio' : 'video'} track`
-        : null,
-    };
-  }, [dropTrackId, draggingAssetId, project, sequenceId, pxPerSecond]);
 
   /** Which track lane sits under a viewport Y coordinate. */
   const trackAtClientY = useCallback((clientY: number): TrackId | null => {
@@ -751,13 +734,29 @@ export function Timeline(): React.JSX.Element {
   const gutterRef = useRef(0);
   const edgePointer = useRef({ clientX: 0, clientY: 0 });
   const edgeApply = useRef<((clientX: number, clientY: number) => void) | null>(null);
-  const edgeFrame = useRef<number | null>(null);
+
+  /*
+   * The loop is built once and reads the current frame body through a ref, because
+   * it owns the only handle on a booked frame — rebuilding it per render would
+   * strand whatever the previous one had scheduled.
+   */
+  const edgeBody = useRef<() => void>(() => {});
+  const edgeLoopRef = useRef<FrameLoop | null>(null);
+  if (edgeLoopRef.current === null) {
+    edgeLoopRef.current = createFrameLoop(
+      () => edgeBody.current(),
+      {
+        request: (callback) => requestAnimationFrame(callback),
+        cancel: (handle) => cancelAnimationFrame(handle),
+      },
+    );
+  }
+  const edgeLoop = edgeLoopRef.current;
 
   const stopEdgeScroll = useCallback((): void => {
-    if (edgeFrame.current !== null) cancelAnimationFrame(edgeFrame.current);
-    edgeFrame.current = null;
+    edgeLoop.stop();
     edgeApply.current = null;
-  }, []);
+  }, [edgeLoop]);
 
   const playheadHeadRef = useRef<HTMLDivElement>(null);
   const playheadLineRef = useRef<HTMLDivElement>(null);
@@ -804,8 +803,8 @@ export function Timeline(): React.JSX.Element {
     el.style.setProperty('--timeline-scroll-x', `${Math.round(el.scrollLeft)}px`);
   }, []);
 
+  /** One frame of edge scrolling. The loop owns the scheduling around it. */
   const edgeScrollTick = useCallback((): void => {
-    edgeFrame.current = null;
     if (!edgeApply.current) return;
 
     const { clientX, clientY } = edgePointer.current;
@@ -859,19 +858,20 @@ export function Timeline(): React.JSX.Element {
       edgeApply.current(clientX, clientY);
       paintHead(playback.get().position);
     }
-    edgeFrame.current = requestAnimationFrame(edgeScrollTick);
   }, [publishScrollX, paintHead]);
+
+  // The loop calls through this, so a re-created tick is picked up without the
+  // loop itself being rebuilt and losing the frame it has booked.
+  edgeBody.current = edgeScrollTick;
 
   /** Track the pointer for a gesture that may want the view to follow it. */
   const edgeScrollAt = useCallback(
     (clientX: number, clientY: number, apply?: (x: number, y: number) => void): void => {
       edgePointer.current = { clientX, clientY };
       if (apply) edgeApply.current = apply;
-      if (edgeApply.current && edgeFrame.current === null) {
-        edgeFrame.current = requestAnimationFrame(edgeScrollTick);
-      }
+      if (edgeApply.current) edgeLoop.start();
     },
-    [edgeScrollTick],
+    [edgeLoop],
   );
 
   useEffect(() => stopEdgeScroll, [stopEdgeScroll]);
@@ -933,6 +933,27 @@ export function Timeline(): React.JSX.Element {
     );
   }, []);
 
+  /**
+   * Put a time from the pointer onto the frame grid.
+   *
+   * A pixel offset divided by the zoom is a float, and the exact rational nearest
+   * to it can have any denominator up to a hundred thousand. Adding two rationals
+   * takes the lowest common multiple of their denominators, and a drag adds its
+   * delta to the start it produced last time — so with the zoom drifting between
+   * drags the denominators are coprime and multiply, 16 thousand to 1.6 billion to
+   * 3.7 trillion, until the exact result no longer fits a double and every edit
+   * throws. Long before that the arithmetic has fallen back to BigInt and the drag
+   * has gone sluggish.
+   *
+   * Landing on the frame grid keeps a denominator small and, more to the point,
+   * the *same* one every time, so it cannot compound. It is also where a cut
+   * belongs: there is no such thing as a picture edit between two frames.
+   */
+  const onFrameGrid = useCallback(
+    (at: Time): Time => T.snapToFrame(at, frameRate),
+    [frameRate],
+  );
+
   const timeAtClientX = useCallback(
     (clientX: number): Time => {
       const el = scrollRef.current;
@@ -940,9 +961,9 @@ export function Timeline(): React.JSX.Element {
       const rect = el.getBoundingClientRect();
       // The header column scrolls with the lanes now, so subtract its width.
       const x = clampToContent(clientX) - rect.left + el.scrollLeft - HEADER_WIDTH;
-      return T.max(T.TIME_ZERO, T.fromSeconds(x / pxPerSecond, 100_000));
+      return T.max(T.TIME_ZERO, onFrameGrid(T.fromSeconds(x / pxPerSecond, 100_000)));
     },
-    [pxPerSecond, clampToContent],
+    [pxPerSecond, clampToContent, onFrameGrid],
   );
 
   /**
@@ -979,6 +1000,96 @@ export function Timeline(): React.JSX.Element {
     },
     [pxPerSecond, project, trackIds],
   );
+
+  /**
+   * Where a bin item dropped here would start.
+   *
+   * Dropping is a pointing gesture, so the point is what decides it. This used to
+   * ignore the pointer's x entirely and append after whatever the track already
+   * held, which is the behaviour of an *append* command rather than of a drag —
+   * every editor places dragged media where it is dropped, and keeps append as a
+   * key you press on purpose.
+   *
+   * The clip's head goes under the pointer, then snaps to the same edges an
+   * in-timeline drag snaps to, then butts against whatever is already there rather
+   * than overwriting it — the same bargain `clampToFreeSpace` gives a clip being
+   * dragged, and the reason a drop can still never destroy anything.
+   */
+  const assetDropStart = useCallback(
+    (clientX: number, trackIds: readonly TrackId[], duration: Time): Time => {
+      const wanted = snap(timeAtClientX(clientX), NO_CLIPS).at;
+      return clampToFreeSpace(project, trackIds, wanted, duration, NO_CLIPS);
+    },
+    [snap, timeAtClientX, project],
+  );
+
+  /**
+   * The start a drop of this asset on this track would take, or null when there is
+   * nothing droppable — the store reports why in that case, so this only decides
+   * position and stays out of the argument about whether it can go there at all.
+   */
+  const dropStartFor = useCallback(
+    (assetId: AssetId, trackId: TrackId, clientX: number): Time | null => {
+      const asset = project.assets[assetId];
+      const track = project.tracks[trackId];
+      if (!asset || !track) return null;
+
+      const duration = asset.video?.duration ?? asset.audio?.duration;
+      if (!duration || !T.isPositive(duration)) return null;
+
+      // A clip carrying both streams takes up its paired lane at the same moment, so
+      // what is on that lane has a say in where the pair fits.
+      const needsPartner = Boolean(track.kind === 'video' ? asset.audio : asset.video);
+      const partnerId = needsPartner ? counterpartTrackId(project, sequenceId, trackId) : null;
+      return assetDropStart(clientX, partnerId ? [trackId, partnerId] : [trackId], duration);
+    },
+    [project, sequenceId, assetDropStart],
+  );
+
+  /**
+   * Where a dropped asset would land, as a pixel rect, keyed by track.
+   *
+   * Computed through `assetDropStart`, the same function the drop itself uses, so
+   * the ghost cannot promise a position the drop will not take.
+   *
+   * Both the hovered track and its paired one get a ghost, because a clip with
+   * video and audio is placed on both — showing only the hovered lane implies the
+   * partner stream is being dropped somewhere unknown.
+   */
+  const dropGhosts = useMemo(() => {
+    if (!dropTrackId || !draggingAssetId) return null;
+    const asset = project.assets[draggingAssetId];
+    const hovered = project.tracks[dropTrackId];
+    if (!asset || !hovered) return null;
+
+    const duration = asset.video?.duration ?? asset.audio?.duration;
+    if (!duration || !T.isPositive(duration)) return null;
+
+    const hoveredCarries = Boolean(hovered.kind === 'video' ? asset.video : asset.audio);
+    if (!hoveredCarries) return null;
+
+    // The asset's other stream needs a track of its own; one may have to be created.
+    const needsPartner = Boolean(hovered.kind === 'video' ? asset.audio : asset.video);
+    const partnerId = needsPartner ? counterpartTrackId(project, sequenceId, dropTrackId) : null;
+
+    const trackIdsWithGhost: TrackId[] = [dropTrackId];
+    if (partnerId) trackIdsWithGhost.push(partnerId);
+
+    const start =
+      dropClientX === null
+        ? appendPointFor(project, sequenceId, dropTrackId, Boolean(partnerId))
+        : assetDropStart(dropClientX, trackIdsWithGhost, duration);
+    return {
+      trackIds: trackIdsWithGhost,
+      left: T.toSeconds(start) * pxPerSecond,
+      width: Math.max(2, T.toSeconds(duration) * pxPerSecond),
+      label: asset.name,
+      // Warn that a track will appear, since there is no lane to draw a ghost on.
+      newTrackNote: needsPartner && !partnerId
+        ? `+ new ${hovered.kind === 'video' ? 'audio' : 'video'} track`
+        : null,
+    };
+  }, [dropTrackId, dropClientX, draggingAssetId, project, sequenceId, pxPerSecond, assetDropStart]);
 
   /**
    * Where a new track would go for a clip of this kind, or null to drop normally.
@@ -1179,11 +1290,15 @@ export function Timeline(): React.JSX.Element {
             ? hovered
             : drag.originTrackId;
 
-        const snapped = snap(T.max(T.TIME_ZERO, T.add(drag.originStart, delta)), excluded);
+        // Quantised before snapping, not after: an edge caught by `snap` is another
+        // clip's own start, which is already where it wants to be, and rounding that
+        // to the grid afterwards would open a sliver between two clips meant to butt.
+        const wantedRaw = onFrameGrid(T.max(T.TIME_ZERO, T.add(drag.originStart, delta)));
+        const snapped = snap(wantedRaw, excluded);
         const wanted = snapped.at;
         // Butt up against whatever is already on the destination track rather than
         // overwriting it.
-        const target = clampToFreeSpace(project, destination, wanted, clip.duration, excluded);
+        const target = clampToFreeSpace(project, [destination], wanted, clip.duration, excluded);
 
         // The readout reports the position actually taken — after snapping and after
         // being clamped off a neighbour — not where the pointer happens to be.
@@ -1227,7 +1342,7 @@ export function Timeline(): React.JSX.Element {
           const moving = project.clips[m.clipId];
           if (!moving) return false;
           return !T.eq(
-            clampToFreeSpace(project, m.toTrackId, m.toStart, moving.duration, excluded),
+            clampToFreeSpace(project, [m.toTrackId], m.toStart, moving.duration, excluded),
             m.toStart,
           );
         });
@@ -1243,7 +1358,7 @@ export function Timeline(): React.JSX.Element {
       // absolute edge would land before another clip's start and be rejected.
       const edge: 'in' | 'out' = drag.kind === 'trim-in' ? 'in' : 'out';
       const anchor = edge === 'in' ? drag.originStart : T.add(drag.originStart, drag.originDuration);
-      const snapped = snap(T.add(anchor, delta), excluded);
+      const snapped = snap(onFrameGrid(T.add(anchor, delta)), excluded);
       const shift = T.sub(snapped.at, anchor);
 
       const commands: Command[] = drag.groupIds
@@ -2264,7 +2379,16 @@ export function Timeline(): React.JSX.Element {
           event.preventDefault();
           setAssetInsertion(null);
           const target = assetInsertionFor(side);
-          if (target) dropAssetOnNewTrack(assetId as never, target.trackKind, target.index);
+          // The track being made is empty, so the pointer's time needs no clamping
+          // — only the snapping every other drop gets.
+          if (target) {
+            dropAssetOnNewTrack(
+              assetId as never,
+              target.trackKind,
+              target.index,
+              snap(timeAtClientX(event.clientX), NO_CLIPS).at,
+            );
+          }
         }}
       >
         <div className="tail-header" style={{ width: HEADER_WIDTH }} />
@@ -2293,7 +2417,14 @@ export function Timeline(): React.JSX.Element {
   };
 
   return (
-    <div className="timeline" ref={scrollRef}>
+    <div
+      className="timeline"
+      ref={scrollRef}
+      // Published so the stylesheet can measure the header column too. The lanes
+      // are clipped against it and the resize seam draws from it, and both must
+      // agree with the width the headers are actually laid out at.
+      style={{ ["--timeline-header-width" as string]: `${HEADER_WIDTH}px` } as React.CSSProperties}
+    >
       {/*
         The outer container owns the one shared horizontal time axis. Its wide child
         creates the scrollbar; the sticky shell remains viewport-sized while each
@@ -2431,6 +2562,7 @@ export function Timeline(): React.JSX.Element {
                     event.preventDefault();
                     event.dataTransfer.dropEffect = 'copy';
                     setDropTrackId(trackId);
+                    setDropClientX(event.clientX);
                   }}
                   onDragLeave={(event) => {
                     if (event.currentTarget.contains(event.relatedTarget as Node)) return;
@@ -2438,12 +2570,19 @@ export function Timeline(): React.JSX.Element {
                   }}
                   onDrop={(event) => {
                     const assetId = event.dataTransfer.getData(ASSET_DRAG_TYPE);
+                    // Read before the state is cleared: this is the position the
+                    // ghost has been promising all the way in.
+                    const at = dropStartFor(assetId as AssetId, trackId, event.clientX);
                     setDropTrackId(null);
+                    setDropClientX(null);
                     if (!assetId) return;
                     event.preventDefault();
-                    dropAssetOnTrack(assetId as never, trackId);
+                    dropAssetOnTrack(assetId as never, trackId, at ?? undefined);
                   }}
-                  onDragEnd={() => setDropTrackId(null)}
+                  onDragEnd={() => {
+                    setDropTrackId(null);
+                    setDropClientX(null);
+                  }}
                   onPointerDown={(event) => {
                     // Only from bare lane: a clip or a badge handles its own.
                     if (event.target !== event.currentTarget) return;

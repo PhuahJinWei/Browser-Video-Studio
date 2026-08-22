@@ -24,6 +24,7 @@ import { generateProxy as encodeProxy } from '../engine/proxy';
 import { PreviewStore } from '../engine/previewStore';
 import { apply, type Command, type NewClipSpec } from '../model/commands';
 import { normaliseFolder } from '../model/commands/handlers';
+import { repairProjectTimes } from '../model/repairTimes';
 import { randomIdSource } from '../model/ids';
 import { createProject } from '../model/factories';
 import {
@@ -96,6 +97,23 @@ import {
 } from '../storage/projectStore';
 
 const ids = randomIdSource;
+
+/*
+ * Selecting in one panel drops the selection in the other.
+ *
+ * Clip, track and transition selection were already exclusive, for the inspector's
+ * sake. The library was left out of that, so a media item stayed lit while a clip
+ * was picked on the timeline — two live selections at once, and Delete meaning
+ * whichever panel happened to hold focus, which is not something the screen shows.
+ * A file selected in the library and forgotten there is one keypress from taking
+ * every clip cut from it, because removing media offers to remove its clips too.
+ *
+ * Track selection is deliberately *not* cleared by picking media: a chosen track is
+ * the destination a three-point edit sends the source to, so the two are meant to
+ * be held at the same time.
+ */
+const NO_ASSETS = { selectedAssetIds: [], assetSelectionAnchor: null } as const;
+const NO_CLIPS = { selection: [], selectionAnchor: null } as const;
 
 /** Hand a blob to the browser as a download. */
 function downloadBlob(blob: Blob, fileName: string): void {
@@ -363,7 +381,7 @@ export interface StudioState {
     },
   ) => void;
   /** Place an asset on a track created for it at `index` — the media-bin half of the same gesture. */
-  dropAssetOnNewTrack: (assetId: AssetId, kind: TrackKind, index: number) => void;
+  dropAssetOnNewTrack: (assetId: AssetId, kind: TrackKind, index: number, start?: Time) => void;
 
   /** Capture the visible program/source frame into the media library. */
   captureFrame: () => Promise<void>;
@@ -430,7 +448,14 @@ export interface StudioState {
     duration: Time,
     label?: string,
   ) => boolean;
-  dropAssetOnTrack: (assetId: AssetId, trackId: TrackId) => void;
+  /**
+   * Place an asset on an existing track.
+   *
+   * `start` is where the drop pointed; without it the clip is appended after
+   * whatever the track already holds, which is what the bin's own "add to
+   * timeline" action wants and what a drag deliberately does not.
+   */
+  dropAssetOnTrack: (assetId: AssetId, trackId: TrackId, start?: Time) => void;
   setDraggingAsset: (assetId: AssetId | null) => void;
   newProject: () => void;
   togglePlay: () => Promise<void>;
@@ -675,7 +700,7 @@ export const useStudio = create<StudioState>((set, get) => ({
   canRedoEdit: () => canRedo(get().history),
 
   selectExact: (clipIds) =>
-    set({ selection: clipIds, selectedTrackId: null, selectedTransitionId: null }),
+    set({ selection: clipIds, selectedTrackId: null, selectedTransitionId: null, ...NO_ASSETS }),
 
   /**
    * Clip, track and transition selection are mutually exclusive: the inspector
@@ -700,6 +725,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       selectedTrackId: null,
       selectedTransitionId: null,
       selectionAnchor: clipIds[0] ?? null,
+      ...NO_ASSETS,
     }),
 
   selectRangeTo: (clipId) => {
@@ -730,6 +756,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       selectedTransitionId: null,
       // The anchor stays put, so shift-clicking again re-measures from it.
       selectionAnchor: anchorId ?? null,
+      ...NO_ASSETS,
     });
   },
 
@@ -741,6 +768,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       selection: [...existing, ...found.filter((id) => !existing.includes(id))],
       selectedTrackId: null,
       selectedTransitionId: null,
+      ...NO_ASSETS,
     });
   },
 
@@ -753,13 +781,14 @@ export const useStudio = create<StudioState>((set, get) => ({
       selection: alreadyIn
         ? selection.filter((id) => !unit.includes(id))
         : [...selection, ...unit.filter((id) => !selection.includes(id))],
+      ...NO_ASSETS,
     });
   },
 
   // ------------------------------------------------------------------ library
 
   selectAssets: (assetIds) =>
-    set({ selectedAssetIds: assetIds, assetSelectionAnchor: assetIds[0] ?? null }),
+    set({ selectedAssetIds: assetIds, assetSelectionAnchor: assetIds[0] ?? null, ...NO_CLIPS }),
 
   toggleSelectAsset: (assetId) => {
     const current = get().selectedAssetIds;
@@ -768,6 +797,7 @@ export const useStudio = create<StudioState>((set, get) => ({
         ? current.filter((id) => id !== assetId)
         : [...current, assetId],
       assetSelectionAnchor: assetId,
+      ...NO_CLIPS,
     });
   },
 
@@ -778,13 +808,14 @@ export const useStudio = create<StudioState>((set, get) => ({
 
     // Nothing to measure from, or the anchor has been filtered out of view.
     if (from < 0 || to < 0) {
-      set({ selectedAssetIds: [assetId], assetSelectionAnchor: assetId });
+      set({ selectedAssetIds: [assetId], assetSelectionAnchor: assetId, ...NO_CLIPS });
       return;
     }
     set({
       selectedAssetIds: ordered.slice(Math.min(from, to), Math.max(from, to) + 1),
       // The anchor stays put, so shift-clicking again re-measures from it.
       assetSelectionAnchor: anchor ?? null,
+      ...NO_CLIPS,
     });
   },
 
@@ -807,6 +838,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       assetSelectionAnchor: assetId,
       status: `Previewing source "${asset.name}".`,
       error: null,
+      ...NO_CLIPS,
     });
   },
 
@@ -1343,6 +1375,7 @@ export const useStudio = create<StudioState>((set, get) => ({
 
     const placement = planPlacement(project, state.sequenceId, asset, anchorTrackId);
     get().runMany(placement.commands, `Add "${asset.name}"`);
+    get().select(placement.clipIds);
     set({ status: `Added "${asset.name}"${placementNotes(placement)}` });
     get().engine?.requestRender(placement.start);
   },
@@ -1357,6 +1390,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       name: text.slice(0, 24) || 'Title',
     });
     state.runMany(plan.commands, 'Add title');
+    get().select([plan.clipId]);
     set({
       status: plan.createdTrack
         ? 'Added a title on a new track above — the one below was busy at the playhead.'
@@ -1473,6 +1507,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       fill,
     });
     state.runMany(plan.commands, 'Add colour');
+    get().select([plan.clipId]);
     set({
       status: plan.createdTrack
         ? 'Added a colour on a new track above — the one below was busy at the playhead.'
@@ -1487,7 +1522,7 @@ export const useStudio = create<StudioState>((set, get) => ({
    * pointer, so dropping never lands mid-clip or leaves an accidental gap. The
    * pointer chooses the track; the track chooses the time.
    */
-  dropAssetOnTrack: (assetId, trackId) => {
+  dropAssetOnTrack: (assetId, trackId, start) => {
     const state = get();
     const project = state.project();
     const asset = project.assets[assetId];
@@ -1509,8 +1544,12 @@ export const useStudio = create<StudioState>((set, get) => ({
       return;
     }
 
-    const placement = planPlacement(project, state.sequenceId, asset, trackId);
+    const placement = planPlacement(project, state.sequenceId, asset, trackId, start ? { start } : {});
     get().runMany(placement.commands, `Add "${asset.name}"`);
+    // The clip is the subject now, not the library item it came from. Leaving the
+    // media lit meant the thing you had just placed was not the thing selected, and
+    // since selection is exclusive this hands the highlight over in one move.
+    get().select(placement.clipIds);
     set({ status: `Added "${asset.name}"${placementNotes(placement)}` });
   },
 
@@ -1559,7 +1598,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     );
   },
 
-  dropAssetOnNewTrack: (assetId, kind, index) => {
+  dropAssetOnNewTrack: (assetId, kind, index, start) => {
     const state = get();
     const project = state.project();
     const asset = project.assets[assetId];
@@ -1585,8 +1624,9 @@ export const useStudio = create<StudioState>((set, get) => ({
       return;
     }
 
-    const placement = planPlacement(withTrack, state.sequenceId, asset, trackId);
+    const placement = planPlacement(withTrack, state.sequenceId, asset, trackId, start ? { start } : {});
     state.runMany([addTrack, ...placement.commands], `Add "${asset.name}"`);
+    get().select(placement.clipIds);
     set({
       status: `Added "${asset.name}" on a new ${kind} track${placementNotes(placement)}`,
     });
@@ -1636,7 +1676,7 @@ export const useStudio = create<StudioState>((set, get) => ({
         new File([blob], fileName, { type: 'image/png' }),
       ]);
       if (capturedId) {
-        set({ selectedAssetIds: [capturedId], assetSelectionAnchor: capturedId });
+        set({ selectedAssetIds: [capturedId], assetSelectionAnchor: capturedId, ...NO_CLIPS });
         window.dispatchEvent(
           new CustomEvent('bvs:reveal-asset', { detail: { assetId: capturedId } }),
         );
@@ -2018,10 +2058,15 @@ async function adopt(
   loaded: LoadedProject,
   verb: string,
 ): Promise<void> {
+  // Repair any time whose denominator has grown past working with, before anything
+  // touches the document — one edit on such a value throws, and the throw used to
+  // take the whole window with it. Almost always a no-op; see `repairProjectTimes`.
+  const repair = repairProjectTimes(loaded.project);
+
   // Record what could not be found on the assets themselves, before the history
   // is seeded. Done here rather than through `run` because it is not an edit:
   // nobody should be able to undo the discovery that a file has gone.
-  let project = loaded.project;
+  let project = repair.project;
   for (const assetId of loaded.missingAssetIds) {
     project = apply(project, { type: 'setAssetStatus', assetId, status: { state: 'missing' } }, ids);
   }
@@ -2070,10 +2115,17 @@ async function adopt(
     // Nothing has been edited yet, so the indicator must not claim a save that
     // belongs to whatever was open before.
     saveState: 'idle',
-    status:
+    // Both notes, not whichever one is checked first: a repair said out loud is the
+    // point of doing it — the values moved by up to half a frame — and a missing
+    // file must not be what hides that.
+    status: [
+      `${verb} "${project.name}"`,
       loaded.missingAssetIds.length > 0
-        ? `${verb} "${project.name}" — ${loaded.missingAssetIds.length} file(s) need re-importing.`
-        : `${verb} "${project.name}".`,
+        ? ` — ${loaded.missingAssetIds.length} file(s) need re-importing`
+        : '',
+      repair.repaired > 0 ? ` — ${repair.repaired} time(s) realigned to the frame grid` : '',
+      '.',
+    ].join(''),
   });
 
   const engine = get().engine;
@@ -2248,16 +2300,22 @@ function bareCutNearPlayhead(
 function planGenerated(
   project: Project,
   sequenceId: SequenceId,
-  clip: NewClipSpec,
-): { commands: Command[]; createdTrack: boolean } {
+  spec: NewClipSpec,
+): { commands: Command[]; createdTrack: boolean; clipId: ClipId } {
   const sequence = getSequence(project, sequenceId);
   const top = sequence.videoTrackIds[sequence.videoTrackIds.length - 1];
-  const range = T.rangeFromBounds(clip.start, T.add(clip.start, clip.duration));
+  const range = T.rangeFromBounds(spec.start, T.add(spec.start, spec.duration));
+
+  // Named here rather than left to the handler, so the caller can select the thing
+  // it just made — the same reason `planPlacement` names the clips it inserts.
+  const clipId = spec.clipId ?? ids.clip();
+  const clip: NewClipSpec = { ...spec, clipId };
 
   if (top !== undefined && clipsWithin(project, [top], range).length === 0) {
     return {
       commands: [{ type: 'insertClip', trackId: top, mode: 'overwrite', clip }],
       createdTrack: false,
+      clipId,
     };
   }
 
@@ -2274,12 +2332,21 @@ function planGenerated(
       { type: 'insertClip', trackId, mode: 'overwrite', clip },
     ],
     createdTrack: true,
+    clipId,
   };
 }
 
 export interface PlacementPlan {
   readonly commands: readonly Command[];
   readonly start: Time;
+  /**
+   * The clips this plan inserts — one, or two for a linked picture and sound.
+   *
+   * Named up front so the caller can select what it just made. Reading them back
+   * off the document afterwards would mean diffing it, which is guesswork the plan
+   * does not need to leave anyone to do.
+   */
+  readonly clipIds: readonly ClipId[];
   /** Name of a track that had to be created, for the status line. */
   readonly createdTrackName: string | null;
   /** The sequence took its format from this clip, for the status line. */
@@ -2442,6 +2509,9 @@ export function planPlacement(
   const frame = adoptedFormat?.size ?? sequence.size;
   const scale = source ? fitScale(source, frame) : 1;
   const visualClipId = ids.clip();
+  const audioClipId = ids.clip();
+  const idFor = (kind: 'video' | 'audio' | 'image'): ClipId =>
+    kind === 'audio' ? audioClipId : visualClipId;
 
   const clipFor = (kind: 'video' | 'audio' | 'image'): NewClipSpec => ({
     kind,
@@ -2450,23 +2520,28 @@ export function planPlacement(
     duration,
     ...(options.sourceIn ? { sourceIn: options.sourceIn } : {}),
     name: asset.name,
-    // Only the picture needs an id up front, to scale it in the same batch.
-    ...(kind === 'audio' ? {} : { clipId: visualClipId }),
+    // The picture needs its id up front to be scaled in the same batch; the sound
+    // is named for the same reason both are: so the caller can select them.
+    clipId: idFor(kind),
     ...(usesPartner ? { linkGroupId } : {}),
   });
 
+  const primaryKind = track.kind === 'video' ? visualKind : 'audio';
+  const clipIds: ClipId[] = [idFor(primaryKind)];
   commands.push({
     type: 'insertClip',
     trackId,
     mode: options.mode ?? 'overwrite',
-    clip: clipFor(track.kind === 'video' ? visualKind : 'audio'),
+    clip: clipFor(primaryKind),
   });
   if (usesPartner && partnerTrackId) {
+    const otherKind = partnerKind === 'video' ? visualKind : 'audio';
+    clipIds.push(idFor(otherKind));
     commands.push({
       type: 'insertClip',
       trackId: partnerTrackId,
       mode: options.mode ?? 'overwrite',
-      clip: clipFor(partnerKind === 'video' ? visualKind : 'audio'),
+      clip: clipFor(otherKind),
     });
   }
 
@@ -2485,6 +2560,7 @@ export function planPlacement(
   return {
     commands,
     start,
+    clipIds,
     createdTrackName,
     adoptedFormat,
     fittedScale: fitted ? scale : null,

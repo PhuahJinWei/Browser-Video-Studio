@@ -49,23 +49,41 @@ export function edgeScrollDelta(axis: EdgeScrollAxis, tuning: EdgeScrollTuning =
   const { band, maxStep } = tuning;
   if (band <= 0 || maxStep <= 0) return 0;
 
-  const start = axis.start + (axis.inset ?? 0);
+  const inset = axis.inset ?? 0;
+  const start = axis.start + inset;
   const fromStart = axis.pointer - start;
   const fromEnd = axis.end - axis.pointer;
 
   // Past the edge entirely — dragged beyond the window — runs at full speed rather
   // than wrapping round to nothing, which is what a negative distance would do.
-  const speed = (distance: number): number =>
-    Math.ceil(maxStep * Math.min(1, Math.max(0, 1 - distance / band)));
+  const speed = (distance: number, runway: number): number =>
+    Math.ceil(maxStep * Math.min(1, Math.max(0, 1 - distance / runway)));
 
   if (fromStart < band) {
+    /*
+     * Eased over the inset as well as the band.
+     *
+     * Where a view has nothing in front of it the two edges are alike: full speed
+     * needs the pointer hard against the window, which takes deliberate aim, so in
+     * ordinary use you get a fraction of it. The timeline's leading edge is not like
+     * that — the track headers stand in front of it, and measuring the ramp from
+     * their inner edge put maximum speed on the near side of a 216px-wide target
+     * that a leftward drag lands on constantly. One pixel of overshoot and the view
+     * went from still to eighteen pixels a frame, which is no way to place a cut.
+     *
+     * So the ramp is measured from the view's real edge and runs the whole width of
+     * the headers: a graze of the header is a couple of pixels a frame, halfway
+     * across is half speed, and full speed still means the window's edge — the same
+     * bargain the trailing edge offers. Where there is no inset this is exactly the
+     * old behaviour.
+     */
     // Never negative zero: callers compare the result against zero to decide whether
     // anything moved, and `-0` is a value that looks like motion and is not.
-    const room = Math.min(speed(fromStart), axis.scroll);
+    const room = Math.min(speed(axis.pointer - axis.start, band + inset), axis.scroll);
     return room <= 0 ? 0 : -room;
   }
   if (fromEnd < band) {
-    const step = speed(fromEnd);
+    const step = speed(fromEnd, band);
     return step === 0 ? 0 : Math.min(step, Math.max(0, axis.maxScroll - axis.scroll));
   }
   return 0;
@@ -92,4 +110,64 @@ export function pageScrollTo(
 
   const wanted = Math.max(0, Math.min(view.maxScroll, position - margin));
   return wanted === view.scroll ? null : wanted;
+}
+
+/** Somewhere to schedule frames — the window, or a test's stand-in. */
+export interface FrameHost {
+  request(callback: () => void): number;
+  cancel(handle: number): void;
+}
+
+export interface FrameLoop {
+  /** Begin ticking, or do nothing if already running. */
+  start(): void;
+  /** Stop ticking and drop any frame already booked. */
+  stop(): void;
+  readonly running: boolean;
+}
+
+/**
+ * A self-perpetuating animation-frame loop that runs its body once per frame.
+ *
+ * The subtlety this exists for is re-entrancy. An edge-scroll tick re-runs the
+ * gesture it is scrolling for, and that gesture reports its pointer back — so the
+ * body calls `start` again from inside itself, every frame. Tracking "am I running"
+ * by whether a frame handle is currently booked cannot survive that: the handle is
+ * necessarily null *during* the body, so the nested call read the loop as stopped
+ * and booked a second frame, and the body then booked a third on the way out and
+ * overwrote the handle for the second. One loop became two, two became four, and
+ * the orphans could not be cancelled because nothing held their handles. A drag
+ * that touched the edge of the timeline went to pieces within a second.
+ *
+ * So running is its own flag, set for the whole of the body rather than inferred
+ * from the schedule.
+ */
+export function createFrameLoop(body: () => void, host: FrameHost): FrameLoop {
+  let handle: number | null = null;
+  let active = false;
+
+  const step = (): void => {
+    handle = null;
+    if (!active) return;
+    body();
+    // `body` may have stopped the loop, or started one from inside itself; either
+    // way there is exactly one frame after this one.
+    if (active && handle === null) handle = host.request(step);
+  };
+
+  return {
+    start(): void {
+      if (active) return;
+      active = true;
+      if (handle === null) handle = host.request(step);
+    },
+    stop(): void {
+      active = false;
+      if (handle !== null) host.cancel(handle);
+      handle = null;
+    },
+    get running(): boolean {
+      return active;
+    },
+  };
 }
